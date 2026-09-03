@@ -429,6 +429,10 @@ func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, 
 		if recorder != nil {
 			recorder.CountConnectionOpened()
 			attribution := d.dialAttribution(ctx, destination)
+			outboundCounter := recorder.TrafficCounter(powerreport.TrafficOutbound, attribution.Outbound)
+			dnsCounter := recorder.TrafficCounter(powerreport.TrafficDNSTransport, attribution.DNS)
+			outboundCounter.CountDial()
+			dnsCounter.CountDial()
 			conn = bufio.NewCounterConn(conn, []N.CountFunc{func(n int64) {
 				recorder.Touch(powerreport.DirectionInbound, int(n), attribution)
 			}}, []N.CountFunc{func(n int64) {
@@ -451,6 +455,10 @@ func (d *DefaultDialer) trackPacketConn(ctx context.Context, destination M.Socks
 		if recorder != nil {
 			recorder.CountConnectionOpened()
 			attribution := d.dialAttribution(ctx, destination)
+			outboundCounter := recorder.TrafficCounter(powerreport.TrafficOutbound, attribution.Outbound)
+			dnsCounter := recorder.TrafficCounter(powerreport.TrafficDNSTransport, attribution.DNS)
+			outboundCounter.CountDial()
+			dnsCounter.CountDial()
 			conn = bufio.NewNetPacketConn(bufio.NewCounterPacketConn(bufio.NewPacketConn(conn), []N.CountFunc{func(n int64) {
 				recorder.Touch(powerreport.DirectionInbound, int(n), attribution)
 			}}, []N.CountFunc{func(n int64) {

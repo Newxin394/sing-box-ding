@@ -27,7 +27,11 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.VMessOutboundOptions](registry, C.TypeVMess, NewOutbound)
 }
 
-var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+var (
+	_ adapter.OutboundWithMultiplex   = (*Outbound)(nil)
+	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+	_ adapter.IdleConnectionKeeper    = (*Outbound)(nil)
+)
 
 type Outbound struct {
 	outbound.Adapter
@@ -108,7 +112,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 }
 
 func (h *Outbound) MultiplexEnabled() bool {
-	return h.multiplexDialer != nil
+	if h.multiplexDialer != nil {
+		return true
+	}
+	multiplexTransport, isMultiplexTransport := h.transport.(adapter.V2RayMultiplexClientTransport)
+	return isMultiplexTransport && multiplexTransport.MultiplexEnabled()
 }
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
@@ -117,6 +125,26 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	}
 	if h.multiplexDialer != nil {
 		h.multiplexDialer.Reset()
+	}
+}
+
+func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	transportKeeper, isTransportKeeper := h.transport.(adapter.IdleConnectionKeeper)
+	if isTransportKeeper {
+		transportKeeper.SetKeepIdleConnections(keep)
+	}
+	if h.multiplexDialer != nil {
+		h.multiplexDialer.SetKeepIdleConnections(keep)
+	}
+}
+
+func (h *Outbound) CloseIdleConnections() {
+	transportKeeper, isTransportKeeper := h.transport.(adapter.IdleConnectionKeeper)
+	if isTransportKeeper {
+		transportKeeper.CloseIdleConnections()
+	}
+	if h.multiplexDialer != nil {
+		h.multiplexDialer.CloseIdleConnections()
 	}
 }
 

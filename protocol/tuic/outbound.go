@@ -30,7 +30,11 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.TUICOutboundOptions](registry, C.TypeTUIC, NewOutbound)
 }
 
-var _ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+var (
+	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+	_ adapter.IdleConnectionKeeper    = (*Outbound)(nil)
+	_ adapter.OutboundWithMultiplex   = (*Outbound)(nil)
+)
 
 type Outbound struct {
 	outbound.Adapter
@@ -144,6 +148,18 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 
 func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	_ = h.client.CloseWithError(E.New("network changed"))
+}
+
+func (h *Outbound) MultiplexEnabled() bool {
+	return true
+}
+
+func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	h.client.SetKeepIdleConnections(keep)
+}
+
+func (h *Outbound) CloseIdleConnections() {
+	h.client.CloseIdleConnections()
 }
 
 func (h *Outbound) Close() error {
