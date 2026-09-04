@@ -1,7 +1,7 @@
 # ding-direct 免流通道支持 —— 修改说明与致谢
 
 本仓库（`sing-box-ding`）在 CHIZI-0618/sing-box 的 `testing-ebpf-tc-rewrite` 分支基础上，
-新增了对 HTTP CONNECT 代理「钉钉直连（ding-direct）」免流通道的支持。
+新增了对 HTTP CONNECT 代理「直连（ding-direct）的支持。
 
 ## 修改了什么
 
@@ -15,14 +15,12 @@
 拼到 CONNECT 请求行的目标后面，形成这样的报文：
 
 ```
-CONNECT api.example.com:443@gw.alicdn.com HTTP/1.1
-Host: 153.3.236.22:443
+CONNECT xxxxxx:443@xxxxxxx HTTP/1.1
+Host: xxxxxxxx:443
 X-T5-Auth: 683556433
 ```
 
 原理：代理端按 `userinfo@host` 解析，取 `@` 前面作为真实目标去转发；
-而按免流网关（DPI）则读到 `@` 后面的 `gw.alicdn.com`，从而把流量识别为免流通道。
-
 > 未配置 `With-At` 头时，行为与原版完全一致（字节级相同），不影响正常使用。
 
 ## 使用方法
@@ -32,17 +30,17 @@ X-T5-Auth: 683556433
 ```jsonc
 {
   "type": "http",
-  "server": "180.101.50.208",
+  "server": "xxxxxxx",
   "server_port": 443,
   "headers": {
-    "Host":       "153.3.236.22:443",
+    "Host":       "xxxxxx",
     "X-T5-Auth":  "683556433",
-    "With-At":    "gw.alicdn.com"
+    "With-At":    "xxxxxxx"
   }
 }
 ```
 
-注意：`Host` 与 `X-T5-Auth` 不可省略（二者缺一即 403），`With-At` 为钉钉直连叠加项。
+注意：`Host` 与 `X-T5-Auth` 不可省略（二者缺一即 403），`With-At` 为直连叠加项。
 
 ## 代码来源与致谢
 
