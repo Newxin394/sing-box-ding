@@ -59,12 +59,13 @@ type tcInterfaceAttachment struct {
 }
 
 type tcDeliveryLink struct {
-	redirectName string
-	deliveryName string
-	redirect     netlink.Link
-	delivery     netlink.Link
-	filter       *netlink.BpfFilter
-	sysctls      []tcSysctlState
+	redirectName  string
+	deliveryName  string
+	redirect      netlink.Link
+	delivery      netlink.Link
+	filter        *netlink.BpfFilter
+	sysctls       []tcSysctlState
+	globalSysctls []tcSysctlState
 }
 
 type tcSysctlState struct {
@@ -502,6 +503,7 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 		)
 	}
 	previousDelivery := d.delivery
+	handoffTCGlobalSysctls(previousDelivery, delivery)
 	d.delivery = delivery
 	if err = previousDelivery.Close(); err != nil {
 		return true, E.Errors(routingErr, E.Cause(err, "remove stale TC eBPF delivery link"))
@@ -594,7 +596,7 @@ func (d *tcDeliveryLink) repair(backend *commonEBPF.TCBackend, priority uint16) 
 		return changed, false, err
 	}
 	if len(aggregateStates) > 0 {
-		d.sysctls = append(d.sysctls, aggregateStates...)
+		d.globalSysctls = append(d.globalSysctls, aggregateStates...)
 		changed = true
 	}
 	return changed, false, nil
@@ -1012,7 +1014,7 @@ func createTCDeliveryLink(backend *commonEBPF.TCBackend, priority uint16) (*tcDe
 	if err != nil {
 		return cleanup(err)
 	}
-	delivery.sysctls = append(delivery.sysctls, aggregateStates...)
+	delivery.globalSysctls = append(delivery.globalSysctls, aggregateStates...)
 	if err = ensureTCClsact(delivery.delivery); err != nil {
 		return cleanup(err)
 	}
@@ -1176,6 +1178,16 @@ func pinTCInterfaceRPFilter(interfaceName string, aggregate int) (tcSysctlState,
 	return setTCSysctl(path, strconv.Itoa(aggregate))
 }
 
+func handoffTCGlobalSysctls(previous, next *tcDeliveryLink) {
+	if previous == nil || next == nil {
+		return
+	}
+	if len(next.globalSysctls) == 0 {
+		next.globalSysctls = previous.globalSysctls
+	}
+	previous.globalSysctls = nil
+}
+
 func (d *tcDeliveryLink) Close() error {
 	if d == nil {
 		return nil
@@ -1187,6 +1199,8 @@ func (d *tcDeliveryLink) Close() error {
 	}
 	closeErr = E.Errors(closeErr, restoreTCSysctlStates(d.sysctls))
 	d.sysctls = nil
+	closeErr = E.Errors(closeErr, restoreTCSysctlStates(d.globalSysctls))
+	d.globalSysctls = nil
 	if d.redirect != nil {
 		if err := netlink.LinkDel(d.redirect); err != nil &&
 			!errors.Is(err, unix.ENODEV) && !errors.Is(err, unix.ENOENT) {

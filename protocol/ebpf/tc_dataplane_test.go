@@ -89,3 +89,33 @@ func TestRetainLocalAttachmentStatesDoesNotOverrideNewDefault(t *testing.T) {
 		t.Fatal("stale local attachment was retained after a new default interface appeared")
 	}
 }
+
+func TestHandoffTCGlobalSysctls(t *testing.T) {
+	previous := &tcDeliveryLink{
+		globalSysctls: []tcSysctlState{{path: "all/rp_filter", original: "1"}},
+	}
+	next := &tcDeliveryLink{}
+	handoffTCGlobalSysctls(previous, next)
+	if len(previous.globalSysctls) != 0 {
+		t.Fatal("previous delivery retained global sysctl ownership")
+	}
+	if len(next.globalSysctls) != 1 || next.globalSysctls[0].path != "all/rp_filter" {
+		t.Fatalf("new delivery did not receive global sysctl ownership: %+v", next.globalSysctls)
+	}
+}
+
+func TestHandoffTCGlobalSysctlsKeepsFreshState(t *testing.T) {
+	previous := &tcDeliveryLink{
+		globalSysctls: []tcSysctlState{{path: "all/rp_filter", original: "1"}},
+	}
+	next := &tcDeliveryLink{
+		globalSysctls: []tcSysctlState{{path: "all/rp_filter", original: "2"}},
+	}
+	handoffTCGlobalSysctls(previous, next)
+	if len(previous.globalSysctls) != 0 {
+		t.Fatal("previous delivery retained global sysctl ownership")
+	}
+	if len(next.globalSysctls) != 1 || next.globalSysctls[0].original != "2" {
+		t.Fatalf("new delivery state was unexpectedly replaced: %+v", next.globalSysctls)
+	}
+}
