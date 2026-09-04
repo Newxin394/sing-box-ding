@@ -833,13 +833,11 @@ func updateTCInterfaceAttachment(
 	if role.shared && sharedSourceMACPolicy && attachment.framing != commonEBPF.TCLinkFramingEthernet {
 		return E.New("shared source MAC policy requires Ethernet framing on interface ", link.Attrs().Name)
 	}
+	if attachment.attachmentType == "tcx" {
+		return updateTCXInterfaceAttachment(link, backend, attachment, role)
+	}
 	if attachment.localLink != nil || attachment.sharedLink != nil {
-		if role == attachment.role {
-			return nil
-		}
-		if err = attachment.closeLinks(); err != nil {
-			return err
-		}
+		return E.New("TC eBPF interface has an inconsistent attachment type")
 	}
 	if err = ensureTCClsact(link); err != nil {
 		return E.Cause(err, "ensure TC clsact on interface ", attachment.interfaceName)
@@ -900,6 +898,125 @@ func updateTCInterfaceAttachment(
 		attachment.localFilter = nil
 	}
 	attachment.role = role
+	return nil
+}
+
+func updateTCXInterfaceAttachment(
+	linkDevice netlink.Link,
+	backend *commonEBPF.TCBackend,
+	attachment *tcInterfaceAttachment,
+	role tcInterfaceRole,
+) error {
+	if role == attachment.role {
+		return nil
+	}
+	attach := func(local bool) error {
+		program := backend.SharedIngressProgram(attachment.framing)
+		attachType := CiliumEBPF.AttachTCXIngress
+		if local {
+			program = backend.LocalEgressProgram(attachment.framing)
+			attachType = CiliumEBPF.AttachTCXEgress
+		}
+		if program == nil {
+			if local {
+				return E.New("TC eBPF local program is unavailable")
+			}
+			return E.New("TC eBPF shared program is unavailable")
+		}
+		attached, err := link.AttachTCX(link.TCXOptions{
+			Interface: linkDevice.Attrs().Index,
+			Program:   program,
+			Attach:    attachType,
+		})
+		if err != nil {
+			return err
+		}
+		if local {
+			attachment.localLink = attached
+		} else {
+			attachment.sharedLink = attached
+		}
+		return nil
+	}
+	detach := func(local bool) error {
+		attached := attachment.sharedLink
+		if local {
+			attached = attachment.localLink
+		}
+		if attached == nil {
+			return nil
+		}
+		if err := attached.Close(); err != nil {
+			return err
+		}
+		if local {
+			attachment.localLink = nil
+		} else {
+			attachment.sharedLink = nil
+		}
+		return nil
+	}
+	if err := transitionTCXInterfaceRole(
+		attachment.role,
+		role,
+		attachment.localLink != nil,
+		attachment.sharedLink != nil,
+		attach,
+		detach,
+	); err != nil {
+		return E.Cause(err, "update TCX eBPF interface ", attachment.interfaceName)
+	}
+	attachment.role = role
+	return nil
+}
+
+// transitionTCXInterfaceRole installs desired links before removing obsolete
+// links. This keeps at least one interception direction active throughout a
+// role change and rolls back links created by a failed update.
+func transitionTCXInterfaceRole(
+	current tcInterfaceRole,
+	desired tcInterfaceRole,
+	hasLocal bool,
+	hasShared bool,
+	attach func(local bool) error,
+	detach func(local bool) error,
+) error {
+	if current == desired {
+		return nil
+	}
+	created := make([]bool, 0, 2)
+	rollback := func(startErr error) error {
+		var rollbackErr error
+		for index := len(created) - 1; index >= 0; index-- {
+			rollbackErr = E.Errors(rollbackErr, detach(created[index]))
+		}
+		return E.Errors(startErr, rollbackErr)
+	}
+	if desired.local && !hasLocal {
+		if err := attach(true); err != nil {
+			return E.Cause(err, "attach TCX local egress")
+		}
+		hasLocal = true
+		created = append(created, true)
+	}
+	if desired.shared && !hasShared {
+		if err := attach(false); err != nil {
+			return rollback(E.Cause(err, "attach TCX shared ingress"))
+		}
+		hasShared = true
+		created = append(created, false)
+	}
+	if !desired.shared && hasShared {
+		if err := detach(false); err != nil {
+			return rollback(E.Cause(err, "detach TCX shared ingress"))
+		}
+		hasShared = false
+	}
+	if !desired.local && hasLocal {
+		if err := detach(true); err != nil {
+			return rollback(E.Cause(err, "detach TCX local egress"))
+		}
+	}
 	return nil
 }
 

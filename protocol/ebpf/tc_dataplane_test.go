@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	CiliumEBPF "github.com/cilium/ebpf"
@@ -152,5 +153,71 @@ func TestRestoreTCSysctlStatesPreservesExternalChange(t *testing.T) {
 	value, err = os.ReadFile(path)
 	if err != nil || string(value) != "2\n" {
 		t.Fatalf("external sysctl change was overwritten: value=%q err=%v", value, err)
+	}
+}
+
+func TestTransitionTCXInterfaceRoleAttachesBeforeDetach(t *testing.T) {
+	var events []string
+	err := transitionTCXInterfaceRole(
+		tcInterfaceRole{local: true},
+		tcInterfaceRole{shared: true},
+		true,
+		false,
+		func(local bool) error {
+			if local {
+				events = append(events, "attach-local")
+			} else {
+				events = append(events, "attach-shared")
+			}
+			return nil
+		},
+		func(local bool) error {
+			if local {
+				events = append(events, "detach-local")
+			} else {
+				events = append(events, "detach-shared")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"attach-shared", "detach-local"}
+	if !slices.Equal(events, want) {
+		t.Fatalf("unexpected TCX transition order: got %v, want %v", events, want)
+	}
+}
+
+func TestTransitionTCXInterfaceRoleRollsBackNewLinks(t *testing.T) {
+	var events []string
+	err := transitionTCXInterfaceRole(
+		tcInterfaceRole{},
+		tcInterfaceRole{local: true, shared: true},
+		false,
+		false,
+		func(local bool) error {
+			if local {
+				events = append(events, "attach-local")
+				return nil
+			}
+			events = append(events, "attach-shared")
+			return errors.New("shared attach failed")
+		},
+		func(local bool) error {
+			if local {
+				events = append(events, "detach-local")
+			} else {
+				events = append(events, "detach-shared")
+			}
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected TCX transition failure")
+	}
+	want := []string{"attach-local", "attach-shared", "detach-local"}
+	if !slices.Equal(events, want) {
+		t.Fatalf("unexpected TCX rollback order: got %v, want %v", events, want)
 	}
 }
