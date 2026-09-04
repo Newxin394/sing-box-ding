@@ -26,7 +26,13 @@ func RegisterOutbound(registry *outbound.Registry) {
 type Outbound struct {
 	outbound.Adapter
 	logger logger.ContextLogger
-	client *sHTTP.Client
+	client dialClient
+}
+
+// dialClient is the TCP dialing surface shared by the upstream sing HTTP
+// client and the ding-direct client in ding.go.
+type dialClient interface {
+	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HTTPOutboundOptions) (adapter.Outbound, error) {
@@ -38,17 +44,27 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
+	headers := options.Headers.Build()
+	clientOptions := sHTTP.Options{
+		Dialer:   detour,
+		Server:   options.ServerOptions.Build(),
+		Username: options.Username,
+		Password: options.Password,
+		Path:     options.Path,
+		Headers:  headers,
+	}
+	var client dialClient
+	if dingHost := headers.Get(dingHeader); dingHost != "" {
+		// The With-At header is not a real header: it is consumed here and
+		// appended to the CONNECT request target as "host:port@<dingHost>".
+		client = newDingClient(clientOptions, dingHost)
+	} else {
+		client = sHTTP.NewClient(clientOptions)
+	}
 	return &Outbound{
 		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, []string{N.NetworkTCP}, options.DialerOptions),
 		logger:  logger,
-		client: sHTTP.NewClient(sHTTP.Options{
-			Dialer:   detour,
-			Server:   options.ServerOptions.Build(),
-			Username: options.Username,
-			Password: options.Password,
-			Path:     options.Path,
-			Headers:  options.Headers.Build(),
-		}),
+		client:  client,
 	}, nil
 }
 
