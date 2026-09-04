@@ -71,6 +71,7 @@ type tcDeliveryLink struct {
 type tcSysctlState struct {
 	path     string
 	original string
+	applied  string
 }
 
 type tcDataPlane struct {
@@ -1089,13 +1090,24 @@ func setTCSysctl(path, value string) (tcSysctlState, bool, error) {
 	if err = os.WriteFile(path, []byte(value), 0o644); err != nil {
 		return tcSysctlState{}, false, err
 	}
-	return tcSysctlState{path: path, original: original}, true, nil
+	return tcSysctlState{path: path, original: original, applied: value}, true, nil
 }
 
 func restoreTCSysctlStates(states []tcSysctlState) error {
 	var restoreErr error
 	for _, state := range slices.Backward(states) {
-		if err := os.WriteFile(state.path, []byte(state.original), 0o644); err != nil &&
+		current, err := os.ReadFile(state.path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			restoreErr = E.Errors(restoreErr, err)
+			continue
+		}
+		if strings.TrimSpace(string(current)) != state.applied {
+			continue
+		}
+		if err = os.WriteFile(state.path, []byte(state.original), 0o644); err != nil &&
 			!errors.Is(err, os.ErrNotExist) {
 			restoreErr = E.Errors(restoreErr, err)
 		}

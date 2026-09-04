@@ -4,6 +4,8 @@ package ebpf
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	CiliumEBPF "github.com/cilium/ebpf"
@@ -117,5 +119,38 @@ func TestHandoffTCGlobalSysctlsKeepsFreshState(t *testing.T) {
 	}
 	if len(next.globalSysctls) != 1 || next.globalSysctls[0].original != "2" {
 		t.Fatalf("new delivery state was unexpectedly replaced: %+v", next.globalSysctls)
+	}
+}
+
+func TestRestoreTCSysctlStatesPreservesExternalChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rp_filter")
+	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, changed, err := setTCSysctl(path, "0")
+	if err != nil || !changed {
+		t.Fatalf("set sysctl: changed=%v err=%v", changed, err)
+	}
+	if err = restoreTCSysctlStates([]tcSysctlState{state}); err != nil {
+		t.Fatal(err)
+	}
+	value, err := os.ReadFile(path)
+	if err != nil || string(value) != "1" {
+		t.Fatalf("sysctl was not restored: value=%q err=%v", value, err)
+	}
+
+	state, changed, err = setTCSysctl(path, "0")
+	if err != nil || !changed {
+		t.Fatalf("set sysctl for external change: changed=%v err=%v", changed, err)
+	}
+	if err = os.WriteFile(path, []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = restoreTCSysctlStates([]tcSysctlState{state}); err != nil {
+		t.Fatal(err)
+	}
+	value, err = os.ReadFile(path)
+	if err != nil || string(value) != "2\n" {
+		t.Fatalf("external sysctl change was overwritten: value=%q err=%v", value, err)
 	}
 }
