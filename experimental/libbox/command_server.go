@@ -267,7 +267,6 @@ func (s *CommandServer) Pause() {
 	if instance == nil || instance.PauseManager() == nil {
 		return
 	}
-	instance.Box().CloseIdleConnections()
 	instance.PauseManager().DevicePause()
 	if C.IsIos {
 		// iOS calls wake within seconds of sleep while the device stays locked, so wake is
