@@ -275,10 +275,13 @@ func (d *sharedRewriteDataPlane) reconcile(interfaceNames []string, hostAddresse
 		}
 	}
 
-	d.backend = backend
-	d.attachments = candidate
-	d.hostAddresses = slices.Clone(hostAddresses)
-	d.enabled = wantEnabled
+	if changed {
+		d.backend = backend
+		d.attachments = candidate
+		d.hostAddresses = slices.Clone(hostAddresses)
+		d.enabled = wantEnabled
+		d.owner.udpNat.Purge()
+	}
 
 	return closeErr
 }
