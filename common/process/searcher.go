@@ -53,5 +53,5 @@ func completeProcessInfo(info *adapter.ConnectionOwner, packageManager tun.Packa
 	if packages, loaded := packageManager.PackagesByID(appID); loaded {
 		packageNames = append(packageNames, packages...)
 	}
-	info.AndroidPackageNames = common.Uniq(packageNames)
+	info.PackageNames = common.Uniq(packageNames)
 }

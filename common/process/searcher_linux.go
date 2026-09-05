@@ -110,7 +110,7 @@ func FindProcessInfoByPID(processID uint32, userID uint32, packageManager tun.Pa
 	}
 	processPath, err := os.Readlink(filepath.Join(pathProc, strconv.FormatUint(uint64(processID), 10), "exe"))
 	if err == nil {
-		processInfo.ProcessPath = processPath
+		processInfo.ProcessPaths = []string{processPath}
 	}
 	completeProcessInfo(processInfo, packageManager)
 	return processInfo, err

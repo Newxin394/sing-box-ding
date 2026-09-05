@@ -22,7 +22,6 @@ func PowerReportOptions(startedService *daemon.StartedService) powerreport.Optio
 		reportMetadata: baseReportMetadata(),
 		StartedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	}
 	return powerreport.Options{
 		BasePath:      sWorkingPath,
 		Logger:        log.StdLogger(),

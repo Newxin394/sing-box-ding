@@ -99,7 +99,7 @@ func NewCommandServer(handler CommandServerHandler, platformInterface PlatformIn
 		OOMRecorder: oomRecorder,
 	})
 	if sPowerReportEnabled {
-		err := powerManager.Start(PowerReportOptions(server.StartedService, platformInterface))
+		err := powerManager.Start(PowerReportOptions(server.StartedService))
 		if err != nil {
 			log.StdLogger().Error(E.Cause(err, "start power report recorder"))
 		}
