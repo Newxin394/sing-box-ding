@@ -12,7 +12,8 @@ import (
 func configRouter(server *Server, logFactory log.Factory) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getConfigs(server, logFactory))
-	r.Put("/", updateConfigs)
+	// r.Put("/", updateConfigs)
+	r.Put("/", reload(server))
 	r.Patch("/", patchConfigs(server))
 	return r
 }
@@ -28,6 +29,7 @@ type configSchema struct {
 	Mode        string `json:"mode"`
 	// sing-box added
 	ModeList []string       `json:"mode-list"`
+	Modes    []string       `json:"modes"`
 	LogLevel string         `json:"log-level"`
 	IPv6     bool           `json:"ipv6"`
 	Tun      map[string]any `json:"tun"`
@@ -44,6 +46,8 @@ func getConfigs(server *Server, logFactory log.Factory) func(w http.ResponseWrit
 		render.JSON(w, r, &configSchema{
 			Mode:        server.clashMode.Mode(),
 			ModeList:    server.clashMode.ModeList(),
+			Modes:       server.clashMode.ModeList(),
+			AllowLan:    true,
 			BindAddress: "*",
 			LogLevel:    log.FormatLevel(logLevel),
 		})
@@ -66,6 +70,6 @@ func patchConfigs(server *Server) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func updateConfigs(w http.ResponseWriter, r *http.Request) {
+/* func updateConfigs(w http.ResponseWriter, r *http.Request) {
 	render.NoContent(w, r)
-}
+} */

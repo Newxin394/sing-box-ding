@@ -8,12 +8,16 @@ import (
 
 type HeadlessRule interface {
 	Match(metadata *InboundContext) bool
+	RuleCount() uint64
 	String() string
 }
 
 type Rule interface {
 	HeadlessRule
 	SimpleLifecycle
+	Disabled() bool
+	UUID() string
+	ChangeStatus()
 	Type() string
 	Action() RuleAction
 }

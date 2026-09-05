@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,7 +66,7 @@ type NetworkManager struct {
 	interfaceUpdateRunAccess sync.Mutex
 	powerUpdateAccess        sync.Mutex
 	powerUpdateCancel        context.CancelFunc
-	started                  bool
+	started                  atomic.Bool
 }
 
 func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options option.RouteOptions, dnsOptions option.DNSOptions) (*NetworkManager, error) {
@@ -218,7 +219,7 @@ func (r *NetworkManager) Start(stage adapter.StartStage) error {
 				}
 			}
 		}
-		r.started = true
+		r.started.Store(true)
 	}
 	return nil
 }
@@ -511,6 +512,9 @@ func (r *NetworkManager) ResetNetwork(ctx context.Context) {
 }
 
 func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interface, flags int) {
+	// Initialization notifications must not reset connections even if processing
+	// is delayed until after startup completes.
+	resetNetwork := r.started.Load()
 	if defaultInterface == nil {
 		r.pauseManager.NetworkPause()
 		r.logger.Error("missing default interface")
@@ -527,11 +531,11 @@ func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interfa
 	}
 	go func() {
 		defer updateCancel()
-		r.updateInterface(updateContext, defaultInterface)
+		r.updateInterface(updateContext, defaultInterface, resetNetwork)
 	}()
 }
 
-func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *control.Interface) {
+func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *control.Interface, resetNetwork bool) {
 	r.interfaceUpdateRunAccess.Lock()
 	defer r.interfaceUpdateRunAccess.Unlock()
 	if ctx.Err() != nil {
@@ -572,7 +576,7 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 	if ctx.Err() != nil {
 		return
 	}
-	if !r.started {
+	if !resetNetwork {
 		return
 	}
 	r.ResetNetwork(ctx)

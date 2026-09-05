@@ -22,6 +22,8 @@ type DNSRouter interface {
 	Lookup(ctx context.Context, domain string, options DNSQueryOptions) ([]netip.Addr, error)
 	ClearCache()
 	LookupReverseMapping(ip netip.Addr) (string, bool)
+	Rules() []DNSRule
+	Rule(uuid string) (DNSRule, bool)
 	ResetNetwork()
 }
 
@@ -75,6 +77,7 @@ type DNSCacheStore interface {
 	LoadDNSCache(transportName string, qName string, qType uint16) (rawMessage []byte, expireAt time.Time, loaded bool)
 	SaveDNSCache(transportName string, qName string, qType uint16, rawMessage []byte, expireAt time.Time) error
 	SaveDNSCacheAsync(transportName string, qName string, qType uint16, rawMessage []byte, expireAt time.Time, logger logger.Logger)
+	DeleteDNSCache(transportName string, qName string, qType uint16, rawMessage []byte)
 	ClearDNSCache() error
 }
 

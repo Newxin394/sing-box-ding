@@ -718,9 +718,12 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	}
 	historyStorage := boxService.urlTestHistoryStorage
 	urlTest, isURLTest := outbound.(*group.URLTest)
+	loadBalance, isLoadBalance := outbound.(adapter.LoadBalanceGroup)
 	outboundGroup, isOutboundGroup := outbound.(adapter.OutboundGroup)
 	if isURLTest {
 		go urlTest.CheckOutbounds()
+	} else if isLoadBalance {
+		go loadBalance.URLTest(boxService.ctx)
 	} else if isOutboundGroup {
 		outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
 			itOutbound, _ := boxService.outboundManager.Outbound(it)
@@ -1061,7 +1064,7 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 		Network:       metadata.Metadata.Network,
 		Source:        metadata.Metadata.Source.String(),
 		Destination:   metadata.Metadata.Destination.String(),
-		Domain:        metadata.Metadata.Domain,
+		Domain:        metadata.ConnectionDomain(),
 		Protocol:      metadata.Metadata.Protocol,
 		User:          metadata.Metadata.User,
 		FromOutbound:  metadata.Metadata.Outbound,

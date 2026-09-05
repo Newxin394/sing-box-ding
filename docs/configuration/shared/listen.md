@@ -9,7 +9,8 @@ icon: material/new-box
 !!! quote "Changes in sing-box 1.13.0"
 
     :material-plus: [disable_tcp_keep_alive](#disable_tcp_keep_alive)  
-    :material-alert: [tcp_keep_alive](#tcp_keep_alive)
+    :material-alert: [tcp_keep_alive](#tcp_keep_alive)  
+    :material-plus: [tcp_keep_alive_count](#tcp_keep_alive_count)
 
 !!! quote "Changes in sing-box 1.12.0"
 
@@ -41,6 +42,7 @@ icon: material/new-box
   "disable_tcp_keep_alive": false,
   "tcp_keep_alive": "",
   "tcp_keep_alive_interval": "",
+  "tcp_keep_alive_count": 0,
   "udp_fragment": false,
   "udp_timeout": "",
   "detour": "",
@@ -137,6 +139,14 @@ TCP keep alive interval.
 
 `75s` will be used by default.
 
+#### tcp_keep_alive_count
+
+!!! question "Since sing-box 1.13.0"
+
+TCP keep-alive probe count.
+
+Uses system default if not set or set to `0`.
+
 #### udp_fragment
 
 Enable UDP fragmentation.
@@ -206,3 +216,11 @@ the original packet address will be sent in the response instead of the mapped d
 
 This option is used for compatibility with clients that 
 do not support receiving UDP packets with domain addresses, such as Surge.
+
+#### proxy_protocol
+
+Parse [Proxy Protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) in the connection header.
+
+#### proxy_protocol_accept_no_header
+
+Accept connections without Proxy Protocol header.

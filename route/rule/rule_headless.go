@@ -38,8 +38,13 @@ func NewDefaultHeadlessRule(ctx context.Context, options option.DefaultHeadlessR
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
 	rule := &DefaultHeadlessRule{
 		abstractDefaultRule{
-			invert: options.Invert,
+			domainMatchStrategy: C.DomainMatchStrategy(options.DomainMatchStrategy),
+			invert:              options.Invert,
 		},
+	}
+	router := service.FromContext[adapter.Router](ctx)
+	if router != nil && rule.domainMatchStrategy == C.DomainMatchStrategyAsIS {
+		rule.domainMatchStrategy = router.DefaultDomainMatchStrategy()
 	}
 	if len(options.QueryType) > 0 {
 		item := NewQueryTypeItem(options.QueryType)
@@ -52,24 +57,24 @@ func NewDefaultHeadlessRule(ctx context.Context, options option.DefaultHeadlessR
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.Domain) > 0 || len(options.DomainSuffix) > 0 {
-		item, err := NewDomainItem(options.Domain, options.DomainSuffix)
+		item, err := NewDomainItem(options.Domain, options.DomainSuffix, rule.domainMatchStrategy)
 		if err != nil {
 			return nil, err
 		}
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
 	} else if options.DomainMatcher != nil {
-		item := NewRawDomainItem(options.DomainMatcher)
+		item := NewRawDomainItem(options.DomainMatcher, rule.domainMatchStrategy)
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.DomainKeyword) > 0 {
-		item := NewDomainKeywordItem(options.DomainKeyword)
+		item := NewDomainKeywordItem(options.DomainKeyword, rule.domainMatchStrategy)
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.DomainRegex) > 0 {
-		item, err := NewDomainRegexItem(options.DomainRegex)
+		item, err := NewDomainRegexItem(options.DomainRegex, rule.domainMatchStrategy)
 		if err != nil {
 			return nil, E.Cause(err, "domain_regex")
 		}
@@ -195,13 +200,25 @@ func NewDefaultHeadlessRule(ctx context.Context, options option.DefaultHeadlessR
 		}
 	}
 	if len(options.AdGuardDomain) > 0 {
-		item := NewAdGuardDomainItem(options.AdGuardDomain)
+		item := NewAdGuardDomainItem(options.AdGuardDomain, rule.domainMatchStrategy)
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
 	} else if options.AdGuardDomainMatcher != nil {
-		item := NewRawAdGuardDomainItem(options.AdGuardDomainMatcher)
+		item := NewRawAdGuardDomainItem(options.AdGuardDomainMatcher, rule.domainMatchStrategy)
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
+	}
+	switch true {
+	case len(rule.allItems) == len(rule.destinationAddressItems)+len(rule.destinationIPCIDRItems):
+		rule.ruleCount = uint64(len(rule.destinationAddressItems) + len(rule.destinationIPCIDRItems))
+	case len(rule.allItems) == len(rule.sourceAddressItems):
+		rule.ruleCount = uint64(len(rule.sourceAddressItems))
+	case len(rule.allItems) == len(rule.sourcePortItems):
+		rule.ruleCount = uint64(len(rule.sourcePortItems))
+	case len(rule.allItems) == len(rule.destinationPortItems):
+		rule.ruleCount = uint64(len(rule.destinationPortItems))
+	default:
+		rule.ruleCount = 1
 	}
 	return rule, nil
 }
@@ -215,9 +232,14 @@ type LogicalHeadlessRule struct {
 func NewLogicalHeadlessRule(ctx context.Context, options option.LogicalHeadlessRule) (*LogicalHeadlessRule, error) {
 	r := &LogicalHeadlessRule{
 		abstractLogicalRule{
-			rules:  make([]adapter.HeadlessRule, len(options.Rules)),
-			invert: options.Invert,
+			rules:               make([]adapter.HeadlessRule, len(options.Rules)),
+			domainMatchStrategy: C.DomainMatchStrategy(options.DomainMatchStrategy),
+			invert:              options.Invert,
 		},
+	}
+	router := service.FromContext[adapter.Router](ctx)
+	if router != nil && r.domainMatchStrategy == C.DomainMatchStrategyAsIS {
+		r.domainMatchStrategy = router.DefaultDomainMatchStrategy()
 	}
 	switch options.Mode {
 	case C.LogicalTypeAnd:
@@ -234,5 +256,6 @@ func NewLogicalHeadlessRule(ctx context.Context, options option.LogicalHeadlessR
 		}
 		r.rules[i] = rule
 	}
+	r.ruleCount = 1
 	return r, nil
 }

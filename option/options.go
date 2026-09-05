@@ -14,7 +14,7 @@ import (
 type _Options struct {
 	RawMessage           json.RawMessage       `json:"-"`
 	CommentsSet          *json.CommentSet      `json:"-"`
-	Schema               string                `json:"$schema,omitempty" examples:"https://sing-box.sagernet.org/schema.json"`
+	Schema               string                `json:"$schema,omitempty" examples:"https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/docs/schema.json"`
 	Log                  *LogOptions           `json:"log,omitempty"`
 	DNS                  *DNSOptions           `json:"dns,omitempty"`
 	NTP                  *NTPOptions           `json:"ntp,omitempty"`
@@ -25,6 +25,7 @@ type _Options struct {
 	Endpoints            []Endpoint            `json:"endpoints,omitempty"`
 	Inbounds             []Inbound             `json:"inbounds,omitempty"`
 	Outbounds            []Outbound            `json:"outbounds,omitempty"`
+	Providers            []Provider            `json:"providers,omitempty"`
 	Route                *RouteOptions         `json:"route,omitempty"`
 	Services             []Service             `json:"services,omitempty"`
 	Experimental         *ExperimentalOptions  `json:"experimental,omitempty"`
@@ -50,7 +51,7 @@ func (o *Options) UnmarshalJSONContext(ctx context.Context, content []byte) erro
 func (o Options) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
 	node := schema.StrictObject()
 	node.SchemaURI = "https://json-schema.org/draft/2020-12/schema"
-	node.ID = "https://sing-box.sagernet.org/schema.json"
+	node.ID = "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/docs/schema.json"
 	err := builder.FlattenStruct(node, reflect.TypeFor[Options]())
 	if err != nil {
 		return nil, err

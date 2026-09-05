@@ -2,7 +2,9 @@ package rule
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -12,12 +14,43 @@ import (
 	"go4.org/netipx"
 )
 
+func TestAbstractRuleConcurrentChangeStatus(t *testing.T) {
+	var rule abstractRule
+	var waitGroup sync.WaitGroup
+	const toggleCount = 100
+	waitGroup.Add(toggleCount)
+	for range toggleCount {
+		go func() {
+			defer waitGroup.Done()
+			rule.ChangeStatus()
+		}()
+	}
+	waitGroup.Wait()
+	require.False(t, rule.Disabled())
+}
+
 type fakeRuleSet struct {
 	matched bool
 }
 
 func (f *fakeRuleSet) Name() string {
 	return "fake-rule-set"
+}
+
+func (f *fakeRuleSet) Type() string {
+	return "fake"
+}
+
+func (f *fakeRuleSet) Format() string {
+	return "fake"
+}
+
+func (f *fakeRuleSet) UpdatedTime() time.Time {
+	return time.Time{}
+}
+
+func (f *fakeRuleSet) Update(context.Context) error {
+	return nil
 }
 
 func (f *fakeRuleSet) StartContext(context.Context, *adapter.HTTPStartContext) error {
@@ -50,6 +83,10 @@ func (f *fakeRuleSet) Close() error {
 
 func (f *fakeRuleSet) Match(*adapter.InboundContext) bool {
 	return f.matched
+}
+
+func (f *fakeRuleSet) RuleCount() uint64 {
+	return 1
 }
 
 func (f *fakeRuleSet) String() string {

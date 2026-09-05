@@ -10,10 +10,21 @@
     "proxy-b",
     "proxy-c"
   ],
+  "providers": [
+    "provider-a",
+    "provider-b",
+  ],
+  "exclude": "",
+  "include": "",
   "url": "",
   "interval": "",
-  "tolerance": 0,
+  "tolerance": 50,
   "idle_timeout": "",
+  "use_all_providers": false,
+  "fallback": {
+    "enabled": false,
+    "max_delay": ""
+  },
   "interrupt_exist_connections": false
 }
 ```
@@ -22,9 +33,19 @@
 
 #### outbounds
 
-==Required==
-
 List of outbound tags to test.
+
+#### providers
+
+List of [Provider](/configuration/provider) tags to test.
+
+#### exclude
+
+Exclude regular expression to filter `providers` nodes.
+
+#### include
+
+Include regular expression to filter `providers` nodes.
 
 #### url
 
@@ -41,6 +62,26 @@ The test tolerance in milliseconds. `50` will be used if empty.
 #### idle_timeout
 
 The idle timeout. `30m` will be used if empty.
+
+#### use_all_providers
+
+Whether to use all providers for testing. `false` will be used if empty.
+
+#### fallback
+
+Fallback selection configuration.
+
+When enabled, the first available outbound is selected in configuration order instead of selecting the outbound with the lowest delay.
+
+##### fallback.enabled
+
+Enable fallback selection.
+
+##### fallback.max_delay
+
+Maximum acceptable delay.
+
+An outbound whose delay exceeds this value is skipped. If every available outbound exceeds the value, the skipped outbound with the lowest delay is selected.
 
 #### interrupt_exist_connections
 

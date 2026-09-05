@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"time"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	M "github.com/sagernet/sing/common/metadata"
@@ -21,13 +22,18 @@ type Router interface {
 	PreMatch(metadata InboundContext, firstPacket []byte) PreMatchResult
 	HijackDNSPacket(ctx context.Context, payload []byte, writer N.PacketWriter, metadata InboundContext)
 	ConnectionRouterEx
+	RuleSets() []RuleSet
 	RuleSet(tag string) (RuleSet, bool)
 	Rules() []Rule
 	NeedFindProcess() bool
 	NeedFindNeighbor() bool
 	NeighborResolver() NeighborResolver
+	Rule(uuid string) (Rule, bool)
 	AppendTracker(tracker ConnectionTracker)
 	ResetNetwork()
+	DefaultDomainMatchStrategy() C.DomainMatchStrategy
+
+	Reload()
 }
 
 type PreMatchAction uint8
@@ -121,6 +127,10 @@ type ConnectionRouterEx interface {
 
 type RuleSet interface {
 	Name() string
+	Type() string
+	Format() string
+	UpdatedTime() time.Time
+	Update(ctx context.Context) error
 	StartContext(ctx context.Context, startContext *HTTPStartContext) error
 	Metadata() RuleSetMetadata
 	ExtractIPSet() []*netipx.IPSet

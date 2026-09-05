@@ -106,6 +106,7 @@ nav:
               - OpenConnect: configuration/dns/server/openconnect.md
               - OpenVPN: configuration/dns/server/openvpn.md
               - Resolved: configuration/dns/server/resolved.md
+              - Group: configuration/dns/server/group.md
           - DNS Rule: configuration/dns/rule.md
           - DNS Rule Action: configuration/dns/rule_action.md
           - FakeIP: configuration/dns/fakeip.md
@@ -127,6 +128,7 @@ nav:
           - configuration/experimental/index.md
           - Cache File: configuration/experimental/cache-file.md
           - Clash API: configuration/experimental/clash-api.md
+          - Observability: configuration/experimental/observability.md
           - V2Ray API: configuration/experimental/v2ray-api.md
       - Shared:
           - Listen Fields: configuration/shared/listen.md
@@ -206,6 +208,11 @@ nav:
           - DNS: configuration/outbound/dns.md
           - Selector: configuration/outbound/selector.md
           - URLTest: configuration/outbound/urltest.md
+      - Provider:
+          - configuration/provider/index.md
+          - Dialer Fields Override: configuration/provider/override_dialer.md
+          - TLS Fields Override: configuration/provider/override_tls.md
+          - AnyTLS Fields Override: configuration/provider/override_anytls.md
       - Service:
           - configuration/service/index.md
           - sing-box API: configuration/service/api.md
@@ -319,7 +326,11 @@ plugins:
             Endpoint: 端点
             Inbound: 入站
             Outbound: 出站
+            Provider: 提供者
             Certificate Provider: 证书提供者
+            Dialer Fields Override: 拨号字段覆写
+            TLS Fields Override: TLS 字段覆写
+            AnyTLS Fields Override: AnyTLS 字段覆写
 
             Manual: 手册
             eBPF troubleshooting: eBPF 问题排查

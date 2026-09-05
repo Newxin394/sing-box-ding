@@ -77,12 +77,12 @@ func (r DNSRule) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
 			return nil, err
 		}
 		nestedRef, err := builder.Define("NestedDNSRule", func() (*schema.Node, error) {
-			return nestedRuleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), "NestedDNSRule")
+			return nestedRuleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), "NestedDNSRule", false)
 		})
 		if err != nil {
 			return nil, err
 		}
-		return ruleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), nestedRef, actionRef)
+		return ruleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), nestedRef, actionRef, false)
 	})
 }
 
@@ -161,7 +161,7 @@ type RawDefaultDNSRule struct {
 	User                     badoption.Listable[string]                                                  `json:"user,omitempty"`
 	UserID                   badoption.Listable[int32]                                                   `json:"user_id,omitempty"`
 	Outbound                 badoption.Listable[string]                                                  `json:"outbound,omitempty" reference:"outbound" schema:"omit"`
-	ClashMode                string                                                                      `json:"clash_mode,omitempty"`
+	ClashMode                badoption.Listable[string]                                                  `json:"clash_mode,omitempty"`
 	NetworkType              badoption.Listable[InterfaceType]                                           `json:"network_type,omitempty"`
 	NetworkIsExpensive       bool                                                                        `json:"network_is_expensive,omitempty"`
 	NetworkIsConstrained     bool                                                                        `json:"network_is_constrained,omitempty"`

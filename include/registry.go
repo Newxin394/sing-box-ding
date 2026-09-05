@@ -3,12 +3,13 @@ package include
 import (
 	"context"
 
-	"github.com/sagernet/sing-box"
+	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/certificate"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	"github.com/sagernet/sing-box/adapter/provider"
 	"github.com/sagernet/sing-box/adapter/service"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
@@ -27,6 +28,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/naive"
+	"github.com/sagernet/sing-box/protocol/pass"
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/shadowtls"
@@ -38,6 +40,8 @@ import (
 	"github.com/sagernet/sing-box/protocol/tun"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/vmess"
+	providerLocal "github.com/sagernet/sing-box/provider/local"
+	"github.com/sagernet/sing-box/provider/remote"
 	"github.com/sagernet/sing-box/service/api"
 	originca "github.com/sagernet/sing-box/service/origin_ca"
 	"github.com/sagernet/sing-box/service/resolved"
@@ -46,7 +50,7 @@ import (
 )
 
 func Context(ctx context.Context) context.Context {
-	return box.Context(ctx, InboundRegistry(), OutboundRegistry(), EndpointRegistry(), DNSTransportRegistry(), ServiceRegistry(), CertificateProviderRegistry())
+	return box.Context(ctx, InboundRegistry(), ProviderRegistry(), OutboundRegistry(), EndpointRegistry(), DNSTransportRegistry(), ServiceRegistry(), CertificateProviderRegistry())
 }
 
 func InboundRegistry() *inbound.Registry {
@@ -78,16 +82,28 @@ func InboundRegistry() *inbound.Registry {
 	return registry
 }
 
+func ProviderRegistry() *provider.Registry {
+	registry := provider.NewRegistry()
+
+	providerLocal.RegisterProviderInline(registry)
+	providerLocal.RegisterProviderLocal(registry)
+	remote.RegisterProvider(registry)
+
+	return registry
+}
+
 func OutboundRegistry() *outbound.Registry {
 	registry := outbound.NewRegistry()
 
 	direct.RegisterOutbound(registry)
 	bridge.RegisterOutbound(registry)
 
+	pass.RegisterOutbound(registry)
 	block.RegisterOutbound(registry)
 
 	group.RegisterSelector(registry)
 	group.RegisterURLTest(registry)
+	group.RegisterLoadBalance(registry)
 
 	socks.RegisterOutbound(registry)
 	http.RegisterOutbound(registry)
@@ -126,6 +142,7 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 	transport.RegisterUDP(registry)
 	transport.RegisterTLS(registry)
 	transport.RegisterHTTPS(registry)
+	transport.RegisterGroup(registry)
 	hosts.RegisterTransport(registry)
 	local.RegisterTransport(registry)
 	mdns.RegisterTransport(registry)
