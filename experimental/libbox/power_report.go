@@ -13,8 +13,7 @@ import (
 
 type powerReportMetadata struct {
 	reportMetadata
-	StartedAt          string `json:"startedAt"`
-	IncludeAllNetworks *bool  `json:"includeAllNetworks,omitempty"`
+	StartedAt string `json:"startedAt"`
 }
 
 func PowerReportOptions(startedService *daemon.StartedService) powerreport.Options {
