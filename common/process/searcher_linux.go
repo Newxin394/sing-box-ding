@@ -85,9 +85,19 @@ func (s *linuxSearcher) FindProcessInfo(ctx context.Context, network string, sou
 	if err != nil {
 		s.logger.DebugContext(ctx, "find process path: ", err)
 	} else {
-		processInfo.ProcessPath = processPath
+		processInfo.ProcessPaths = []string{processPath}
 	}
-	completeProcessInfo(processInfo, s.packageManager)
+	if s.packageManager != nil {
+		appID := uid % 100000
+		var packageNames []string
+		if sharedPackage, loaded := s.packageManager.SharedPackageByID(appID); loaded {
+			packageNames = append(packageNames, sharedPackage)
+		}
+		if packages, loaded := s.packageManager.PackagesByID(appID); loaded {
+			packageNames = append(packageNames, packages...)
+		}
+		processInfo.PackageNames = common.Uniq(packageNames)
+	}
 	return processInfo, nil
 }
 

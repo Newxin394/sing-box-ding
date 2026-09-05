@@ -90,7 +90,16 @@ type ConnectionOwner struct {
 	UserId              int32
 	UserName            string
 	ProcessPath         string
+	processPaths        []string
 	androidPackageNames []string
+}
+
+func (c *ConnectionOwner) SetProcessPaths(paths StringIterator) {
+	c.processPaths = iteratorToArray[string](paths)
+}
+
+func (c *ConnectionOwner) ProcessPaths() StringIterator {
+	return newIterator(c.processPaths)
 }
 
 func (c *ConnectionOwner) SetAndroidPackageNames(names StringIterator) {
@@ -103,6 +112,7 @@ func (c *ConnectionOwner) AndroidPackageNames() StringIterator {
 
 type InterfaceUpdateListener interface {
 	UpdateDefaultInterface(interfaceName string, interfaceIndex int32, isExpensive bool, isConstrained bool)
+	UpdateNetworkPath(networkPath string)
 }
 
 const (

@@ -3,6 +3,7 @@
 package libbox
 
 import (
+	"path/filepath"
 	"time"
 
 	"github.com/sagernet/sing-box/daemon"
@@ -16,14 +17,11 @@ type powerReportMetadata struct {
 	IncludeAllNetworks *bool  `json:"includeAllNetworks,omitempty"`
 }
 
-func PowerReportOptions(startedService *daemon.StartedService, platformInterface PlatformInterface) powerreport.Options {
+func PowerReportOptions(startedService *daemon.StartedService) powerreport.Options {
 	metadata := powerReportMetadata{
 		reportMetadata: baseReportMetadata(),
 		StartedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	if platformInterface != nil && platformInterface.UnderNetworkExtension() {
-		includeAllNetworks := platformInterface.IncludeAllNetworks()
-		metadata.IncludeAllNetworks = &includeAllNetworks
 	}
 	return powerreport.Options{
 		BasePath:      sWorkingPath,
@@ -35,12 +33,12 @@ func PowerReportOptions(startedService *daemon.StartedService, platformInterface
 		},
 		ProfileCallback: func(path string) {
 			for _, name := range oomReportProfiles {
-				writeOOMProfile(path, name)
+				writeOOMProfile(filepath.Join(path, name+".pb"), name)
 			}
 		},
 	}
 }
 
-func PromotePowerReportDraft() {
-	powerreport.PromoteDraft(sWorkingPath)
+func DiscardPowerReportDraft() {
+	powerreport.DiscardDraft(sWorkingPath)
 }

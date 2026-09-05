@@ -20,6 +20,7 @@ type platformDefaultInterfaceMonitor struct {
 	callbacks                   list.List[tun.DefaultInterfaceUpdateCallback]
 	myInterfaces                []string
 	defaultInterfaceInitialized bool
+	lastNetworkPath             string
 }
 
 func (m *platformDefaultInterfaceMonitor) Start() error {
@@ -54,6 +55,21 @@ func (m *platformDefaultInterfaceMonitor) UnregisterCallback(element *list.Eleme
 	m.defaultInterfaceAccess.Lock()
 	defer m.defaultInterfaceAccess.Unlock()
 	m.callbacks.Remove(element)
+}
+
+func (m *platformDefaultInterfaceMonitor) UpdateNetworkPath(networkPath string) {
+	if networkPath != m.lastNetworkPath {
+		m.lastNetworkPath = networkPath
+		m.logger.Debug("updated network path: ", networkPath)
+	}
+	if m.powerManager == nil {
+		return
+	}
+	recorder := m.powerManager.Recorder()
+	if recorder == nil {
+		return
+	}
+	recorder.UpdateNetworkPath(networkPath)
 }
 
 func (m *platformDefaultInterfaceMonitor) UpdateDefaultInterface(interfaceName string, interfaceIndex32 int32, isExpensive bool, isConstrained bool) {
