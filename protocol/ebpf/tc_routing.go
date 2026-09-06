@@ -43,7 +43,7 @@ type tcStalePolicyRouting struct {
 	rule   *netlink.Rule
 }
 
-func startTCPolicyRouting(enableIPv6 bool) (*tcPolicyRouting, error) {
+func startTCPolicyRouting(enableIPv6 bool, reservedMarks ...uint32) (*tcPolicyRouting, error) {
 	lock, err := net.ListenUnixgram("unixgram", &net.UnixAddr{
 		Name: "@sing-box-ebpf-tc-routing",
 		Net:  "unixgram",
@@ -67,7 +67,7 @@ func startTCPolicyRouting(enableIPv6 bool) (*tcPolicyRouting, error) {
 		families = append(families, unix.AF_INET6)
 	}
 	routing.families = families
-	identifiers, err := allocateTCPolicyIdentifiers(loopback.Attrs().Index, families)
+	identifiers, err := allocateTCPolicyIdentifiers(loopback.Attrs().Index, families, reservedMarks...)
 	if err != nil {
 		return cleanup(err)
 	}
@@ -280,7 +280,7 @@ type tcPolicyIdentifiers struct {
 	priority int
 }
 
-func allocateTCPolicyIdentifiers(loopbackIndex int, families []int) (tcPolicyIdentifiers, error) {
+func allocateTCPolicyIdentifiers(loopbackIndex int, families []int, reservedMarks ...uint32) (tcPolicyIdentifiers, error) {
 	usedTables := make(map[int]bool)
 	usedPriorities := make(map[int]bool)
 	var usedMarkBits uint32
@@ -314,6 +314,9 @@ func allocateTCPolicyIdentifiers(loopbackIndex int, families []int) (tcPolicyIde
 			}
 			usedMarkBits |= tcPolicyRuleMarkBits(rule)
 		}
+	}
+	for _, mark := range reservedMarks {
+		usedMarkBits |= mark
 	}
 	preferred := tcPolicyIdentifiers{
 		mark:     commonEBPF.DefaultTCRoutingMark,
