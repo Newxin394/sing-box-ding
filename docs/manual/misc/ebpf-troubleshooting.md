@@ -10,7 +10,7 @@ Include:
 
 1. The exact sing-box commit or full `sing-box version` output and build tags.
 2. The eBPF inbound configuration and relevant route rules. Remove credentials,
-   but retain mode, interfaces, UID or source policy, DNS and IPv6 settings, TC
+   but retain enabled/data-plane settings, interfaces, UID or source policy, DNS and IPv6 settings, TC
    priority, and bypass policy.
 3. Device model, operating-system release, complete kernel release, and, on
    Android, the build fingerprint.
@@ -27,9 +27,8 @@ sing-box tools ebpf status --shared-data-plane packet_rewrite --interface br-lan
 Add `--ipv6=false` when the inbound configuration disables IPv6. The command
 exits non-zero when a required capability is missing or cannot be verified.
 
-For a hybrid configuration, pass both data-plane flags in one command. The
-legacy `--mode local|shared|all` spelling is still accepted. Run probes with
-the same privileges as the service.
+For a configuration that enables both paths, pass both data-plane flags in one
+command. Run probes with the same privileges as the service.
 
 Useful platform information:
 

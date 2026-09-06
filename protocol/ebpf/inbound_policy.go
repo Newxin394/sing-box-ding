@@ -74,13 +74,6 @@ func (i *Inbound) refreshBypassRuleSetsLocked(startup bool) error {
 			prefixes = append(prefixes, ipSet.Prefixes()...)
 		}
 	}
-	if conflicts := i.fakeIPBypassConflictCount(prefixes); conflicts > 0 {
-		if startup {
-			i.logger.Warn("eBPF FakeIP force interception overrides bypass_rule_set CIDRs: overlaps=", conflicts)
-		} else {
-			i.policyWarnings.warn(i.logger, "eBPF FakeIP force interception overrides bypass_rule_set CIDRs: overlaps=", conflicts)
-		}
-	}
 	policy, err := i.compileBypassCIDRPolicy(prefixes)
 	if err != nil {
 		return err

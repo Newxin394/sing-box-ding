@@ -79,10 +79,10 @@ func TestEBPFInboundSharedOptions(t *testing.T) {
 	var inboundOptions option.Inbound
 	if err := json.UnmarshalContext(ctx, []byte(`{
 		"type": "ebpf",
-		"mode": "hybrid",
 		"tc_priority": 7,
-		"local": {},
+		"local": {"enabled": true},
 		"shared": {
+			"enabled": true,
 			"dns_mode": "off",
 			"interface": ["wlan2", "rndis0"],
 			"ipv6": false
@@ -94,7 +94,8 @@ func TestEBPFInboundSharedOptions(t *testing.T) {
 	if !loaded {
 		t.Fatalf("unexpected eBPF options type: %T", inboundOptions.Options)
 	}
-	if ebpfOptions.Mode != "hybrid" ||
+	if ebpfOptions.Local.Enabled == nil || !*ebpfOptions.Local.Enabled ||
+		ebpfOptions.Shared.Enabled == nil || !*ebpfOptions.Shared.Enabled ||
 		ebpfOptions.TCPriority != 7 || len(ebpfOptions.Shared.Interface) != 2 ||
 		ebpfOptions.Shared.Interface[0] != "wlan2" || ebpfOptions.Shared.Interface[1] != "rndis0" ||
 		ebpfOptions.Shared.IPv6 == nil || *ebpfOptions.Shared.IPv6 || ebpfOptions.Shared.DNSMode != "off" {

@@ -6297,14 +6297,6 @@
             "tag": {
               "type": "string"
             },
-            "mode": {
-              "type": "string",
-              "enum": [
-                "local",
-                "shared",
-                "hybrid"
-              ]
-            },
             "network": {
               "anyOf": [
                 {

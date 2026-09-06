@@ -16,39 +16,19 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
-func normalizeMode(mode string, localOption, sharedOption *bool) (string, bool, bool, error) {
+func normalizeEnablement(localOption, sharedOption *bool) (bool, bool, error) {
 	if localOption != nil || sharedOption != nil {
-		if mode != "" {
-			return "", false, false, E.New("mode cannot be combined with local.enabled or shared.enabled")
-		}
 		localEnabled := localOption != nil && *localOption
 		sharedEnabled := sharedOption != nil && *sharedOption
 		if !localEnabled && !sharedEnabled {
-			return "", false, false, E.New("local.enabled or shared.enabled must be enabled")
+			return false, false, E.New("local.enabled or shared.enabled must be enabled")
 		}
-		switch {
-		case localEnabled && sharedEnabled:
-			return ebpfModeHybrid, true, true, nil
-		case localEnabled:
-			return ebpfModeLocal, true, false, nil
-		default:
-			return ebpfModeShared, false, true, nil
-		}
+		return localEnabled, sharedEnabled, nil
 	}
-	switch mode {
-	case "", ebpfModeLocal:
-		return ebpfModeLocal, true, false, nil
-	case ebpfModeShared:
-		return ebpfModeShared, false, true, nil
-	case ebpfModeHybrid:
-		return ebpfModeHybrid, true, true, nil
-	default:
-		return "", false, false, E.New("unknown eBPF mode: ", mode)
-	}
+	return true, false, nil
 }
 
 type normalizedDataPlanes struct {
-	mode            string
 	localEnabled    bool
 	localDataPlane  string
 	cgroupPath      string
@@ -57,7 +37,7 @@ type normalizedDataPlanes struct {
 }
 
 func normalizeDataPlanes(options option.EBPFInboundOptions) (normalizedDataPlanes, error) {
-	mode, localEnabled, sharedEnabled, err := normalizeMode(options.Mode, options.Local.Enabled, options.Shared.Enabled)
+	localEnabled, sharedEnabled, err := normalizeEnablement(options.Local.Enabled, options.Shared.Enabled)
 	if err != nil {
 		return normalizedDataPlanes{}, err
 	}
@@ -69,7 +49,7 @@ func normalizeDataPlanes(options option.EBPFInboundOptions) (normalizedDataPlane
 	if err != nil {
 		return normalizedDataPlanes{}, err
 	}
-	return normalizedDataPlanes{mode: mode, localEnabled: localEnabled, localDataPlane: localDataPlane, cgroupPath: cgroupPath, sharedEnabled: sharedEnabled, sharedDataPlane: sharedDataPlane}, nil
+	return normalizedDataPlanes{localEnabled: localEnabled, localDataPlane: localDataPlane, cgroupPath: cgroupPath, sharedEnabled: sharedEnabled, sharedDataPlane: sharedDataPlane}, nil
 }
 
 func normalizeSharedDataPlane(options option.EBPFSharedOptions) (string, error) {

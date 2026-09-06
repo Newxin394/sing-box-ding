@@ -8,7 +8,7 @@
 请提供：
 
 1. 准确的 sing-box commit、完整 `sing-box version` 输出和编译 tags。
-2. eBPF 入站配置及相关 route rules。可以删除凭据，但应保留 mode、接口、UID 或
+2. eBPF 入站配置及相关 route rules。可以删除凭据，但应保留 enabled/data_plane、接口、UID 或
    来源策略、DNS/IPv6 设置、TC priority 和绕过策略。
 3. 设备型号、系统版本、完整内核版本；Android 还需 build fingerprint。
 4. 从启动、复现到正常停止的 Debug 级别日志。
@@ -23,8 +23,7 @@ sing-box tools ebpf status --shared-data-plane packet_rewrite --interface br-lan
 
 如果入站配置禁用了 IPv6，请添加 `--ipv6=false`。必需能力缺失或无法验证时，命令会以非零状态退出。
 
-hybrid 配置可在同一条命令中同时传入两个 data-plane 参数。旧的
-`--mode local|shared|all` 写法仍然可用。探测权限应与服务实际运行权限一致。
+同时启用两条路径的配置可在同一条命令中传入两个 data-plane 参数。探测权限应与服务实际运行权限一致。
 
 常用系统信息：
 

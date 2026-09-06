@@ -24,9 +24,6 @@ import (
 )
 
 const (
-	ebpfModeLocal                = "local"
-	ebpfModeShared               = "shared"
-	ebpfModeHybrid               = "hybrid"
 	sharedDataPlaneSocketAssign  = "socket_assign"
 	sharedDataPlanePacketRewrite = "packet_rewrite"
 	dnsModeHijack                = "hijack"
@@ -60,7 +57,6 @@ type Inbound struct {
 	router                   adapter.Router
 	logger                   log.ContextLogger
 	networkManager           adapter.NetworkManager
-	mode                     string
 	localEnabled             bool
 	localDataPlane           string
 	cgroupPath               string
@@ -82,6 +78,7 @@ type Inbound struct {
 	sharedDNSMode            string
 	localIPv6                bool
 	localPolicy              commonEBPF.LocalPolicy
+	compiledPolicy           commonEBPF.CompiledPolicy
 	androidUIDOptions        *androidUIDOptions
 	sharedOptions            option.EBPFSharedOptions
 	sharedEnabled            bool
@@ -135,7 +132,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
-	mode, localEnabled, sharedEnabled := selection.mode, selection.localEnabled, selection.sharedEnabled
+	localEnabled, sharedEnabled := selection.localEnabled, selection.sharedEnabled
 	if err = validateLocalOptions(localEnabled, options.Local); err != nil {
 		return nil, err
 	}
@@ -220,7 +217,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			platform := service.FromContext[adapter.PlatformInterface](ctx)
 			return platform != nil && platform.UsePlatformConnectionOwnerFinder()
 		}(),
-		mode:                mode,
 		localEnabled:        localEnabled,
 		localDataPlane:      localDataPlane,
 		cgroupPath:          cgroupPath,
@@ -263,8 +259,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err = inbound.normalizeFakeIPPrefixes(); err != nil {
 		return nil, err
 	}
-	warnBypassPortConflicts(logger, "local", localDNSMode, localBypassPort, inbound.fakeIPIPv4Prefix.IsValid() || inbound.fakeIPIPv6Prefix.IsValid())
-	warnBypassPortConflicts(logger, "shared", sharedDNSMode, sharedBypassPort, inbound.fakeIPIPv4Prefix.IsValid() || inbound.fakeIPIPv6Prefix.IsValid())
+	warnBypassPortConflicts(logger, "local", localDNSMode, localBypassPort)
+	warnBypassPortConflicts(logger, "shared", sharedDNSMode, sharedBypassPort)
 	for _, ruleSetTag := range options.BypassRuleSet {
 		ruleSet, loaded := router.RuleSet(ruleSetTag)
 		if !loaded {
@@ -281,7 +277,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
-func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, ports []commonEBPF.PortRange, fakeIPEnabled bool) {
+func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, ports []commonEBPF.PortRange) {
 	if logger == nil || len(ports) == 0 {
 		return
 	}
@@ -298,9 +294,6 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
 			logger.Warn("eBPF ", scope, ".bypass_port includes DNS port 53, but dns_mode=off already bypasses DNS")
 		}
 		break
-	}
-	if fakeIPEnabled {
-		logger.Warn("eBPF ", scope, ".bypass_port does not override FakeIP force interception")
 	}
 }
 

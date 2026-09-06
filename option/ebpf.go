@@ -8,7 +8,6 @@ import (
 )
 
 type EBPFInboundOptions struct {
-	Mode          string                     `json:"mode,omitempty" enum:"local,shared,hybrid"`
 	Network       NetworkList                `json:"network,omitempty"`
 	UDPTimeout    UDPTimeoutCompat           `json:"udp_timeout,omitempty"`
 	TCPriority    EBPFTCPriority             `json:"tc_priority,omitempty"`
@@ -51,23 +50,13 @@ type EBPFSharedOptions struct {
 }
 
 // EffectiveEnablement returns the local and shared paths selected by the
-// current configuration. It intentionally mirrors the legacy mode defaults so
-// callers outside protocol/ebpf (such as the dialer self-bypass preparer) do
-// not reinterpret enabled fields independently.
+// current configuration. With no explicit enablement, local interception is
+// enabled by default.
 func (o EBPFInboundOptions) EffectiveEnablement() (local, shared bool) {
 	if o.Local.Enabled != nil || o.Shared.Enabled != nil {
 		return o.Local.Enabled != nil && *o.Local.Enabled, o.Shared.Enabled != nil && *o.Shared.Enabled
 	}
-	switch o.Mode {
-	case "shared":
-		return false, true
-	case "hybrid":
-		return true, true
-	case "", "local":
-		return true, false
-	default:
-		return false, false
-	}
+	return true, false
 }
 
 type EBPFTCPriority uint16

@@ -21,9 +21,6 @@ func TestNormalizeFakeIPPrefixes(t *testing.T) {
 	if inbound.fakeIPIPv6Prefix != netip.MustParsePrefix("fc00::/18") {
 		t.Fatalf("unexpected normalized IPv6 FakeIP range: %s", inbound.fakeIPIPv6Prefix)
 	}
-	if got := inbound.fakeIPPrefixString(); got != "198.18.0.0/15, fc00::/18" {
-		t.Fatalf("unexpected FakeIP range description: %s", got)
-	}
 }
 
 func TestNormalizeFakeIPPrefixesRejectsSafetyOverlap(t *testing.T) {
@@ -52,20 +49,5 @@ func TestNormalizeFakeIPPrefixesRejectsSafetyOverlap(t *testing.T) {
 				t.Fatal("expected unsafe FakeIP range to be rejected")
 			}
 		})
-	}
-}
-
-func TestFakeIPBypassConflictCount(t *testing.T) {
-	inbound := &Inbound{
-		fakeIPIPv4Prefix: netip.MustParsePrefix("198.18.0.0/15"),
-		fakeIPIPv6Prefix: netip.MustParsePrefix("fc00::/18"),
-	}
-	conflicts := inbound.fakeIPBypassConflictCount([]netip.Prefix{
-		netip.MustParsePrefix("198.18.1.0/24"),
-		netip.MustParsePrefix("fc00::/7"),
-		netip.MustParsePrefix("203.0.113.0/24"),
-	})
-	if conflicts != 2 {
-		t.Fatalf("unexpected FakeIP bypass conflict count: %d", conflicts)
 	}
 }

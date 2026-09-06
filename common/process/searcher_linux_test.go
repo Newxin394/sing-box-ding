@@ -15,7 +15,7 @@ func TestFindProcessInfoByPID(t *testing.T) {
 	if processInfo.ProcessID != uint32(os.Getpid()) || processInfo.UserId != int32(os.Getuid()) {
 		t.Fatalf("unexpected process identity: %+v", processInfo)
 	}
-	if processInfo.ProcessPath == "" {
+	if len(processInfo.ProcessPaths) == 0 || processInfo.ProcessPaths[0] == "" {
 		t.Fatal("missing process path")
 	}
 }

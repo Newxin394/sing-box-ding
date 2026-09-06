@@ -59,19 +59,6 @@ eBPF 入站不使用[监听字段](/zh/configuration/shared/listen/)。
 
 ### 字段
 
-#### mode
-
-旧版路径选择项。新配置应改用 `local.enabled` 和 `shared.enabled`，`mode` 不可与任一
-`enabled` 字段同时使用。
-
-| 值 | 行为 |
-| --- | --- |
-| `local` | 接管本机生成的流量。 |
-| `shared` | 接管从配置的下游接口进入的流量。 |
-| `hybrid` | 同时启用两条路径。 |
-
-未配置两个 `enabled` 字段和 `mode` 时，为保持兼容仍默认启用 local 接管。
-
 #### network
 
 启用的传输协议，可选 `tcp` 和/或 `udp`，默认同时启用。

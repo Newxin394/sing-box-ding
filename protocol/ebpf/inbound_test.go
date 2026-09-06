@@ -167,44 +167,35 @@ func TestParsePortRanges(t *testing.T) {
 	}
 }
 
-func TestNormalizeMode(t *testing.T) {
-	for _, test := range []struct {
-		inputMode    string
+func TestNormalizeEnablement(t *testing.T) {
+	tests := []struct {
+		name         string
 		localOption  *bool
 		sharedOption *bool
-		expectedMode string
 		local        bool
 		shared       bool
+		wantErr      bool
 	}{
-		{expectedMode: ebpfModeLocal, local: true},
-		{inputMode: ebpfModeLocal, expectedMode: ebpfModeLocal, local: true},
-		{inputMode: ebpfModeShared, expectedMode: ebpfModeShared, shared: true},
-		{inputMode: ebpfModeHybrid, expectedMode: ebpfModeHybrid, local: true, shared: true},
-		{localOption: common.Ptr(true), expectedMode: ebpfModeLocal, local: true},
-		{sharedOption: common.Ptr(true), expectedMode: ebpfModeShared, shared: true},
-		{localOption: common.Ptr(true), sharedOption: common.Ptr(true), expectedMode: ebpfModeHybrid, local: true, shared: true},
-	} {
-		mode, local, shared, err := normalizeMode(test.inputMode, test.localOption, test.sharedOption)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode != test.expectedMode || local != test.local || shared != test.shared {
-			t.Fatalf("unexpected normalized mode: %q %v %v", mode, local, shared)
-		}
+		{name: "default", local: true},
+		{name: "local", localOption: common.Ptr(true), local: true},
+		{name: "shared", sharedOption: common.Ptr(true), shared: true},
+		{name: "hybrid", localOption: common.Ptr(true), sharedOption: common.Ptr(true), local: true, shared: true},
+		{name: "disabled local", localOption: common.Ptr(false), wantErr: true},
+		{name: "disabled shared", sharedOption: common.Ptr(false), wantErr: true},
 	}
-	for _, test := range []struct {
-		mode         string
-		localOption  *bool
-		sharedOption *bool
-	}{
-		{mode: "disabled"},
-		{localOption: common.Ptr(false)},
-		{sharedOption: common.Ptr(false)},
-		{mode: ebpfModeHybrid, localOption: common.Ptr(true)},
-	} {
-		if _, _, _, err := normalizeMode(test.mode, test.localOption, test.sharedOption); err == nil {
-			t.Fatalf("expected invalid enablement to be rejected: %+v", test)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			local, shared, err := normalizeEnablement(test.localOption, test.sharedOption)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected invalid enablement to be rejected")
+				}
+				return
+			}
+			if err != nil || local != test.local || shared != test.shared {
+				t.Fatalf("unexpected normalized enablement: local=%v shared=%v err=%v", local, shared, err)
+			}
+		})
 	}
 }
 

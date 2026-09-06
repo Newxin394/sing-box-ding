@@ -4,7 +4,6 @@ package ebpf
 
 import (
 	"net/netip"
-	"strings"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -53,15 +52,6 @@ func (i *Inbound) normalizeFakeIPPrefixes() error {
 	return nil
 }
 
-func (i *Inbound) fakeIPPrefixString() string {
-	prefixes := i.fakeIPPrefixes()
-	values := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		values = append(values, prefix.String())
-	}
-	return strings.Join(values, ", ")
-}
-
 func (i *Inbound) fakeIPPrefixes() []netip.Prefix {
 	prefixes := make([]netip.Prefix, 0, 2)
 	if i.fakeIPIPv4Prefix.IsValid() {
@@ -71,16 +61,4 @@ func (i *Inbound) fakeIPPrefixes() []netip.Prefix {
 		prefixes = append(prefixes, i.fakeIPIPv6Prefix)
 	}
 	return prefixes
-}
-
-func (i *Inbound) fakeIPBypassConflictCount(prefixes []netip.Prefix) int {
-	var conflicts int
-	for _, fakeIPPrefix := range i.fakeIPPrefixes() {
-		for _, bypassPrefix := range prefixes {
-			if prefixesOverlap(fakeIPPrefix, bypassPrefix) {
-				conflicts++
-			}
-		}
-	}
-	return conflicts
 }

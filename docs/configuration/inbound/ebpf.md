@@ -60,21 +60,6 @@ The eBPF inbound does not use [Listen Fields](/configuration/shared/listen/).
 
 ### Fields
 
-#### mode
-
-Legacy path selector. New configurations should use `local.enabled` and
-`shared.enabled` instead. `mode` cannot be combined with either `enabled`
-field.
-
-| Value | Behavior |
-| --- | --- |
-| `local` | Intercept traffic generated on this host. |
-| `shared` | Intercept traffic arriving on configured downstream interfaces. |
-| `hybrid` | Enable both paths. |
-
-When neither `enabled` field nor `mode` is present, local interception remains
-enabled by default for compatibility.
-
 #### network
 
 Enabled transport protocols, `tcp` and/or `udp`. Both are enabled by default.

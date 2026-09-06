@@ -128,6 +128,42 @@ func TestCompileBypassCIDRPolicy(t *testing.T) {
 	}
 }
 
+func TestCompilePolicySnapshot(t *testing.T) {
+	includeUID := []UIDRange{{Start: 1000, End: 1002}}
+	includeSource := []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
+	includeMAC := []MACAddress{{0x02, 0, 0, 0, 0, 1}}
+	policy, err := CompilePolicy(PolicyConfig{
+		EnableTCP:           true,
+		EnableUDP:           true,
+		Local:               LocalPolicy{IncludeUID: includeUID},
+		SharedDNSMode:       DNSModeRespectPolicy,
+		SharedBypassPrivate: true,
+		FakeIPIPv4:          netip.MustParsePrefix("198.18.1.1/15"),
+		IncludeSourceCIDR:   includeSource,
+		IncludeSourceMAC:    includeMAC,
+		LocalBypassPort:     []PortRange{{Start: 443, End: 443}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.uidEntries) == 0 || !policy.uidDefaultBypass ||
+		len(policy.includeSource.ipv4) != 1 || len(policy.includeSourceMAC) != 1 ||
+		len(policy.localBypassPortEntries) != 2 {
+		t.Fatalf("compiled policy omitted configured rules: %+v", policy)
+	}
+	if policy.fakeIPIPv4 != netip.MustParsePrefix("198.18.0.0/15") {
+		t.Fatalf("FakeIP prefix was not normalized: %s", policy.fakeIPIPv4)
+	}
+	includeUID[0].Start = 2000
+	includeSource[0] = netip.MustParsePrefix("203.0.113.0/24")
+	includeMAC[0][0] = 0x06
+	if policy.local.IncludeUID[0].Start != 1000 ||
+		policy.includeSource.ipv4[0] != netip.MustParsePrefix("192.0.2.0/24") ||
+		policy.includeSourceMAC[0][0] != 0x02 {
+		t.Fatal("compiled policy retained mutable input slices")
+	}
+}
+
 func TestBypassCIDRPolicyDelta(t *testing.T) {
 	current := []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),

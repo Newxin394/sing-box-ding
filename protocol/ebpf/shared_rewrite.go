@@ -17,15 +17,13 @@ import (
 )
 
 const (
-	sharedFlowMaxIdle               = 5 * time.Minute
-	sharedFlowPressureMaxIdle       = 15 * time.Second
-	sharedFlowPressureSweepInterval = 15 * time.Second
-	sharedFlowSweepInterval         = 5 * time.Minute
-	sharedFlowPressureEnterPercent  = 70
-	sharedFlowPressureExitPercent   = 50
-	sharedFlowPressureExitRounds    = 3
-	sharedFlowFallbackScanBudget    = 1024
-	sharedFlowReleaseFlushBudget    = 4096
+	sharedFlowMaxIdle              = 5 * time.Minute
+	sharedFlowPressureMaxIdle      = 15 * time.Second
+	sharedFlowPressureEnterPercent = 70
+	sharedFlowPressureExitPercent  = 50
+	sharedFlowPressureExitRounds   = 3
+	sharedFlowFallbackScanBudget   = 1024
+	sharedFlowReleaseFlushBudget   = 4096
 )
 
 type sharedRewrite struct {
@@ -99,22 +97,14 @@ func (s *sharedRewrite) prepareBackend() (*ECommon.SharedNetworkBackend, error) 
 	}
 	cgroupBackend := s.inbound.cgroupBackendInstance()
 	backend, err := ECommon.PrepareSharedNetwork(cgroupBackend, ECommon.SharedNetworkConfig{
-		ListenerPort:         s.listeners.selectedPort(),
-		EnableTCP:            s.inbound.enableTCP,
-		EnableUDP:            s.inbound.enableUDP,
-		DNSMode:              toCommonDNSMode(s.inbound.sharedDNSMode),
-		BypassPrivateAddress: s.inbound.sharedBypassPrivate,
-		RedirectIPv4:         s.inbound.redirectIPv4Prefix,
-		RedirectIPv6:         redirectIPv6,
-		FakeIPIPv4:           s.inbound.fakeIPIPv4Prefix,
-		FakeIPIPv6:           s.inbound.fakeIPIPv6Prefix,
-		IncludeSourceCIDR:    s.inbound.sharedOptions.IncludeSourceCIDR,
-		ExcludeSourceCIDR:    s.inbound.sharedOptions.ExcludeSourceCIDR,
-		IncludeSourceMAC:     s.inbound.sharedIncludeMAC,
-		ExcludeSourceMAC:     s.inbound.sharedExcludeMAC,
-		BypassPort:           s.inbound.sharedBypassPort,
-		MapCapacity:          s.mapCapacity,
-		UDPTimeout:           s.inbound.udpTimeout,
+		ListenerPort: s.listeners.selectedPort(),
+		EnableTCP:    s.inbound.enableTCP,
+		EnableUDP:    s.inbound.enableUDP,
+		RedirectIPv4: s.inbound.redirectIPv4Prefix,
+		RedirectIPv6: redirectIPv6,
+		Policy:       s.inbound.compiledPolicy,
+		MapCapacity:  s.mapCapacity,
+		UDPTimeout:   s.inbound.udpTimeout,
 	})
 	if err != nil {
 		return nil, err
@@ -256,36 +246,6 @@ func (s *sharedRewrite) stopFlowJanitor() {
 
 func (s *sharedRewrite) runFlowJanitor(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
-	sweepTimer := time.NewTimer(sharedFlowSweepInterval)
-	sweepTimerChannel := sweepTimer.C
-	var pressureTimer *time.Timer
-	var pressureTimerChannel <-chan time.Time
-	resetPressureTimer := func(active bool) {
-		if !active {
-			if pressureTimer != nil {
-				if !pressureTimer.Stop() {
-					select {
-					case <-pressureTimer.C:
-					default:
-					}
-				}
-			}
-			pressureTimerChannel = nil
-			return
-		}
-		if pressureTimer == nil {
-			pressureTimer = time.NewTimer(sharedFlowPressureSweepInterval)
-		} else {
-			if !pressureTimer.Stop() {
-				select {
-				case <-pressureTimer.C:
-				default:
-				}
-			}
-			pressureTimer.Reset(sharedFlowPressureSweepInterval)
-		}
-		pressureTimerChannel = pressureTimer.C
-	}
 	var releaseTimer *time.Timer
 	var releaseTimerChannel <-chan time.Time
 	resetReleaseTimer := func(backend *ECommon.SharedNetworkBackend) {
@@ -314,27 +274,12 @@ func (s *sharedRewrite) runFlowJanitor(ctx context.Context, done chan<- struct{}
 		if releaseTimer != nil {
 			releaseTimer.Stop()
 		}
-		if pressureTimer != nil {
-			pressureTimer.Stop()
-		}
 	}()
 	pressure := false
 	knownPressure := false
 	belowExitRounds := 0
 	var lastReservationFailures uint64
 	scanInProgress := false
-	attachmentActive := s.dataPlane != nil && s.dataPlane.isEnabled()
-	resetSweepTimer := func() {
-		if !sweepTimer.Stop() {
-			select {
-			case <-sweepTimer.C:
-			default:
-			}
-		}
-		sweepTimer.Reset(sharedFlowSweepInterval)
-		sweepTimerChannel = sweepTimer.C
-	}
-	defer sweepTimer.Stop()
 	for {
 		backend := s.sharedBackendInstance()
 		if backend == nil {
@@ -344,10 +289,6 @@ func (s *sharedRewrite) runFlowJanitor(ctx context.Context, done chan<- struct{}
 		select {
 		case <-ctx.Done():
 			return
-		case <-sweepTimerChannel:
-			sweepRequested = true
-		case <-pressureTimerChannel:
-			sweepRequested = true
 		case <-backend.TCPFlowWake():
 			resetReleaseTimer(backend)
 			knownPressure, sweepRequested = updateSharedFlowWakeState(
@@ -371,17 +312,11 @@ func (s *sharedRewrite) runFlowJanitor(ctx context.Context, done chan<- struct{}
 			continue
 		}
 		if s.dataPlane == nil || !s.dataPlane.isEnabled() {
-			attachmentActive = false
 			pressure = false
 			knownPressure = false
 			belowExitRounds = 0
 			scanInProgress = false
-			resetSweepTimer()
-			resetPressureTimer(false)
 			continue
-		}
-		if !attachmentActive {
-			attachmentActive = true
 		}
 		reservationPressure := false
 		reservationFailures, failureErr := backend.TokenReservationFailures()
@@ -401,16 +336,10 @@ func (s *sharedRewrite) runFlowJanitor(ctx context.Context, done chan<- struct{}
 				pressure = true
 			}
 			s.janitorWarnings.warn(s.inbound.logger, "sweep orphaned shared-network flows: ", err)
-			resetPressureTimer(pressure || scanInProgress)
 		} else {
 			scanInProgress = !result.Complete
-			if result.Complete {
-				resetSweepTimer()
-			}
 			if !result.Complete {
 				backend.RequestMaintenance()
-				resetSweepTimer()
-				resetPressureTimer(true)
 				continue
 			}
 			entered, exited := false, false
@@ -433,12 +362,9 @@ func (s *sharedRewrite) runFlowJanitor(ctx context.Context, done chan<- struct{}
 				s.inbound.logger.Info(
 					"eBPF shared-network proxy map pressure cleared: state=", result.Usage.Entries,
 					"/", result.Usage.Capacity,
-					", sweep_interval=", sharedFlowSweepInterval,
 				)
 			}
 		}
-		resetPressureTimer(pressure || scanInProgress)
-		resetSweepTimer()
 	}
 }
 
