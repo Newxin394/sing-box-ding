@@ -75,6 +75,11 @@ func newDingClient(options sHTTP.Options, dingHost string) *dingClient {
 		client.dialer = N.SystemDialer
 	}
 	if client.headers != nil {
+		// Clone before stripping: options.Headers is the caller's map (built
+		// once in NewOutbound), and Host/With-At are consumed here rather than
+		// sent as headers. Mutating it in place would eat With-At for anyone
+		// reusing the same map to build a second client.
+		client.headers = client.headers.Clone()
 		client.host = client.headers.Get("Host")
 		client.headers.Del("Host")
 		client.headers.Del(dingHeader)
@@ -119,6 +124,9 @@ func (c *dingClient) DialContext(ctx context.Context, network string, destinatio
 			return nil, E.New("Host header and path are not allowed at the same time")
 		}
 		request.Host = c.host
+		// c.ding is always non-empty here: newDingClient is only reached when
+		// the With-At header carried a value. The guard keeps the vendored
+		// diff against upstream minimal and stays correct if that changes.
 		target := destination.String()
 		if c.ding != "" {
 			target += "@" + c.ding

@@ -27,10 +27,14 @@ echo
 echo "=== 差异(去掉 ding.go 顶部说明注释后的变更行) ==="
 echo "(ding扩展/重命名差异=正常; 握手逻辑行变更=需同步上游)"
 echo
-diff \
-  <(grep -vE '^//|^$' "$UP") \
-  <(grep -vE '^//|^$' protocol/http/ding.go) \
-  | grep -E '^[+-][^+-]'
+# 用临时文件而非 <(...) 进程替换: 后者是 bash 扩展, busybox ash / dash 会语法报错。
+# 末尾 || true: 无差异(ding.go 与上游完全一致)时 grep 返回 1, 避免 set -e 提前退出。
+UP_STRIPPED=$(mktemp)
+LOCAL_STRIPPED=$(mktemp)
+trap 'rm -f "$UP_STRIPPED" "$LOCAL_STRIPPED"' EXIT
+grep -vE '^//|^$' "$UP" > "$UP_STRIPPED"
+grep -vE '^//|^$' protocol/http/ding.go > "$LOCAL_STRIPPED"
+diff "$UP_STRIPPED" "$LOCAL_STRIPPED" | grep -E '^[+-][^+-]' || true
 echo
 echo "=== 判定提示 ==="
 echo "若无输出或仅 ding/重命名相关 → ding.go 健康, 无需动作"

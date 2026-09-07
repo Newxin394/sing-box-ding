@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"net"
-	"os"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -13,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -77,5 +77,8 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	return nil, os.ErrInvalid
+	// The adapter advertises TCP only, so reaching this path means a route rule
+	// sent UDP at an HTTP outbound. Say so explicitly: the bare os.ErrInvalid
+	// ("invalid argument") gives no clue which side is misconfigured.
+	return nil, E.New("UDP is not supported by outbound: ", h.Tag())
 }
