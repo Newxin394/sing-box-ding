@@ -406,12 +406,22 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 
 func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	s.connection.NewConnection(ctx, s, conn, metadata, onClose)
+	selected := s.selected.Load()
+	if outboundHandler, isHandler := selected.(adapter.ConnectionHandler); isHandler {
+		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
+	} else {
+		s.connection.NewConnection(ctx, s, conn, metadata, onClose)
+	}
 }
 
 func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
+	selected := s.selected.Load()
+	if outboundHandler, isHandler := selected.(adapter.PacketConnectionHandler); isHandler {
+		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
+	} else {
+		s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
+	}
 }
 
 func RealTag(outboundManager adapter.OutboundManager, detour adapter.Outbound) string {
