@@ -422,10 +422,19 @@ func (r *DefaultDNSRule) Start() error {
 	if err := r.abstractDefaultRule.Start(); err != nil {
 		return err
 	}
+	startedFallbackRules := 0
 	for _, fallbackRule := range r.fallbackRules {
 		if err := fallbackRule.Start(); err != nil {
+			// Rule-set based fallback items acquire references during Start. Roll
+			// back all earlier starts before returning so a partial startup cannot
+			// retain stale rule-set references.
+			for index := startedFallbackRules - 1; index >= 0; index-- {
+				_ = r.fallbackRules[index].Close()
+			}
+			_ = r.abstractDefaultRule.Close()
 			return err
 		}
+		startedFallbackRules++
 	}
 	return nil
 }

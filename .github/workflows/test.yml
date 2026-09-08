@@ -6,6 +6,7 @@ on:
       - oldstable
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
     paths-ignore:
       - '**.md'
@@ -16,6 +17,7 @@ on:
       - oldstable
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
 
 concurrency:
@@ -55,3 +57,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: go test -v -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
+      - name: Test eBPF TC package (linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: go test -v -exec sudo -tags "with_ebpf" ./protocol/ebpf

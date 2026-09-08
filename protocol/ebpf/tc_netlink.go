@@ -145,7 +145,13 @@ func detachTCFilter(filter *netlink.BpfFilter) error {
 			return err
 		}
 		attached, checkErr := tcFilterAttachedByHandle(link, filter.Parent, filter.Name, filter.Handle, filter.Priority)
-		if checkErr != nil || !attached {
+		if checkErr != nil {
+			// A failed listing cannot prove that the filter disappeared. Keep the
+			// original delete error so callers retain ownership instead of racing a
+			// possibly live filter after a transient netlink failure.
+			return err
+		}
+		if !attached {
 			return nil
 		}
 	}

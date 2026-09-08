@@ -434,7 +434,7 @@ func (r *Router) resolveDNSRoute(server string, routeOptions R.RuleActionDNSRout
 	return transport, dnsRouteStatusResolved
 }
 
-func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, matchResponse *mDNS.Msg, allowFakeIP bool, nextIndex int) (exchangeWithRulesResult, int, bool) {
+func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, fallbackBaseOptions adapter.DNSQueryOptions, matchResponse *mDNS.Msg, allowFakeIP bool, nextIndex int) (exchangeWithRulesResult, int, bool) {
 	metadata := adapter.ContextFrom(ctx)
 	if metadata == nil {
 		metadata = &adapter.InboundContext{}
@@ -469,7 +469,10 @@ func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, resu
 		if transport.Type() == C.DNSTypeFakeIP && !allowFakeIP {
 			continue
 		}
-		fallbackOptions := result.options
+		// Each fallback is an independent alternative to the primary query. Do
+		// not carry an earlier failed fallback's cache/TTL/subnet override into
+		// the next candidate.
+		fallbackOptions := fallbackBaseOptions
 		if transport.Type() == C.DNSTypeFakeIP || fallbackRule.DisableCache() {
 			fallbackOptions.DisableCache = true
 		}
@@ -497,7 +500,13 @@ func (r *Router) continueDNSRulesAfterFallthrough(ctx context.Context, rules []a
 		effectiveOptions: result.options,
 	}
 	for {
-		result = r.runDNSRulesFrom(ctx, rules, message, &state, allowFakeIP)
+		result, suspension := r.walkDNSRules(ctx, rules, message, &state, allowFakeIP)
+		if suspension == nil {
+			cancelDNSFutures(&state)
+		} else {
+			result = r.resumeExchangeWithRules(ctx, rules, message, &state, allowFakeIP, suspension)
+		}
+		result = r.applyDNSFallback(ctx, message, result, allowFakeIP)
 		if !(result.rule != nil && result.rule.AllowFallthrough() && dnsResultBad(result) && result.ruleIndex < len(rules)-1) {
 			return result
 		}
@@ -535,9 +544,10 @@ func (r *Router) applyDNSFallback(ctx context.Context, message *mDNS.Msg, result
 	// shift the match basis. When the primary query errored there is no such
 	// response: catch-all rules (match_all / clash_mode) still fire.
 	matchResponse := result.response
+	fallbackBaseOptions := result.options
 	nextIndex := 0
 	for {
-		nextResult, attempted, matched := r.resolveDNSFallback(ctx, message, result, matchResponse, allowFakeIP, nextIndex)
+		nextResult, attempted, matched := r.resolveDNSFallback(ctx, message, result, fallbackBaseOptions, matchResponse, allowFakeIP, nextIndex)
 		if !matched {
 			return result
 		}
@@ -845,6 +855,9 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 				return exchangeWithRulesResult{
 					response:  namedResponse,
 					transport: state.namedTransports[responseTag],
+					rule:      currentRule,
+					ruleIndex: state.ruleIndex,
+					options:   state.effectiveOptions,
 				}, nil
 			}
 			if !hasBindings {
@@ -861,6 +874,9 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 			return exchangeWithRulesResult{
 				response:  response,
 				transport: state.anonymousFuture.transport,
+				rule:      currentRule,
+				ruleIndex: state.ruleIndex,
+				options:   state.effectiveOptions,
 			}, nil
 		case *R.RuleActionDNSRoute:
 			queryOptions := state.effectiveOptions
@@ -893,10 +909,16 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 			case C.RuleActionRejectMethodDefault:
 				return exchangeWithRulesResult{
 					response:     dnsRejectResponse(message, action.Rcode, r.defaultRejectRcode),
+					rule:         currentRule,
+					ruleIndex:    state.ruleIndex,
+					options:      state.effectiveOptions,
 					rejectAction: action,
 				}, nil
 			case C.RuleActionRejectMethodDrop:
 				return exchangeWithRulesResult{
+					rule:         currentRule,
+					ruleIndex:    state.ruleIndex,
+					options:      state.effectiveOptions,
 					rejectAction: action,
 					err:          R.ErrDrop,
 				}, nil
@@ -908,7 +930,10 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 			resp := action.Response(message)
 			resp = r.followPredefinedCNAME(ctx, message, resp, state.effectiveOptions)
 			return exchangeWithRulesResult{
-				response: resp,
+				response:  resp,
+				rule:      currentRule,
+				ruleIndex: state.ruleIndex,
+				options:   state.effectiveOptions,
 			}, nil
 		}
 	}
@@ -1014,6 +1039,9 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
 			return exchangeWithRulesResult{
 				response:  response,
 				transport: transport,
+				rule:      armed.rule,
+				ruleIndex: armed.ruleIndex,
+				options:   armed.options,
 			}, nil, true
 		case *R.RuleActionDNSRoute:
 			queryOptions := armed.options
@@ -1031,10 +1059,16 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
 			case C.RuleActionRejectMethodDefault:
 				return exchangeWithRulesResult{
 					response:     dnsRejectResponse(message, action.Rcode, r.defaultRejectRcode),
+					rule:         armed.rule,
+					ruleIndex:    armed.ruleIndex,
+					options:      armed.options,
 					rejectAction: action,
 				}, nil, true
 			case C.RuleActionRejectMethodDrop:
 				return exchangeWithRulesResult{
+					rule:         armed.rule,
+					ruleIndex:    armed.ruleIndex,
+					options:      armed.options,
 					rejectAction: action,
 					err:          R.ErrDrop,
 				}, nil, true
@@ -1043,7 +1077,10 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
 			response := action.Response(message)
 			response = r.followPredefinedCNAME(ctx, message, response, armed.options)
 			return exchangeWithRulesResult{
-				response: response,
+				response:  response,
+				rule:      armed.rule,
+				ruleIndex: armed.ruleIndex,
+				options:   armed.options,
 			}, nil, true
 		}
 	}
@@ -1085,11 +1122,16 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
 func (r *Router) exchangeWithRulesAsync(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, options adapter.DNSQueryOptions, allowFakeIP bool, callback func(result exchangeWithRulesResult)) {
 	state := &dnsRuleWalkState{effectiveOptions: options, lastLoggedIndex: -1}
 	finish := func(result exchangeWithRulesResult) {
-		result = r.applyDNSFallback(ctx, message, result, allowFakeIP)
-		if result.rule != nil && result.rule.AllowFallthrough() && dnsResultBad(result) && result.ruleIndex < len(rules)-1 {
-			result = r.continueDNSRulesAfterFallthrough(ctx, rules, message, result, allowFakeIP)
-		}
-		callback(result)
+		// Transport callbacks can run on shared multiplexer and I/O goroutines.
+		// Fallback and fallthrough may perform further DNS exchanges, so never
+		// make the callback path wait for an upstream timeout.
+		go func() {
+			result = r.applyDNSFallback(ctx, message, result, allowFakeIP)
+			if result.rule != nil && result.rule.AllowFallthrough() && dnsResultBad(result) && result.ruleIndex < len(rules)-1 {
+				result = r.continueDNSRulesAfterFallthrough(ctx, rules, message, result, allowFakeIP)
+			}
+			callback(result)
+		}()
 	}
 	result, suspension := r.walkDNSRules(ctx, rules, message, state, allowFakeIP)
 	if suspension == nil {

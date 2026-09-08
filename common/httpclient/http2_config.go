@@ -15,6 +15,7 @@ func CloneHTTP2Transport(transport *http2.Transport) *http2.Transport {
 	return &http2.Transport{
 		ReadIdleTimeout: transport.ReadIdleTimeout,
 		PingTimeout:     transport.PingTimeout,
+		IdleConnTimeout: transport.IdleConnTimeout,
 		DialTLSContext:  transport.DialTLSContext,
 	}
 }
@@ -38,5 +39,6 @@ func ConfigureHTTP2Transport(options option.HTTP2Options) (*http2.Transport, err
 	h2Transport.ConnPool = nil
 	h2Transport.ReadIdleTimeout = time.Duration(options.KeepAlivePeriod)
 	h2Transport.PingTimeout = time.Duration(options.IdleTimeout)
+	h2Transport.IdleConnTimeout = time.Duration(options.IdleTimeout)
 	return h2Transport, nil
 }

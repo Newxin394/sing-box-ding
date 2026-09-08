@@ -261,22 +261,12 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	if response.StatusCode != http.StatusOK {
 		return nil, E.New("unexpected status: ", response.Status)
 	}
-	var responseMessage mDNS.Msg
-	if response.ContentLength > 0 {
-		responseBuffer := buf.NewSize(int(response.ContentLength))
-		defer responseBuffer.Release()
-		_, err = responseBuffer.ReadFullFrom(response.Body, int(response.ContentLength))
-		if err != nil {
-			return nil, err
-		}
-		err = responseMessage.Unpack(responseBuffer.Bytes())
-	} else {
-		rawMessage, err = io.ReadAll(response.Body)
-		if err != nil {
-			return nil, err
-		}
-		err = responseMessage.Unpack(rawMessage)
+	rawMessage, err = ReadDNSMessage(response.Body, response.ContentLength)
+	if err != nil {
+		return nil, err
 	}
+	var responseMessage mDNS.Msg
+	err = responseMessage.Unpack(rawMessage)
 	if err != nil {
 		return nil, err
 	}

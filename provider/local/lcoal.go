@@ -31,6 +31,26 @@ func RegisterProviderInline(registry *provider.Registry) {
 
 var _ adapter.Provider = (*ProviderLocal)(nil)
 
+// maxProviderLocalContentSize prevents a file-watch reload from allocating an
+// unbounded buffer when a local provider is accidentally replaced with a large
+// file. It matches the remote provider safety budget.
+const maxProviderLocalContentSize = 32 << 20
+
+func readProviderLocalContent(reader io.Reader) ([]byte, error) {
+	return readProviderLocalContentWithLimit(reader, maxProviderLocalContentSize)
+}
+
+func readProviderLocalContentWithLimit(reader io.Reader, maxSize int) ([]byte, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, int64(maxSize)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > maxSize {
+		return nil, E.New("provider content exceeds size limit")
+	}
+	return content, nil
+}
+
 type ProviderLocal struct {
 	provider.Adapter
 	ctx         context.Context
@@ -95,6 +115,7 @@ func NewProviderLocal(ctx context.Context, router adapter.Router, logFactory log
 			uErr := provider.reloadFile(path)
 			if uErr != nil {
 				logger.Error(E.Cause(uErr, "reload provider ", tag))
+				return
 			}
 			provider.UpdateGroups()
 		},
@@ -136,15 +157,17 @@ func (s *ProviderLocal) reloadFile(path string) error {
 	if err != nil {
 		return err
 	}
-	content, err := io.ReadAll(file)
-	if err != nil {
-		file.Close()
-		return err
-	}
-	fileInfo, err := file.Stat()
+	// A watched local provider is still untrusted input: editors can replace it
+	// with a huge file or an incomplete write. Keep its memory behavior aligned
+	// with remote subscriptions.
+	content, readErr := readProviderLocalContent(file)
+	fileInfo, statErr := file.Stat()
 	closeErr := file.Close()
-	if err != nil {
-		return err
+	if readErr != nil {
+		return readErr
+	}
+	if statErr != nil {
+		return statErr
 	}
 	if closeErr != nil {
 		return closeErr

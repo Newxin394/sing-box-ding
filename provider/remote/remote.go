@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +38,35 @@ func RegisterProvider(registry *provider.Registry) {
 }
 
 var _ adapter.Provider = (*ProviderRemote)(nil)
+
+// providerFetchTimeout bounds every subscription fetch, including the first
+// boot-time request. A captive portal or black-holed route must not leave the
+// provider permanently updating or delay service recovery indefinitely.
+const providerFetchTimeout = 30 * time.Second
+
+// maxProviderContentSize caps remote and disk-backed subscription input before
+// decoding/parsing. Typical subscriptions are kilobytes; 32 MiB leaves ample
+// room for large rule sets while preventing a malicious endpoint or corrupted
+// cache from forcing an unbounded allocation.
+const maxProviderContentSize = 32 << 20
+
+func readProviderContent(reader io.Reader, contentLength int64) ([]byte, error) {
+	return readProviderContentWithLimit(reader, contentLength, maxProviderContentSize)
+}
+
+func readProviderContentWithLimit(reader io.Reader, contentLength, maxSize int64) ([]byte, error) {
+	if contentLength > maxSize {
+		return nil, E.New("provider content exceeds size limit")
+	}
+	content, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > maxSize {
+		return nil, E.New("provider content exceeds size limit")
+	}
+	return content, nil
+}
 
 type ProviderRemote struct {
 	provider.Adapter
@@ -184,16 +212,22 @@ func (s *ProviderRemote) StartContext(ctx context.Context, startContext *adapter
 	}
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
+	// Adapter startup validates the provider lifecycle (including URL-test
+	// storage) before we tolerate a remote fetch failure. Configuration and
+	// transport setup errors above remain fatal; only an unavailable remote
+	// endpoint may be recovered by the update loop.
+	if err = s.Adapter.Start(); err != nil {
+		return err
+	}
 	if !loadedFromCache && !loadedFromInitialPath {
 		ctx = interrupt.ContextWithIsProviderConnection(ctx)
-		err = s.fetch(ctx, true)
-		if err != nil {
-			return E.Cause(err, "initial outbound provider: ", s.Tag())
+		if err = s.fetch(ctx, true); err != nil {
+			s.logger.Error(E.Cause(err, "initial outbound provider: ", s.Tag()), " will retry in background")
 		}
 	}
 	s.ticker = time.NewTicker(s.updateInterval)
 	go s.loopUpdate()
-	return s.Adapter.Start()
+	return nil
 }
 
 func (s *ProviderRemote) Update() error {
@@ -256,6 +290,8 @@ func (s *ProviderRemote) updateOnce() {
 }
 
 func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
+	ctx, cancel := context.WithTimeout(ctx, providerFetchTimeout)
+	defer cancel()
 	if s.updating.Swap(true) {
 		return E.New("provider is updating")
 	}
@@ -276,6 +312,10 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	if err != nil {
 		return err
 	}
+	// Every response, including 304 and error statuses, owns a body. Close it
+	// before branching so a congested or failing subscription endpoint cannot
+	// strand response resources across periodic refreshes.
+	defer resp.Body.Close()
 	infoStr := resp.Header.Get("subscription-userinfo")
 	info, hasInfo := parseInfo(infoStr)
 	switch resp.StatusCode {
@@ -317,8 +357,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	default:
 		return E.New("unexpected status: ", resp.Status)
 	}
-	defer resp.Body.Close()
-	contentRaw, err := io.ReadAll(resp.Body)
+	contentRaw, err := readProviderContent(resp.Body, resp.ContentLength)
 	if err != nil {
 		return err
 	}
@@ -402,7 +441,7 @@ func (s *ProviderRemote) loadCacheFile() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		content, err = io.ReadAll(file)
+		content, err = readProviderContent(file, -1)
 		if err != nil {
 			file.Close()
 			return false, err
@@ -425,6 +464,9 @@ func (s *ProviderRemote) loadCacheFile() (bool, error) {
 			lastUpdated = fileInfo.ModTime()
 		}
 	} else if saveSub != nil && len(saveSub.Content) > 0 {
+		if len(saveSub.Content) > maxProviderContentSize {
+			return false, E.New("cached provider content exceeds size limit")
+		}
 		content = saveSub.Content
 		lastUpdated = saveSub.LastUpdated
 		lastEtag = saveSub.LastEtag
@@ -440,9 +482,17 @@ func (s *ProviderRemote) loadCacheFile() (bool, error) {
 }
 
 func (s *ProviderRemote) loadInitialPath() error {
-	contentRaw, err := filemanager.ReadFile(s.ctx, s.initialPath)
+	file, err := filemanager.Open(s.ctx, s.initialPath)
 	if err != nil {
 		return err
+	}
+	contentRaw, readErr := readProviderContent(file, -1)
+	closeErr := file.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	content := s.decodeContent(contentRaw)
 	err = s.updateProviderFromContent(content)
@@ -509,7 +559,6 @@ func (s *ProviderRemote) loopUpdate() {
 		s.ticker.Reset(s.updateInterval)
 	}
 	for {
-		runtime.GC()
 		select {
 		case <-s.ctx.Done():
 			return

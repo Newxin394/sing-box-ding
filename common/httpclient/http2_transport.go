@@ -5,6 +5,7 @@ import (
 	stdTLS "crypto/tls"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
@@ -20,7 +21,7 @@ type http2Transport struct {
 }
 
 func newHTTP2Transport(rawDialer N.Dialer, baseTLSConfig tls.Config, options option.HTTP2Options) (*http2Transport, error) {
-	h1 := newHTTP1Transport(rawDialer, baseTLSConfig)
+	h1 := newHTTP1Transport(rawDialer, baseTLSConfig, time.Duration(options.IdleTimeout))
 	h2Transport, err := ConfigureHTTP2Transport(options)
 	if err != nil {
 		return nil, err

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
@@ -24,10 +25,11 @@ type http2FallbackTransport struct {
 	h1Transport       *http1Transport
 	fallbackAccess    sync.RWMutex
 	fallbackAuthority map[string]struct{}
+	maxFallback       int
 }
 
 func newHTTP2FallbackTransport(rawDialer N.Dialer, baseTLSConfig tls.Config, options option.HTTP2Options) (*http2FallbackTransport, error) {
-	h1 := newHTTP1Transport(rawDialer, baseTLSConfig)
+	h1 := newHTTP1Transport(rawDialer, baseTLSConfig, time.Duration(options.IdleTimeout))
 	h2Transport, err := ConfigureHTTP2Transport(options)
 	if err != nil {
 		return nil, err
@@ -39,6 +41,7 @@ func newHTTP2FallbackTransport(rawDialer N.Dialer, baseTLSConfig tls.Config, opt
 		h2Transport:       h2Transport,
 		h1Transport:       h1,
 		fallbackAuthority: make(map[string]struct{}),
+		maxFallback:       256,
 	}, nil
 }
 
@@ -57,6 +60,15 @@ func (t *http2FallbackTransport) markH2Fallback(authority string) {
 		return
 	}
 	t.fallbackAccess.Lock()
+	if _, found := t.fallbackAuthority[authority]; !found && t.maxFallback > 0 && len(t.fallbackAuthority) >= t.maxFallback {
+		// ALPN capability is stable enough to cache, but a long-lived process
+		// must not retain an unbounded host set from dynamic endpoints. Any entry
+		// can be probed again safely when the small cache reaches its limit.
+		for cachedAuthority := range t.fallbackAuthority {
+			delete(t.fallbackAuthority, cachedAuthority)
+			break
+		}
+	}
 	t.fallbackAuthority[authority] = struct{}{}
 	t.fallbackAccess.Unlock()
 }
@@ -84,6 +96,12 @@ func (t *http2FallbackTransport) roundTrip(request *http.Request, allowHTTP1Fall
 		return nil, err
 	}
 	t.markH2Fallback(authority)
+	// TLS/ALPN fallback can occur after request bytes have been accepted by a
+	// peer. Preserve non-idempotent requests unless the caller opted into an
+	// idempotency-key protected retry.
+	if !requestReplayable(request) {
+		return nil, err
+	}
 	return t.h1Transport.RoundTrip(cloneRequestForRetry(request))
 }
 

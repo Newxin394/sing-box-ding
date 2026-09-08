@@ -58,13 +58,11 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 			}); ok {
 				err := contextStarter.StartContext(m.ctx, startContext)
 				if err != nil {
-					// A single provider failing to start (e.g. subscription
-					// server returning 5xx) must not kill the entire box.
-					// The provider's update loop will retry in the background
-					// and its outbounds will become available once it succeeds.
-					m.logger.Error(E.Cause(err, stage, " provider/", provider.Type(), "[", provider.Tag(), "]"),
-						" provider failed to start, will retry in background")
-					continue
+					// Individual provider implementations may deliberately tolerate a
+					// transient remote failure and schedule their own retry. Other
+					// lifecycle failures are configuration or invariant errors and must
+					// keep startup transactional.
+					return E.Cause(err, stage, " provider/", provider.Type(), "[", provider.Tag(), "]")
 				}
 			}
 		}
@@ -83,6 +81,7 @@ func (m *Manager) Close() error {
 	m.started = false
 	providers := m.providers
 	m.providers = nil
+	m.providerByTag = make(map[string]adapter.Provider)
 	m.access.Unlock()
 	var err error
 	for _, provider := range providers {
@@ -94,7 +93,7 @@ func (m *Manager) Close() error {
 			monitor.Finish()
 		}
 	}
-	return nil
+	return err
 }
 
 func (m *Manager) Providers() []adapter.Provider {

@@ -83,7 +83,10 @@ func (r DNSRule) IsValid() bool {
 	}
 	switch r.Type {
 	case C.RuleTypeDefault:
-		return r.DefaultOptions.IsValid() || len(r.FallbackRules) > 0
+		// Fallback rules refine a primary DNS result; they cannot form a
+		// standalone DNS rule. Keep schema validation aligned with runtime
+		// construction, which requires a valid default rule.
+		return r.DefaultOptions.IsValid()
 	case C.RuleTypeLogical:
 		return r.LogicalOptions.IsValid() && len(r.FallbackRules) == 0
 	default:
