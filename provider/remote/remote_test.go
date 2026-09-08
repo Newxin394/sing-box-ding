@@ -136,12 +136,16 @@ func TestProviderRemoteFetchHasBoundedDeadline(t *testing.T) {
 		userAgent:  "test",
 		httpClient: &http.Client{Transport: transport},
 	}
+	// Measure from just before fetch so the window covers the timeout anchor
+	// (WithTimeout inside fetch) with margin for scheduler jitter. A zero-tolerance
+	// upper bound races the elapsed time between time.Now() and the deadline
+	// being set — CI showed 30.000001802s > 30s failures.
 	started := time.Now()
 	require.Error(t, provider.fetch(context.Background(), true))
 	require.True(t, transport.hasDeadline)
 	remaining := transport.deadline.Sub(started)
 	require.Greater(t, remaining, providerFetchTimeout-time.Second)
-	require.LessOrEqual(t, remaining, providerFetchTimeout)
+	require.LessOrEqual(t, remaining, providerFetchTimeout+time.Second)
 }
 
 func TestReadProviderContentLimitsResponseSize(t *testing.T) {
