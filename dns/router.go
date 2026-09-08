@@ -434,6 +434,120 @@ func (r *Router) resolveDNSRoute(server string, routeOptions R.RuleActionDNSRout
 	return transport, dnsRouteStatusResolved
 }
 
+func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, matchResponse *mDNS.Msg, allowFakeIP bool, skipped map[int]struct{}) (exchangeWithRulesResult, bool) {
+	metadata := adapter.ContextFrom(ctx)
+	if metadata == nil {
+		metadata = &adapter.InboundContext{}
+	}
+	responseGood := matchResponse != nil && matchResponse.Rcode == mDNS.RcodeSuccess
+	addresses := make([]netip.Addr, 0)
+	if responseGood {
+		addresses = MessageToAddresses(matchResponse)
+	}
+	_ = result
+	_ = message
+	for index, fallbackRule := range result.rule.FallbackRules() {
+		if _, isSkipped := skipped[index]; isSkipped {
+			continue
+		}
+		fallbackMetadata := *metadata
+		fallbackMetadata.ResetRuleCache()
+		fallbackMetadata.DNSResponse = matchResponse
+		fallbackMetadata.DestinationAddresses = addresses
+		fallbackMetadata.DestinationAddressMatchFromResponse = responseGood
+		if !fallbackRule.Match(&fallbackMetadata) {
+			continue
+		}
+		skipped[index] = struct{}{}
+		if fallbackRule.AcceptResult() {
+			if !responseGood {
+				continue
+			}
+			r.logger.DebugContext(ctx, "match fallback_rule: ", fallbackRule.String(), " => accept primary")
+			return result, false
+		}
+		transport, loaded := r.transport.Transport(fallbackRule.Server())
+		if !loaded {
+			r.logger.ErrorContext(ctx, "fallback DNS transport not found: ", fallbackRule.Server())
+			continue
+		}
+		if transport.Type() == C.DNSTypeFakeIP && !allowFakeIP {
+			continue
+		}
+		fallbackOptions := result.options
+		if transport.Type() == C.DNSTypeFakeIP || fallbackRule.DisableCache() {
+			fallbackOptions.DisableCache = true
+		}
+		if rewriteTTL := fallbackRule.RewriteTTL(); rewriteTTL != nil {
+			fallbackOptions.RewriteTTL = rewriteTTL
+		}
+		if clientSubnet := fallbackRule.ClientSubnet(); clientSubnet != nil {
+			fallbackOptions.ClientSubnet = *clientSubnet
+			fallbackOptions.RemoveClientSubnet = false
+		}
+		r.logger.DebugContext(ctx, "match fallback_rule: ", fallbackRule.String())
+		fallbackResponse, fallbackErr := r.client.Exchange(adapter.OverrideContext(ctx), transport, message, r.finalizeExchangeOptions(fallbackOptions), nil)
+		result.response = fallbackResponse
+		result.transport = transport
+		result.options = fallbackOptions
+		result.err = fallbackErr
+		return result, true
+	}
+	return result, false
+}
+
+func (r *Router) continueDNSRulesAfterFallthrough(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, result exchangeWithRulesResult, allowFakeIP bool) exchangeWithRulesResult {
+	state := dnsRuleWalkState{
+		ruleIndex:        result.ruleIndex + 1,
+		lastLoggedIndex:  -1,
+		effectiveOptions: result.options,
+	}
+	return r.runDNSRulesFrom(ctx, rules, message, &state, allowFakeIP)
+}
+
+func dnsResultBad(result exchangeWithRulesResult) bool {
+	return result.err != nil || result.response == nil || result.response.Rcode != mDNS.RcodeSuccess || len(MessageToAddresses(result.response)) == 0
+}
+
+func (r *Router) runDNSRulesFrom(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, state *dnsRuleWalkState, allowFakeIP bool) exchangeWithRulesResult {
+	result, suspension := r.walkDNSRules(ctx, rules, message, state, allowFakeIP)
+	if suspension == nil {
+		cancelDNSFutures(state)
+	} else {
+		result = r.resumeExchangeWithRules(ctx, rules, message, state, allowFakeIP, suspension)
+	}
+	result = r.applyDNSFallback(ctx, message, result, allowFakeIP)
+	if result.rule != nil && result.rule.AllowFallthrough() && dnsResultBad(result) && result.ruleIndex < len(rules)-1 {
+		result = r.continueDNSRulesAfterFallthrough(ctx, rules, message, result, allowFakeIP)
+	}
+	return result
+}
+
+func (r *Router) applyDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, allowFakeIP bool) exchangeWithRulesResult {
+	if result.rule == nil || result.rejectAction != nil {
+		return result
+	}
+	if len(result.rule.FallbackRules()) == 0 {
+		return result
+	}
+	// Fallback rules always evaluate against the last response returned by a
+	// matched DNS rule transport, so a failing fallback transport does not
+	// shift the match basis. When the primary query errored there is no such
+	// response: catch-all rules (match_all / clash_mode) still fire.
+	matchResponse := result.response
+	skipped := make(map[int]struct{})
+	for {
+		nextResult, matched := r.resolveDNSFallback(ctx, message, result, matchResponse, allowFakeIP, skipped)
+		if !matched {
+			return result
+		}
+		if nextResult.err == nil && nextResult.response != nil && nextResult.response.Rcode == mDNS.RcodeSuccess && len(MessageToAddresses(nextResult.response)) > 0 {
+			return nextResult
+		}
+		result = nextResult
+	}
+}
+
 func (r *Router) logRuleMatch(ctx context.Context, ruleIndex int, currentRule adapter.DNSRule) {
 	if ruleDescription := currentRule.String(); ruleDescription != "" {
 		r.logger.DebugContext(ctx, "match[", ruleIndex, "] ", currentRule, " => ", currentRule.Action())
@@ -445,6 +559,9 @@ func (r *Router) logRuleMatch(ctx context.Context, ruleIndex int, currentRule ad
 type exchangeWithRulesResult struct {
 	response     *mDNS.Msg
 	transport    adapter.DNSTransport
+	rule         adapter.DNSRule
+	ruleIndex    int
+	options      adapter.DNSQueryOptions
 	rejectAction *R.RuleActionReject
 	err          error
 }
@@ -513,6 +630,8 @@ type dnsPendingExchange struct {
 	transport adapter.DNSTransport
 	options   adapter.DNSQueryOptions
 	future    *dnsEvaluatedFuture
+	rule      adapter.DNSRule
+	ruleIndex int
 }
 
 type dnsWalkSuspension struct {
@@ -762,9 +881,9 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 				return exchangeWithRulesResult{}, &dnsWalkSuspension{drain: true}
 			}
 			if state.terminalFuture != nil && state.terminalIndex == state.ruleIndex {
-				return exchangeWithRulesResult{}, &dnsWalkSuspension{pending: &dnsPendingExchange{transport: state.terminalFuture.transport, future: state.terminalFuture}}
+				return exchangeWithRulesResult{}, &dnsWalkSuspension{pending: &dnsPendingExchange{transport: state.terminalFuture.transport, options: queryOptions, future: state.terminalFuture, rule: currentRule, ruleIndex: state.ruleIndex}}
 			}
-			return exchangeWithRulesResult{}, &dnsWalkSuspension{pending: &dnsPendingExchange{transport: transport, options: queryOptions}}
+			return exchangeWithRulesResult{}, &dnsWalkSuspension{pending: &dnsPendingExchange{transport: transport, options: queryOptions, rule: currentRule, ruleIndex: state.ruleIndex}}
 		case *R.RuleActionReject:
 			if len(state.armedRules) > 0 {
 				return exchangeWithRulesResult{}, &dnsWalkSuspension{drain: true}
@@ -800,12 +919,7 @@ func (r *Router) walkDNSRules(ctx context.Context, rules []adapter.DNSRule, mess
 
 func (r *Router) exchangeWithRules(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, options adapter.DNSQueryOptions, allowFakeIP bool) exchangeWithRulesResult {
 	state := dnsRuleWalkState{effectiveOptions: options, lastLoggedIndex: -1}
-	result, suspension := r.walkDNSRules(ctx, rules, message, &state, allowFakeIP)
-	if suspension == nil {
-		cancelDNSFutures(&state)
-		return result
-	}
-	return r.resumeExchangeWithRules(ctx, rules, message, &state, allowFakeIP, suspension)
+	return r.runDNSRulesFrom(ctx, rules, message, &state, allowFakeIP)
 }
 
 func (r *Router) resumeExchangeWithRules(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, state *dnsRuleWalkState, allowFakeIP bool, suspension *dnsWalkSuspension) exchangeWithRulesResult {
@@ -910,7 +1024,7 @@ func (r *Router) sweepArmedDNSRules(ctx context.Context, message *mDNS.Msg, stat
 			case dnsRouteStatusSkipped:
 				continue
 			}
-			return exchangeWithRulesResult{}, &dnsPendingExchange{transport: transport, options: queryOptions}, true
+			return exchangeWithRulesResult{}, &dnsPendingExchange{transport: transport, options: queryOptions, rule: armed.rule, ruleIndex: armed.ruleIndex}, true
 		case *R.RuleActionReject:
 			switch action.Method {
 			case C.RuleActionRejectMethodDefault:
@@ -950,6 +1064,9 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
 		return exchangeWithRulesResult{
 			response:  pending.future.view(),
 			transport: pending.future.transport,
+			rule:      pending.rule,
+			ruleIndex: pending.ruleIndex,
+			options:   pending.options,
 			err:       pending.future.err,
 		}
 	}
@@ -957,32 +1074,45 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
 	return exchangeWithRulesResult{
 		response:  response,
 		transport: pending.transport,
+		rule:      pending.rule,
+		ruleIndex: pending.ruleIndex,
+		options:   pending.options,
 		err:       err,
 	}
 }
 
 func (r *Router) exchangeWithRulesAsync(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, options adapter.DNSQueryOptions, allowFakeIP bool, callback func(result exchangeWithRulesResult)) {
 	state := &dnsRuleWalkState{effectiveOptions: options, lastLoggedIndex: -1}
+	finish := func(result exchangeWithRulesResult) {
+		result = r.applyDNSFallback(ctx, message, result, allowFakeIP)
+		if result.rule != nil && result.rule.AllowFallthrough() && dnsResultBad(result) && result.ruleIndex < len(rules)-1 {
+			result = r.continueDNSRulesAfterFallthrough(ctx, rules, message, result, allowFakeIP)
+		}
+		callback(result)
+	}
 	result, suspension := r.walkDNSRules(ctx, rules, message, state, allowFakeIP)
 	if suspension == nil {
 		cancelDNSFutures(state)
-		callback(result)
+		finish(result)
 		return
 	}
 	if suspension.pending != nil && suspension.pending.future == nil {
 		cancelDNSFutures(state)
 		pending := suspension.pending
 		r.client.ExchangeAsync(adapter.OverrideContext(ctx), pending.transport, message, r.finalizeExchangeOptions(pending.options), nil, func(response *mDNS.Msg, err error) {
-			callback(exchangeWithRulesResult{
+			finish(exchangeWithRulesResult{
 				response:  response,
 				transport: pending.transport,
+				rule:      pending.rule,
+				ruleIndex: pending.ruleIndex,
+				options:   pending.options,
 				err:       err,
 			})
 		})
 		return
 	}
 	go func() {
-		callback(r.resumeExchangeWithRules(ctx, rules, message, state, allowFakeIP, suspension))
+		finish(r.resumeExchangeWithRules(ctx, rules, message, state, allowFakeIP, suspension))
 	}()
 }
 

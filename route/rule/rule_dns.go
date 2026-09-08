@@ -17,6 +17,11 @@ import (
 )
 
 func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DNSRule, checkServer bool, legacyDNSMode bool) (adapter.DNSRule, error) {
+	router := service.FromContext[adapter.Router](ctx)
+	fallbackRules, err := NewDNSFallbackRules(ctx, router, options.FallbackRules)
+	if err != nil {
+		return nil, err
+	}
 	switch options.Type {
 	case "", C.RuleTypeDefault:
 		if !options.DefaultOptions.IsValid() {
@@ -42,7 +47,7 @@ func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DN
 				return nil, E.New("missing server field")
 			}
 		}
-		return NewDefaultDNSRule(ctx, logger, options.DefaultOptions, legacyDNSMode)
+		return NewDefaultDNSRule(ctx, logger, options.DefaultOptions, fallbackRules, legacyDNSMode)
 	case C.RuleTypeLogical:
 		if !options.LogicalOptions.IsValid() {
 			return nil, E.New("missing conditions")
@@ -103,12 +108,14 @@ var _ adapter.DNSRule = (*DefaultDNSRule)(nil)
 
 type DefaultDNSRule struct {
 	abstractDefaultRule
+	fallbackRules    []adapter.DNSFallbackRule
+	allowFallthrough bool
 	matchResponse    bool
 	matchResponseTag string
 	race             bool
 }
 
-func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options option.DefaultDNSRule, legacyDNSMode bool) (*DefaultDNSRule, error) {
+func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options option.DefaultDNSRule, fallbackRules []adapter.DNSFallbackRule, legacyDNSMode bool) (*DefaultDNSRule, error) {
 	id, _ := uuid.NewV4()
 	rule := &DefaultDNSRule{
 		abstractDefaultRule: abstractDefaultRule{
@@ -118,6 +125,8 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
 			invert: options.Invert,
 			action: NewDNSRuleAction(logger, options.DNSRuleAction),
 		},
+		fallbackRules:    fallbackRules,
+		allowFallthrough: options.AllowFallthrough,
 		matchResponse:    options.MatchResponse.IsEnabled(),
 		matchResponseTag: options.MatchResponse.ResponseTag(),
 		race:             options.Race,
@@ -409,6 +418,34 @@ func (r *DefaultDNSRule) Action() adapter.RuleAction {
 	return r.action
 }
 
+func (r *DefaultDNSRule) Start() error {
+	if err := r.abstractDefaultRule.Start(); err != nil {
+		return err
+	}
+	for _, fallbackRule := range r.fallbackRules {
+		if err := fallbackRule.Start(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *DefaultDNSRule) Close() error {
+	var closeErr error
+	for _, fallbackRule := range r.fallbackRules {
+		closeErr = E.Errors(closeErr, fallbackRule.Close())
+	}
+	return E.Errors(closeErr, r.abstractDefaultRule.Close())
+}
+
+func (r *DefaultDNSRule) AllowFallthrough() bool {
+	return r.allowFallthrough
+}
+
+func (r *DefaultDNSRule) FallbackRules() []adapter.DNSFallbackRule {
+	return r.fallbackRules
+}
+
 func (r *DefaultDNSRule) WithAddressLimit() bool {
 	if len(r.destinationIPCIDRItems) > 0 {
 		return true
@@ -496,6 +533,14 @@ func (r *LogicalDNSRule) MatchResponseAnonymous() bool {
 
 func (r *LogicalDNSRule) Race() bool {
 	return r.race
+}
+
+func (r *LogicalDNSRule) AllowFallthrough() bool {
+	return false
+}
+
+func (r *LogicalDNSRule) FallbackRules() []adapter.DNSFallbackRule {
+	return nil
 }
 
 func NewLogicalDNSRule(ctx context.Context, logger log.ContextLogger, options option.LogicalDNSRule, legacyDNSMode bool) (*LogicalDNSRule, error) {

@@ -88,6 +88,14 @@ func (r *legacyAliasRule) Race() bool {
 	return false
 }
 
+func (r *legacyAliasRule) AllowFallthrough() bool {
+	return false
+}
+
+func (r *legacyAliasRule) FallbackRules() []adapter.DNSFallbackRule {
+	return nil
+}
+
 func TestResolveRejectRcode(t *testing.T) {
 	testCases := []struct {
 		name         string

@@ -1,6 +1,8 @@
 package adapter
 
 import (
+	"net/netip"
+
 	C "github.com/sagernet/sing-box/constant"
 
 	"github.com/miekg/dns"
@@ -31,6 +33,19 @@ type DNSRule interface {
 	MatchResponseTags() []string
 	MatchResponseAnonymous() bool
 	Race() bool
+	AllowFallthrough() bool
+	FallbackRules() []DNSFallbackRule
+}
+
+type DNSFallbackRule interface {
+	SimpleLifecycle
+	Match(metadata *InboundContext) bool
+	String() string
+	AcceptResult() bool
+	Server() string
+	DisableCache() bool
+	RewriteTTL() *uint32
+	ClientSubnet() *netip.Prefix
 }
 
 type RuleAction interface {
