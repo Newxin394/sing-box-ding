@@ -7,6 +7,8 @@ import (
 
 var URLTestUnifiedDelay = false
 
+const UDPSocketBufferSize = 4 << 20
+
 type InterfaceType uint8
 
 const (

@@ -511,6 +511,16 @@ func (r *NetworkManager) ResetNetwork(ctx context.Context) {
 	r.router.ResetNetwork()
 }
 
+func (r *NetworkManager) ReleaseMemory(ctx context.Context) {
+	r.ResetNetwork(ctx)
+	for _, outbound := range r.outbound.Outbounds() {
+		keeper, isKeeper := outbound.(adapter.IdleConnectionKeeper)
+		if isKeeper {
+			keeper.CloseIdleConnections()
+		}
+	}
+}
+
 func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interface, flags int) {
 	// Initialization notifications must not reset connections even if processing
 	// is delayed until after startup completes.
