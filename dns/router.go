@@ -434,37 +434,32 @@ func (r *Router) resolveDNSRoute(server string, routeOptions R.RuleActionDNSRout
 	return transport, dnsRouteStatusResolved
 }
 
-func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, matchResponse *mDNS.Msg, allowFakeIP bool, skipped map[int]struct{}) (exchangeWithRulesResult, bool) {
+func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, matchResponse *mDNS.Msg, allowFakeIP bool, nextIndex int) (exchangeWithRulesResult, int, bool) {
 	metadata := adapter.ContextFrom(ctx)
 	if metadata == nil {
 		metadata = &adapter.InboundContext{}
 	}
 	responseGood := matchResponse != nil && matchResponse.Rcode == mDNS.RcodeSuccess
-	addresses := make([]netip.Addr, 0)
+	var addresses []netip.Addr
 	if responseGood {
 		addresses = MessageToAddresses(matchResponse)
 	}
-	_ = result
-	_ = message
-	for index, fallbackRule := range result.rule.FallbackRules() {
-		if _, isSkipped := skipped[index]; isSkipped {
-			continue
-		}
-		fallbackMetadata := *metadata
+	fallbackMetadata := *metadata
+	fallbackMetadata.DNSResponse = matchResponse
+	fallbackMetadata.DestinationAddresses = addresses
+	fallbackMetadata.DestinationAddressMatchFromResponse = responseGood
+	for index := nextIndex; index < len(result.rule.FallbackRules()); index++ {
+		fallbackRule := result.rule.FallbackRules()[index]
 		fallbackMetadata.ResetRuleCache()
-		fallbackMetadata.DNSResponse = matchResponse
-		fallbackMetadata.DestinationAddresses = addresses
-		fallbackMetadata.DestinationAddressMatchFromResponse = responseGood
 		if !fallbackRule.Match(&fallbackMetadata) {
 			continue
 		}
-		skipped[index] = struct{}{}
 		if fallbackRule.AcceptResult() {
 			if !responseGood {
 				continue
 			}
 			r.logger.DebugContext(ctx, "match fallback_rule: ", fallbackRule.String(), " => accept primary")
-			return result, false
+			return result, nextIndex, false
 		}
 		transport, loaded := r.transport.Transport(fallbackRule.Server())
 		if !loaded {
@@ -491,18 +486,23 @@ func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, resu
 		result.transport = transport
 		result.options = fallbackOptions
 		result.err = fallbackErr
-		return result, true
+		return result, index + 1, true
 	}
-	return result, false
+	return result, nextIndex, false
 }
-
 func (r *Router) continueDNSRulesAfterFallthrough(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, result exchangeWithRulesResult, allowFakeIP bool) exchangeWithRulesResult {
 	state := dnsRuleWalkState{
 		ruleIndex:        result.ruleIndex + 1,
 		lastLoggedIndex:  -1,
 		effectiveOptions: result.options,
 	}
-	return r.runDNSRulesFrom(ctx, rules, message, &state, allowFakeIP)
+	for {
+		result = r.runDNSRulesFrom(ctx, rules, message, &state, allowFakeIP)
+		if !(result.rule != nil && result.rule.AllowFallthrough() && dnsResultBad(result) && result.ruleIndex < len(rules)-1) {
+			return result
+		}
+		state.ruleIndex = result.ruleIndex + 1
+	}
 }
 
 func dnsResultBad(result exchangeWithRulesResult) bool {
@@ -535,9 +535,9 @@ func (r *Router) applyDNSFallback(ctx context.Context, message *mDNS.Msg, result
 	// shift the match basis. When the primary query errored there is no such
 	// response: catch-all rules (match_all / clash_mode) still fire.
 	matchResponse := result.response
-	skipped := make(map[int]struct{})
+	nextIndex := 0
 	for {
-		nextResult, matched := r.resolveDNSFallback(ctx, message, result, matchResponse, allowFakeIP, skipped)
+		nextResult, attempted, matched := r.resolveDNSFallback(ctx, message, result, matchResponse, allowFakeIP, nextIndex)
 		if !matched {
 			return result
 		}
@@ -545,6 +545,7 @@ func (r *Router) applyDNSFallback(ctx context.Context, message *mDNS.Msg, result
 			return nextResult
 		}
 		result = nextResult
+		nextIndex = attempted
 	}
 }
 
