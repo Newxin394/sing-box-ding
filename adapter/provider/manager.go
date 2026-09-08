@@ -58,7 +58,13 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 			}); ok {
 				err := contextStarter.StartContext(m.ctx, startContext)
 				if err != nil {
-					return E.Cause(err, stage, " provider/", provider.Type(), "[", provider.Tag(), "]")
+					// A single provider failing to start (e.g. subscription
+					// server returning 5xx) must not kill the entire box.
+					// The provider's update loop will retry in the background
+					// and its outbounds will become available once it succeeds.
+					m.logger.Error(E.Cause(err, stage, " provider/", provider.Type(), "[", provider.Tag(), "]"),
+						" provider failed to start, will retry in background")
+					continue
 				}
 			}
 		}
