@@ -29,7 +29,6 @@ type ReferenceManager struct {
 	pauseManager           pause.Manager
 	pauseCallback          *list.Element[pause.Callback]
 	devicePaused           atomic.Bool
-	idleFlushed            bool
 	keepIdle               map[any]bool
 	unreferencedTransports map[string]bool
 }
@@ -298,10 +297,6 @@ func (m *ReferenceManager) update() {
 	}
 	m.keepIdle = keepIdle
 	m.unreferencedTransports = unreferencedTransports
-	if devicePaused && !m.idleFlushed {
-		m.CloseIdleConnections()
-	}
-	m.idleFlushed = devicePaused
 }
 
 type idleKeeper interface {
