@@ -359,6 +359,7 @@ jobs:
           echo "PKG_VERSION=${PKG_VERSION}" >> "${GITHUB_ENV}"
       - name: Package DEB
         if: matrix.debian != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |
           set -xeuo pipefail
           sudo gem install fpm
@@ -376,6 +377,7 @@ jobs:
           debsigs --sign=origin -k ${{ secrets.GPG_KEY_ID }} --gpgopts '--pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}"' dist/*.deb
       - name: Package RPM
         if: matrix.rpm != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |-
           set -xeuo pipefail
           sudo gem install fpm
@@ -396,6 +398,7 @@ jobs:
           rpmsign --addsign dist/*.rpm
       - name: Package Pacman
         if: matrix.pacman != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |-
           set -xeuo pipefail
           sudo gem install fpm
@@ -409,6 +412,7 @@ jobs:
             dist/sing-box=/usr/bin/sing-box
       - name: Package OpenWrt
         if: matrix.openwrt != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |-
           set -xeuo pipefail
           sudo gem install fpm
@@ -424,10 +428,12 @@ jobs:
           rm "dist/openwrt.deb"
       - name: Install apk-tools
         if: matrix.openwrt != '' || matrix.alpine != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |-
           docker run --rm -v /usr/local/bin:/mnt alpine:edge sh -c "apk add --no-cache apk-tools-static && cp /sbin/apk.static /mnt/apk && chmod +x /mnt/apk"
       - name: Package OpenWrt APK
         if: matrix.openwrt != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |-
           set -xeuo pipefail
           for architecture in ${{ matrix.openwrt }}; do
@@ -439,6 +445,7 @@ jobs:
           done
       - name: Package Alpine APK
         if: matrix.alpine != ''
+        continue-on-error: true  # packaging needs GPG/docker secrets this fork lacks; never block the binary artifact
         run: |-
           set -xeuo pipefail
           .github/build_alpine_apk.sh \
