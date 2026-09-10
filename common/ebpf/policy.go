@@ -62,6 +62,15 @@ func (p BypassCIDRPolicy) Contains(address netip.Addr) bool {
 	return false
 }
 
+// Counts reports how many IPv4 and IPv6 prefixes this policy compiled to,
+// for callers (such as a shared-network backend that mirrors a cgroup
+// backend's map rather than holding its own copy of the prefixes) that only
+// need to know how many entries a previously-applied policy had, not the
+// prefixes themselves.
+func (p BypassCIDRPolicy) Counts() (int, int) {
+	return len(p.ipv4), len(p.ipv6)
+}
+
 func compileUIDPolicy(policy LocalPolicy) ([]uidLPMKey, bool, error) {
 	for name, uidRanges := range map[string][]UIDRange{
 		"include_uid": policy.IncludeUID,
