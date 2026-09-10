@@ -34,7 +34,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -92,7 +91,7 @@ func (c *dingClient) DialContext(ctx context.Context, network string, destinatio
 	switch network {
 	case N.NetworkTCP:
 	case N.NetworkUDP:
-		return nil, os.ErrInvalid
+		return nil, E.New("UDP is not supported by ding-direct HTTP outbound")
 	default:
 		return nil, E.Extend(N.ErrUnknownNetwork, network)
 	}
@@ -187,5 +186,5 @@ func (c *dingClient) DialContext(ctx context.Context, network string, destinatio
 }
 
 func (c *dingClient) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	return nil, os.ErrInvalid
+	return nil, E.New("UDP is not supported by ding-direct HTTP outbound")
 }

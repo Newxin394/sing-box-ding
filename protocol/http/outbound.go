@@ -112,6 +112,9 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		// arrives through DialContext, not ListenPacket; delegate it the same way.
 		return h.udpDetour.DialContext(ctx, network, destination)
 	}
+	if N.NetworkName(network) == N.NetworkUDP {
+		return nil, E.New("UDP is not supported by outbound: ", h.Tag())
+	}
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
