@@ -950,7 +950,10 @@ jobs:
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
   build_windows_client:
     name: Build Windows client (${{ matrix.desktop_arch }})
-    if: (github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Windows') && github.ref != 'refs/heads/oldstable'
+    # Desktop GUI clients need signing certificates and other secrets this fork
+    # does not have. Set the BUILD_DESKTOP_CLIENTS repository variable to true to
+    # bring them back.
+    if: (github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Windows') && github.ref != 'refs/heads/oldstable' && vars.BUILD_DESKTOP_CLIENTS == 'true'
     runs-on: windows-latest
     needs:
       - calculate_version
@@ -1063,7 +1066,8 @@ jobs:
           path: 'dist'
   build_linux_client:
     name: Build Linux client (${{ matrix.desktop_arch }})
-    if: (github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Linux') && github.ref != 'refs/heads/oldstable'
+    # See build_windows_client: gated on vars.BUILD_DESKTOP_CLIENTS.
+    if: (github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Linux') && github.ref != 'refs/heads/oldstable' && vars.BUILD_DESKTOP_CLIENTS == 'true'
     runs-on: ubuntu-26.04
     needs:
       - calculate_version
@@ -1290,7 +1294,8 @@ jobs:
   build_apple:
     name: Build Apple release clients
     runs-on: ${{ matrix.if && 'macos-26' || 'ubuntu-latest' }}
-    if: github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Apple-release' || inputs.build == 'macOS-standalone' || inputs.build == 'iOS-jailbreak'
+    # See build_windows_client: gated on vars.BUILD_DESKTOP_CLIENTS.
+    if: (github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Apple-release' || inputs.build == 'macOS-standalone' || inputs.build == 'iOS-jailbreak') && vars.BUILD_DESKTOP_CLIENTS == 'true'
     needs:
       - calculate_version
       - build_apple_library
@@ -1621,7 +1626,8 @@ jobs:
   build_apple_app_store:
     name: Build Apple App Store clients
     runs-on: ${{ matrix.if && 'macos-26' || 'ubuntu-latest' }}
-    if: github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Apple' || inputs.build == 'iOS' || inputs.build == 'macOS' || inputs.build == 'tvOS')
+    # See build_windows_client: gated on vars.BUILD_DESKTOP_CLIENTS.
+    if: github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Apple' || inputs.build == 'iOS' || inputs.build == 'macOS' || inputs.build == 'tvOS') && vars.BUILD_DESKTOP_CLIENTS == 'true'
     needs:
       - calculate_version
       - build_apple_library
@@ -1682,10 +1688,11 @@ jobs:
       - build_windows
       - build_android_library
       - build_android
-      - build_windows_client
-      - build_linux_client
       - build_apple_library
-      - build_apple
+      # The desktop GUI client jobs (build_windows_client, build_linux_client,
+      # build_apple) are gated on vars.BUILD_DESKTOP_CLIENTS and are therefore
+      # not listed here: a skipped need would skip this job too. Add them back
+      # if the desktop clients are ever enabled again.
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
