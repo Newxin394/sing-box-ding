@@ -81,6 +81,15 @@ jobs:
             echo "::error::.golangci.yml run.go ($CFG_GO) does not match go.mod ($MOD_GO); bump it together with go.mod"
             exit 1
           fi
+      - name: Replace ledger must match go.mod
+        run: |
+          n_replace=$(grep -c '^replace ' go.mod)
+          n_rows=$(grep -cF '| `github.com/sagernet/' docs/dev/REPLACE_LEDGER.md)
+          echo "go.mod replaces=$n_replace ledger rows=$n_rows"
+          if [ "$n_replace" -ne "$n_rows" ]; then
+            echo "::error::go.mod declares $n_replace replace directives but docs/dev/REPLACE_LEDGER.md documents $n_rows; update the ledger"
+            exit 1
+          fi
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         env:

@@ -81,6 +81,10 @@ nav:
           - AnyTLS client metadata: manual/misc/anytls-client-metadata.md
           - eBPF troubleshooting: manual/misc/ebpf-troubleshooting.md
           - eBPF kernel requirements: manual/misc/ebpf-kernel-requirements.md
+  - Dev Notes (fork):
+      - eBPF reliability acceptance: dev/EBPF_RELIABILITY_ACCEPTANCE.md
+      - ding-direct (中文): dev/ding-direct.zh-CN.md
+      - go.mod replace ledger: dev/REPLACE_LEDGER.md
   - Configuration:
       - configuration/index.md
       - JSON Schema: configuration/schema.md
