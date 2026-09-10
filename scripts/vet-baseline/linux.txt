@@ -1,0 +1,2 @@
+daemon/managed_service.go:75:12: possible misuse of unsafe.Pointer
+experimental/libbox/debug.go:10:11: possible misuse of unsafe.Pointer
