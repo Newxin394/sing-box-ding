@@ -19,7 +19,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const selfBypassSocketCapacity = 65536
+// DefaultSelfBypassCapacity is the socket-cookie table's default capacity. It is
+// an LRU_HASH map, so all 65536 entries are preallocated at creation (roughly
+// 1.0 MB). NewSelfBypass takes an explicit capacity so callers can lower it.
+const DefaultSelfBypassCapacity = 65536
 
 // SelfBypass owns the socket-cookie map used by the local TC classifier. The
 // map is populated by cgroup hooks when the process has an exclusive cgroup,
@@ -57,19 +60,34 @@ func (m SelfBypassMode) String() string {
 	}
 }
 
-func NewSelfBypass() (*SelfBypass, error) {
+// NewSelfBypass creates the socket-cookie map. capacity is preallocated in full
+// because the map is an LRU hash; pass DefaultSelfBypassCapacity for the
+// historical default, or a smaller value on memory-constrained devices.
+// Callers that have no capacity preference can use NewDefaultSelfBypass.
+func NewSelfBypass(capacity uint32) (*SelfBypass, error) {
+	if capacity == 0 {
+		return nil, E.New("invalid eBPF self-bypass map capacity: 0")
+	}
+	if capacity > MaxConfigurableMapCapacity {
+		return nil, E.New("invalid eBPF self-bypass map capacity: ", capacity)
+	}
 	_ = raiseMemlockLimit()
 	sockets, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
 		Name:       "sb_self_sockets",
 		Type:       CiliumEBPF.LRUHash,
 		KeySize:    8,
 		ValueSize:  4,
-		MaxEntries: selfBypassSocketCapacity,
+		MaxEntries: capacity,
 	})
 	if err != nil {
 		return nil, E.Cause(err, "create eBPF self-bypass socket map")
 	}
 	return &SelfBypass{sockets: sockets}, nil
+}
+
+// NewDefaultSelfBypass is NewSelfBypass with the default capacity.
+func NewDefaultSelfBypass() (*SelfBypass, error) {
+	return NewSelfBypass(DefaultSelfBypassCapacity)
 }
 
 // Map returns the map that must be shared with the local TC programs.

@@ -128,6 +128,7 @@ func (i *Inbound) startInbound() error {
 		SelfBypassMap:    i.selfBypass.Map(),
 		TrackProcess:     i.processTracker != nil,
 		FakeIPICMPReply:  i.fakeIPICMPReply,
+		MapCapacity:      i.flowMapCapacity,
 	}
 	var backend *commonEBPF.TCBackend
 	if localTCEnabled || sharedSocketAssignEnabled {
@@ -417,6 +418,7 @@ func (i *Inbound) startProcessTracker() {
 		EnableIPv6:  i.localIPv6,
 		LocalPolicy: i.localPolicy,
 		MetadataMap: i.selfBypass.Map(),
+		MapCapacity: i.flowMapCapacity,
 	})
 	if err != nil {
 		i.logger.Debug("eBPF cgroup process tracking unavailable; using userspace process search: ", err)
@@ -600,7 +602,7 @@ func (i *Inbound) prepareCgroupBackend() error {
 		EnableIPv6:    i.cgroupIPv6Enabled(),
 		RedirectIPv4:  i.redirectIPv4Prefix,
 		RedirectIPv6:  i.redirectIPv6Prefix,
-		MapCapacity:   commonEBPF.DefaultCgroupMapCapacity(),
+		MapCapacity:   i.cgroupMapCapacity,
 		UDPTimeout:    i.udpTimeout,
 		Policy:        i.compiledPolicy,
 		SelfBypassMap: i.selfBypass.Map(),

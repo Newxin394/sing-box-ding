@@ -24,6 +24,23 @@ func validateCgroupMapCapacity(capacity CgroupMapCapacity) error {
 	return nil
 }
 
+// validateFlowMapCapacities checks the per-flow capacities shared by the TC and
+// cgroup data planes. Callers pass an already-defaulted value (see
+// FlowMapCapacities.withDefaults), so a zero here means the caller cleared a
+// field rather than left it unset.
+func validateFlowMapCapacities(scope string, capacity FlowMapCapacities) error {
+	for name, value := range map[string]uint32{
+		"assignment":    capacity.Assignment,
+		"self_bypass":   capacity.SelfBypass,
+		"process_owner": capacity.ProcessOwner,
+	} {
+		if value == 0 || value > MaxConfigurableMapCapacity {
+			return E.New("invalid eBPF ", scope, " ", name, " map capacity: ", value)
+		}
+	}
+	return nil
+}
+
 func (b *CgroupBackend) UpdateCompiledBypassCIDR(policy BypassCIDRPolicy) (bool, error) {
 	if b == nil {
 		return false, errBackendClosed

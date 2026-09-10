@@ -11,7 +11,10 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-const processSocketOwnerCapacity = 65536
+// DefaultProcessOwnerCapacity is the process-owner table's default capacity. It
+// is an LRU_HASH map with an 8-byte key and an 8-byte value, so all 65536
+// entries are preallocated at creation (roughly 1.0 MB).
+const DefaultProcessOwnerCapacity = 65536
 
 const (
 	socketMetadataPolicyBypass    = SocketMetadataPolicyBypass
@@ -24,6 +27,9 @@ type ProcessTrackerConfig struct {
 	EnableIPv6  bool
 	LocalPolicy LocalPolicy
 	MetadataMap *CiliumEBPF.Map
+	// MapCapacity overrides the process-owner table capacity. The zero value
+	// keeps the historical default; see FlowMapCapacities.
+	MapCapacity FlowMapCapacities
 }
 
 type ProcessSocketOwner struct {
@@ -57,12 +63,16 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 	if err != nil {
 		return nil, E.Cause(err, "detect cgroup v2 root")
 	}
+	config.MapCapacity = config.MapCapacity.withDefaults()
+	if err := validateFlowMapCapacities("process tracker", config.MapCapacity); err != nil {
+		return nil, err
+	}
 	owners, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
 		Name:       "sb_proc_owner",
 		Type:       CiliumEBPF.LRUHash,
 		KeySize:    8,
 		ValueSize:  8,
-		MaxEntries: processSocketOwnerCapacity,
+		MaxEntries: config.MapCapacity.ProcessOwner,
 	})
 	if err != nil {
 		return nil, E.Cause(err, "create eBPF process owner map")

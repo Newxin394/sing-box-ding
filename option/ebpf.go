@@ -23,6 +23,40 @@ type EBPFInboundOptions struct {
 	// ride on and is rejected explicitly rather than silently doing nothing.
 	// The default, "off", changes nothing about existing network semantics.
 	FakeIPICMP string `json:"fakeip_icmp,omitempty" enum:"off,reply"`
+	// MapCapacity overrides the kernel map capacities this inbound preallocates.
+	// It is not a set of upper bounds on usage: every one of these maps is an
+	// LRU hash, whose entries the kernel allocates up front, so the capacity is
+	// a fixed cost in locked kernel memory that exists whether or not there is
+	// any traffic. Omitted fields keep the default; see EBPFMapCapacityOptions.
+	MapCapacity *EBPFMapCapacityOptions `json:"map_capacity,omitempty"`
+}
+
+// EBPFMapCapacityOptions overrides the eBPF inbound's preallocated map
+// capacities. Each one is worth lowering on a memory-constrained device, and
+// raising on a gateway that must keep many more flows alive than the default
+// allows. Every field must be within [1, 1048576]; omitted fields keep their
+// default.
+type EBPFMapCapacityOptions struct {
+	// Assignment is the local TC flow assignment table (default 65536, roughly
+	// 4.5 MB preallocated).
+	Assignment uint32 `json:"assignment,omitempty"`
+	// SelfBypass is the socket-cookie table the local data plane shares between
+	// the dialer and the TC classifier (default 65536, roughly 1.0 MB).
+	SelfBypass uint32 `json:"self_bypass,omitempty"`
+	// ProcessOwner is the cgroup table that carries a socket's owning process to
+	// the TC data path (default 65536, roughly 1.0 MB).
+	ProcessOwner uint32 `json:"process_owner,omitempty"`
+	// Cgroup overrides the cgroup local data plane's own tables.
+	Cgroup *EBPFCgroupMapCapacityOptions `json:"cgroup,omitempty"`
+}
+
+// EBPFCgroupMapCapacityOptions overrides the cgroup local data plane's maps.
+type EBPFCgroupMapCapacityOptions struct {
+	TCPRedirect  uint32 `json:"tcp_redirect,omitempty"`
+	UDPRedirect  uint32 `json:"udp_redirect,omitempty"`
+	UDPPeer      uint32 `json:"udp_peer,omitempty"`
+	UDPFlow      uint32 `json:"udp_flow,omitempty"`
+	SocketBypass uint32 `json:"socket_bypass,omitempty"`
 }
 
 type EBPFLocalOptions struct {

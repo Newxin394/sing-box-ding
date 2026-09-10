@@ -201,6 +201,56 @@ route is ordinary transient network state (unlike `local.data_plane: cgroup`,
 which can never support `fakeip_icmp` on any network) that resolves itself
 once the host gains real IPv6 connectivity.
 
+### map_capacity
+
+```json
+{
+  "type": "ebpf",
+  "map_capacity": {
+    "assignment": 65536,
+    "self_bypass": 65536,
+    "process_owner": 65536,
+    "cgroup": {
+      "tcp_redirect": 32768,
+      "udp_redirect": 32768,
+      "udp_peer": 16384,
+      "udp_flow": 16384,
+      "socket_bypass": 32768
+    }
+  }
+}
+```
+
+These are **preallocation sizes, not upper bounds on usage**. Every map listed
+here is an LRU hash, and the kernel allocates all of an LRU map's entries when
+the map is created, because an LRU list needs elements that do not move. The
+capacity is therefore memory this inbound holds for as long as it runs, whether
+or not there is any traffic, and it is charged against the locked-memory limit
+the inbound already raises.
+
+At the defaults shown, that is roughly 4.5 MB (`assignment`, a 44-byte key and a
+24-byte value) plus 1.0 MB (`self_bypass`, 8 + 4) plus 1.0 MB (`process_owner`,
+8 + 8), on top of whatever the cgroup path preallocates. `BPF_F_NO_PREALLOC` —
+which the policy tables such as `bypass_rule_set` and the host-address tables do
+use, so their capacity only costs memory once it is filled — is not available to
+an LRU map. Lowering these values is the only way to reduce that cost.
+
+Lower them on a memory-constrained device. A phone intercepting only its own
+traffic keeps a handful of flows alive at once, and 65536 assignments is far more
+than that; 4096 is a reasonable starting point. Raise them on a gateway serving a
+whole LAN through `shared`, where 65536 concurrent flows can legitimately be
+reachable. `assignment` and `self_bypass` apply whenever local TC interception is
+active; `process_owner` applies only when cgroup process tracking is in use.
+
+Every field must be between 1 and 1048576. An out-of-range value is refused at
+configuration time, naming the field, rather than surfacing as an `EINVAL` from
+`bpf(2)` at map creation. Omitting a field, or the whole `map_capacity` block,
+keeps that field's default — so adding this block for one field changes nothing
+else. The `assignment` value must match the capacity of the local flow table the
+TC classifier is given, and `self_bypass` must match the socket-cookie table the
+dialer shares with it; both are set from this one block, so they cannot drift
+apart.
+
 ### local
 
 #### local.enabled

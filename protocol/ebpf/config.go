@@ -216,6 +216,60 @@ func normalizeFakeIPICMP(mode string) (bool, error) {
 	}
 }
 
+// resolveMapCapacities merges the map_capacity overrides over the data planes'
+// defaults. An absent block leaves every capacity at the value the data planes
+// used before the option existed, so adding map_capacity to a config is a pure
+// opt-in. Out-of-range values are rejected here rather than at map creation,
+// where the only signal would be a bare EINVAL from bpf(2).
+func resolveMapCapacities(overrides *option.EBPFMapCapacityOptions) (commonEBPF.FlowMapCapacities, commonEBPF.CgroupMapCapacity, error) {
+	flow := commonEBPF.DefaultFlowMapCapacities()
+	cgroup := commonEBPF.DefaultCgroupMapCapacity()
+	if overrides != nil {
+		if overrides.Assignment != 0 {
+			flow.Assignment = overrides.Assignment
+		}
+		if overrides.SelfBypass != 0 {
+			flow.SelfBypass = overrides.SelfBypass
+		}
+		if overrides.ProcessOwner != 0 {
+			flow.ProcessOwner = overrides.ProcessOwner
+		}
+		if cgroupOverrides := overrides.Cgroup; cgroupOverrides != nil {
+			if cgroupOverrides.TCPRedirect != 0 {
+				cgroup.TCPRedirect = cgroupOverrides.TCPRedirect
+			}
+			if cgroupOverrides.UDPRedirect != 0 {
+				cgroup.UDPRedirect = cgroupOverrides.UDPRedirect
+			}
+			if cgroupOverrides.UDPPeer != 0 {
+				cgroup.UDPPeer = cgroupOverrides.UDPPeer
+			}
+			if cgroupOverrides.UDPFlow != 0 {
+				cgroup.UDPFlow = cgroupOverrides.UDPFlow
+			}
+			if cgroupOverrides.SocketBypass != 0 {
+				cgroup.SocketBypass = cgroupOverrides.SocketBypass
+			}
+		}
+	}
+	for name, value := range map[string]uint32{
+		"assignment":    flow.Assignment,
+		"self_bypass":   flow.SelfBypass,
+		"process_owner": flow.ProcessOwner,
+		"tcp_redirect":  cgroup.TCPRedirect,
+		"udp_redirect":  cgroup.UDPRedirect,
+		"udp_peer":      cgroup.UDPPeer,
+		"udp_flow":      cgroup.UDPFlow,
+		"socket_bypass": cgroup.SocketBypass,
+	} {
+		if value == 0 || value > commonEBPF.MaxConfigurableMapCapacity {
+			return flow, cgroup, E.New("invalid eBPF map_capacity.", name, ": ", value,
+				" (must be between 1 and ", commonEBPF.MaxConfigurableMapCapacity, ")")
+		}
+	}
+	return flow, cgroup, nil
+}
+
 // validateFakeIPICMP is the second half of fakeip_icmp validation, run once
 // the FakeIP prefixes are resolved and normalized and the local/shared data
 // planes are known. fakeip_icmp=reply needs something to match against and

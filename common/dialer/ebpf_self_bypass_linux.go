@@ -15,6 +15,11 @@ import (
 
 func PrepareEBPFSelfBypass(networkManager adapter.NetworkManager, inbounds []option.Inbound) error {
 	localInstances := 0
+	// The self-bypass table is an LRU hash, so its capacity is preallocated in
+	// full at creation and never grows: read the override here so a device with
+	// little memory can ask for a smaller one. More than one local inbound is
+	// refused below, so this value is unambiguous.
+	selfBypassCapacity := uint32(commonEBPF.DefaultSelfBypassCapacity)
 	for _, inbound := range inbounds {
 		switch inbound.Type {
 		case C.TypeEBPF:
@@ -25,6 +30,9 @@ func PrepareEBPFSelfBypass(networkManager adapter.NetworkManager, inbounds []opt
 			localEnabled, _ := ebpfOptions.EffectiveEnablement()
 			if localEnabled {
 				localInstances++
+				if capacity := ebpfOptions.MapCapacity; capacity != nil && capacity.SelfBypass != 0 {
+					selfBypassCapacity = capacity.SelfBypass
+				}
 			}
 		}
 	}
@@ -34,7 +42,7 @@ func PrepareEBPFSelfBypass(networkManager adapter.NetworkManager, inbounds []opt
 	if localInstances == 0 {
 		return nil
 	}
-	tracker, err := commonEBPF.NewSelfBypass()
+	tracker, err := commonEBPF.NewSelfBypass(selfBypassCapacity)
 	if err != nil {
 		return err
 	}

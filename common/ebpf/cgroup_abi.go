@@ -108,6 +108,52 @@ func DefaultSharedNetworkMapCapacities() SharedNetworkMapCapacities {
 	}
 }
 
+// FlowMapCapacities covers the per-flow and per-socket maps that the TC and
+// cgroup data planes hold across restarts: the local-TC assignment table, the
+// socket-cookie self-bypass table, and the cgroup process-owner table.
+//
+// All three are LRU_HASH maps. The kernel preallocates every entry of an LRU
+// map at creation, because an LRU list needs stable elements -- BPF_F_NO_PREALLOC
+// is not available here the way it is for the policy tables, whose capacity only
+// costs memory once it is actually used. So these capacities are a fixed,
+// traffic-independent cost, charged against RLIMIT_MEMLOCK: at the defaults,
+// roughly 4.5 MB (Assignment) + 1.0 MB (SelfBypass) + 1.0 MB (ProcessOwner).
+//
+// They are configurable because the right value differs by an order of magnitude
+// between a phone intercepting its own traffic and a gateway serving a whole LAN.
+// A zero field means "not configured" and falls back to the default; see
+// DefaultFlowMapCapacities.
+type FlowMapCapacities struct {
+	Assignment   uint32
+	SelfBypass   uint32
+	ProcessOwner uint32
+}
+
+func DefaultFlowMapCapacities() FlowMapCapacities {
+	return FlowMapCapacities{
+		Assignment:   DefaultAssignmentCapacity,
+		SelfBypass:   DefaultSelfBypassCapacity,
+		ProcessOwner: DefaultProcessOwnerCapacity,
+	}
+}
+
+// withDefaults fills unset fields from the defaults, so a partially populated
+// FlowMapCapacities (or the zero value, from a caller that predates the option)
+// behaves exactly as before it existed.
+func (c FlowMapCapacities) withDefaults() FlowMapCapacities {
+	defaults := DefaultFlowMapCapacities()
+	if c.Assignment == 0 {
+		c.Assignment = defaults.Assignment
+	}
+	if c.SelfBypass == 0 {
+		c.SelfBypass = defaults.SelfBypass
+	}
+	if c.ProcessOwner == 0 {
+		c.ProcessOwner = defaults.ProcessOwner
+	}
+	return c
+}
+
 type CgroupConfig struct {
 	Path          string
 	EnableTCP     bool

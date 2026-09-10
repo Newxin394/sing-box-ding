@@ -3688,6 +3688,37 @@
       },
       "additionalProperties": false
     },
+    "EBPFCgroupMapCapacityOptions": {
+      "type": "object",
+      "properties": {
+        "tcp_redirect": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "udp_redirect": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "udp_peer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "udp_flow": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "socket_bypass": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "additionalProperties": false
+    },
     "EBPFLocalOptions": {
       "type": "object",
       "properties": {
@@ -3849,6 +3880,30 @@
               }
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "EBPFMapCapacityOptions": {
+      "type": "object",
+      "properties": {
+        "assignment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "self_bypass": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "process_owner": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "cgroup": {
+          "$ref": "#/$defs/EBPFCgroupMapCapacityOptions"
         }
       },
       "additionalProperties": false
@@ -6704,6 +6759,9 @@
                 "off",
                 "reply"
               ]
+            },
+            "map_capacity": {
+              "$ref": "#/$defs/EBPFMapCapacityOptions"
             }
           },
           "required": [
@@ -12727,6 +12785,14 @@
             "use_all_providers": {
               "type": "boolean"
             },
+            "udp_outbound": {
+              "type": "string",
+              "x-tag-reference": "outbound"
+            },
+            "udp_fallback_outbound": {
+              "type": "string",
+              "x-tag-reference": "outbound"
+            },
             "url": {
               "type": "string"
             },
@@ -12993,6 +13059,14 @@
             },
             "use_all_providers": {
               "type": "boolean"
+            },
+            "udp_outbound": {
+              "type": "string",
+              "x-tag-reference": "outbound"
+            },
+            "udp_fallback_outbound": {
+              "type": "string",
+              "x-tag-reference": "outbound"
             },
             "default": {
               "type": "string",
@@ -15320,6 +15394,14 @@
             },
             "use_all_providers": {
               "type": "boolean"
+            },
+            "udp_outbound": {
+              "type": "string",
+              "x-tag-reference": "outbound"
+            },
+            "udp_fallback_outbound": {
+              "type": "string",
+              "x-tag-reference": "outbound"
             },
             "url": {
               "type": "string"

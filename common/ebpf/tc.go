@@ -23,8 +23,13 @@ const (
 )
 
 const (
-	tcAssignmentCapacity = 65536
-	tcPortPolicyCapacity = 4096
+	// DefaultAssignmentCapacity is the local-TC flow assignment table's default
+	// capacity. It is an LRU_HASH map, so the kernel preallocates all of it:
+	// 65536 entries of a 44-byte key and a 24-byte value is roughly 4.5 MB of
+	// locked kernel memory regardless of traffic. Callers that know better can
+	// override it through TCConfig.MapCapacity.
+	DefaultAssignmentCapacity = 65536
+	tcPortPolicyCapacity      = 4096
 )
 
 const (
@@ -74,6 +79,10 @@ type TCConfig struct {
 	RoutingMark       uint32
 	SelfBypassMap     *CiliumEBPF.Map
 	TrackProcess      bool
+	// MapCapacity overrides the per-flow and per-socket map capacities this data
+	// plane preallocates. The zero value keeps the historical defaults, so
+	// existing callers are unaffected; see FlowMapCapacities.
+	MapCapacity FlowMapCapacities
 	// FakeIPICMPReply loads the independent fakeip_icmp object (see
 	// tc_fakeip_icmp.go) and attaches it wherever this TC data plane already
 	// attaches local or shared filters. Left false, prepareTC never touches
@@ -173,6 +182,10 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if config.RoutingMark == 0 {
 		config.RoutingMark = DefaultTCRoutingMark
 	}
+	config.MapCapacity = config.MapCapacity.withDefaults()
+	if err := validateFlowMapCapacities("TC", config.MapCapacity); err != nil {
+		return nil, err
+	}
 	policy := config.Policy
 	var err error
 	uidEntries := policy.uidEntries
@@ -190,7 +203,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	mapOverrides := map[string]mapSpecOverride{
 		"tc_control":             {name: "sb_tc_ctl", mapType: CiliumEBPF.Array, maxEntries: 1},
 		"tc_listener_sockets":    {name: "sb_tc_listen", mapType: CiliumEBPF.SockMap, maxEntries: 2},
-		"tc_assignment":          {name: "sb_tc_assign", mapType: CiliumEBPF.LRUHash, maxEntries: tcAssignmentCapacity},
+		"tc_assignment":          {name: "sb_tc_assign", mapType: CiliumEBPF.LRUHash, maxEntries: config.MapCapacity.Assignment},
 		"tc_uid_policy":          {name: "sb_tc_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(uidEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_bypass_ipv4":         {name: "sb_tc_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
 		"tc_bypass_ipv6":         {name: "sb_tc_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
@@ -206,8 +219,12 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_shared_bypass_port":  {name: "sb_tc_sport", mapType: CiliumEBPF.Hash, maxEntries: tcPortPolicyCapacity},
 	}
 	if config.EnableLocal {
+		// This map is replaced by config.SelfBypassMap below when the caller
+		// supplies one (tc.go, externalSelfMap), so its capacity only has to
+		// match that map's rather than being chosen here. Keeping them equal
+		// avoids creating a differently-sized map just to close it again.
 		mapOverrides["tc_self_sockets"] = mapSpecOverride{
-			name: "sb_self_sockets", mapType: CiliumEBPF.LRUHash, maxEntries: selfBypassSocketCapacity,
+			name: "sb_self_sockets", mapType: CiliumEBPF.LRUHash, maxEntries: config.MapCapacity.SelfBypass,
 		}
 	}
 	legacyTCP := forceLegacyTCP || !config.EnableTCP

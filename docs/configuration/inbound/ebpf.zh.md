@@ -175,6 +175,50 @@ Echo Reply 应返回请求的原始源地址。将回复目的地址改成客户
 （不同于 `local.data_plane: cgroup`——那种情况下无论什么网络都不可能支持
 `fakeip_icmp`），一旦本机获得真正的 IPv6 连通性就会自动恢复。
 
+#### map_capacity
+
+```json
+{
+  "type": "ebpf",
+  "map_capacity": {
+    "assignment": 65536,
+    "self_bypass": 65536,
+    "process_owner": 65536,
+    "cgroup": {
+      "tcp_redirect": 32768,
+      "udp_redirect": 32768,
+      "udp_peer": 16384,
+      "udp_flow": 16384,
+      "socket_bypass": 32768
+    }
+  }
+}
+```
+
+这些值是**预分配大小，不是用量上限**。上面每一张 map 都是 LRU 哈希，而内核对
+LRU map 会在创建时把全部表项一次性分配好——因为 LRU 链表需要地址稳定的元素。
+所以这个容量是这个 inbound 只要在运行就占着的内存，与实际有没有流量无关，并且
+要从本 inbound 本来就会抬高的 locked-memory 限额里扣。
+
+按上面这些默认值，大约是 4.5 MB（`assignment`，44 字节键 + 24 字节值）加上
+1.0 MB（`self_bypass`，8 + 4）再加 1.0 MB（`process_owner`，8 + 8），此外还有
+cgroup 路径自己预分配的部分。`BPF_F_NO_PREALLOC` 在这里用不上——策略表
+（比如 `bypass_rule_set` 和主机地址表）可以用它，于是那些表的容量只在真正写入时
+才占内存——LRU map 不行。**下调这些值是降低这部分开销的唯一办法。**
+
+内存紧张的设备应该调小。只拦截本机流量的手机上，活着的流同时只有寥寥几条，
+65536 条赋值记录远远超出需要，4096 是个合理的起点。反过来，通过 `shared` 服务
+整个局域网、65536 条并发流确实可能用满的网关，就应该调大。`assignment` 与
+`self_bypass` 在 local TC 拦截启用时生效；`process_owner` 只在用到 cgroup 进程
+追踪时生效。
+
+每个字段取值必须在 1 到 1048576 之间。越界值会在配置阶段被拒绝并指出字段名，
+而不是等到创建 map 时抛出一个没有上下文的 `bpf(2)` `EINVAL`。省略某个字段、
+或者整个 `map_capacity` 块，该字段就保持默认值——所以为了改一个字段而加上这个
+块，不会顺带改动别的。`assignment` 必须与交给 TC 分类器的本机流表容量一致，
+`self_bypass` 必须与 dialer 共享给它的 socket cookie 表容量一致；两者都由这一个
+块下发，因此不可能不一致。
+
 ### local
 
 #### local.enabled

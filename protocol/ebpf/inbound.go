@@ -99,6 +99,8 @@ type Inbound struct {
 	fakeIPIPv4Prefix         netip.Prefix
 	fakeIPIPv6Prefix         netip.Prefix
 	fakeIPICMPReply          bool
+	flowMapCapacity          commonEBPF.FlowMapCapacities
+	cgroupMapCapacity        commonEBPF.CgroupMapCapacity
 	sharedIncludeMAC         []commonEBPF.MACAddress
 	sharedExcludeMAC         []commonEBPF.MACAddress
 	tcDataPlaneAccess        sync.RWMutex
@@ -220,6 +222,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, E.Cause(err, "parse fakeip_icmp")
 	}
+	flowMapCapacity, cgroupMapCapacity, err := resolveMapCapacities(options.MapCapacity)
+	if err != nil {
+		return nil, E.Cause(err, "parse map_capacity")
+	}
 	localDNSMode, err := normalizeDNSMode(options.Local.DNSMode)
 	if err != nil {
 		return nil, E.Cause(err, "parse local.dns_mode")
@@ -325,6 +331,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		androidUIDOptions:     newAndroidUIDOptions(options.Local),
 		bypassSelectorOptions: bypassSelectorOptions,
 		fakeIPICMPReply:       fakeIPICMPReply,
+		flowMapCapacity:       flowMapCapacity,
+		cgroupMapCapacity:     cgroupMapCapacity,
 	}
 	if inbound.tcPriority == 0 {
 		inbound.tcPriority = defaultTCPriority
