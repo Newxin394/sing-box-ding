@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/redir"
 	"github.com/sagernet/sing-box/common/proxyproto"
+	"github.com/sagernet/sing-box/common/redir"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common/control"

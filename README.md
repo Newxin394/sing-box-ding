@@ -2,6 +2,24 @@
 
 The universal proxy platform.
 
+> **This is an unofficial fork.** It is not affiliated with, endorsed by, or
+> supported by SagerNet or nekohasekai, and it is not the sing-box you get from
+> sing-box.sagernet.org. The upstream documentation below does not describe the
+> changes made here.
+>
+> - Upstream project: https://github.com/SagerNet/sing-box
+> - Forked from: https://github.com/CHIZI-0618/sing-box (`testing-ebpf-tc-rewrite`)
+> - What this fork adds: the eBPF inbound
+>   ([docs/configuration/inbound/ebpf.md](./docs/configuration/inbound/ebpf.md)),
+>   `reject_unknown_sni` / `server_names` for inbound TLS, TCP keep-alive dialer
+>   options, `urltest` fallback selection, and `With-At` ding-direct support for
+>   HTTP CONNECT outbounds ([ding-direct.zh-CN.md](./ding-direct.zh-CN.md)).
+> - Binaries built from this repository are not sing-box releases. Do not
+>   redistribute them under the sing-box name.
+>
+> The upstream `LICENSE` additionally states that no derivative work may use the
+> upstream name or imply association with it without prior consent.
+
 [![Packaging status](https://repology.org/badge/vertical-allrepos/sing-box.svg)](https://repology.org/project/sing-box/versions)
 
 ## Documentation
