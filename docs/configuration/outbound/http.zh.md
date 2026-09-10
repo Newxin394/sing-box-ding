@@ -53,6 +53,16 @@ HTTP 请求的额外标头。
 
 TLS 配置, 参阅 [TLS](/zh/configuration/shared/tls/#出站)。
 
+#### udp_outbound
+
+> [!NOTE]
+> 该字段由本 fork 添加，上游不存在。
+
+将 UDP（数据包）流量委派给指定出站处理，而不是通过 HTTP 代理隧道转发。
+目标出站必须支持 UDP。
+
+不设置时该出站只声明 TCP；设置后它会同时声明 UDP，路由规则才可能把 UDP 流量匹配到这里。
+
 ### 拨号字段
 
 参阅 [拨号字段](/zh/configuration/shared/dial/)。

@@ -83,6 +83,22 @@ Maximum acceptable delay.
 
 An outbound whose delay exceeds this value is skipped. If every available outbound exceeds the value, the skipped outbound with the lowest delay is selected.
 
+#### udp_outbound
+
+> [!NOTE]
+> This field is added by this fork and does not exist upstream.
+
+Delegate UDP (packet) traffic to this outbound instead of handling it through the
+selected member outbound. The target outbound must support UDP.
+
+#### udp_fallback_outbound
+
+> [!NOTE]
+> This field is added by this fork and does not exist upstream.
+
+A secondary outbound used when the primary `udp_outbound` fails. It requires
+`udp_outbound` to be set, and neither field may reference this urltest's own tag.
+
 #### interrupt_exist_connections
 
 Interrupt existing connections when the selected outbound has changed.

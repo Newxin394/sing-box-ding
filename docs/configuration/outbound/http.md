@@ -53,6 +53,17 @@ Extra headers of HTTP request.
 
 TLS configuration, see [TLS](/configuration/shared/tls/#outbound).
 
+#### udp_outbound
+
+> [!NOTE]
+> This field is added by this fork and does not exist upstream.
+
+Delegate UDP (packet) traffic to this outbound instead of tunneling it through the
+HTTP proxy. The target outbound must support UDP.
+
+Without it the outbound only advertises TCP; setting it makes the outbound
+advertise UDP as well, which is what lets route rules match UDP traffic here.
+
 ### Dial Fields
 
 See [Dial Fields](/configuration/shared/dial/) for details.
