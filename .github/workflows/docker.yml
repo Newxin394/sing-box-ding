@@ -16,6 +16,12 @@ on:
 env:
   REGISTRY_IMAGE: ghcr.io/sagernet/sing-box
 
+# docker/login-action authenticates to ghcr.io with secrets.GITHUB_TOKEN, so
+# packages: write must stay granted here; contents stays read-only.
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build_binary:
     name: Build binary

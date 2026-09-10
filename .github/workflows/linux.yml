@@ -15,6 +15,9 @@ on:
     types:
       - published
 
+permissions:
+  contents: read
+
 jobs:
   calculate_version:
     name: Calculate version

@@ -3,6 +3,9 @@ name: Build Android eBPF test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build (${{ matrix.target.goarch }})

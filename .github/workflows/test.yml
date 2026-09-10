@@ -20,6 +20,9 @@ on:
       - testing-ebpf-tc-rewrite
       - unstable
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build }}
   cancel-in-progress: true
@@ -50,14 +53,70 @@ jobs:
         run: |
           echo "BUILD_TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" >> "$GITHUB_ENV"
           echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "$GITHUB_ENV"
+      # -count=1 disables the Go test result cache. Without it a cached PASS can
+      # be reported for a package the current commit no longer actually passes.
       - name: Test (unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -exec sudo -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
+        run: go test -count=1 -exec sudo -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
       - name: Test (windows)
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: go test -v -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
+        run: go test -count=1 -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
       - name: Test eBPF TC package (linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: go test -v -exec sudo -tags "with_ebpf" ./protocol/ebpf
+        run: go test -count=1 -exec sudo -tags "with_ebpf" ./protocol/ebpf
+
+  # The matrix above never enables the race detector, so the concurrency tests
+  # that exist specifically to catch data races (dns/router_race_test.go,
+  # protocol/ebpf/tc_dataplane_lock_test.go, ...) cannot actually detect one
+  # there. One Linux job is enough: races are architecture-independent, and the
+  # privileged cases need sudo anyway.
+  race:
+    name: Race detector (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.26
+      - name: Set build tags and ldflags
+        shell: bash
+        run: |
+          echo "BUILD_TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" >> "$GITHUB_ENV"
+          echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "$GITHUB_ENV"
+      - name: Test with race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env "PATH=$PATH" \
+            go test -race -count=1 \
+              -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
+
+  # docs/schema.json is generated from option/**, and nothing used to notice when
+  # it fell behind: udp_outbound and udp_fallback_outbound were implemented in
+  # option/group.go and consumed by protocol/group/{selector,urltest}.go while
+  # three group sections of the schema were missing both keys.
+  schema:
+    name: Schema is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.26
+      - name: Regenerate and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run -ldflags "$(cat release/LDFLAGS)" \
+            -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" \
+            ./cmd/sing-box schema -o docs/schema.json
+          if ! git diff --exit-code docs/schema.json; then
+            echo "::error::docs/schema.json is stale; run 'make schema' and commit the result"
+            exit 1
+          fi

@@ -34,7 +34,11 @@ on:
     branches:
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build }}

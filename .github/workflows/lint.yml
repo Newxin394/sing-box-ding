@@ -6,6 +6,7 @@ on:
       - oldstable
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
     paths-ignore:
       - '**.md'
@@ -16,7 +17,11 @@ on:
       - oldstable
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build }}
@@ -54,7 +59,7 @@ jobs:
         #    goarch: amd64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           fetch-depth: 0
       - name: Setup Go
@@ -67,13 +72,22 @@ jobs:
           path: |
             ~/go/pkg/mod
           key: go-${{ hashFiles('**/go.sum') }}
+      - name: Lint config must not lag go.mod
+        run: |
+          MOD_GO=$(awk '/^go /{print $2}' go.mod | cut -d. -f1,2)
+          CFG_GO=$(awk '/^run:/{flag=1} flag && /^  go:/{gsub(/"/,"",$2); print $2; exit}' .golangci.yml)
+          echo "go.mod=$MOD_GO .golangci.yml=$CFG_GO"
+          if [ "$MOD_GO" != "$CFG_GO" ]; then
+            echo "::error::.golangci.yml run.go ($CFG_GO) does not match go.mod ($MOD_GO); bump it together with go.mod"
+            exit 1
+          fi
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         with:
-          version: latest
+          version: v2.13.2
           args: --timeout=30m
           install-mode: binary
           verify: false
