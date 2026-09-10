@@ -263,7 +263,8 @@ func normalizeProbeDataPlanes(options KernelProbeOptions) (KernelProbeDataPlane,
 }
 
 func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, enableIPv6, enableTCP, enableUDP bool,
-	localPlane, sharedPlane KernelProbeDataPlane, needLPMPolicy, needProcessTracking bool) {
+	localPlane, sharedPlane KernelProbeDataPlane, needLPMPolicy, needProcessTracking bool,
+) {
 	plan := newKernelProbePlan(localPlane, sharedPlane)
 	needLocal := localPlane != ""
 	needSocketAssignment := plan.needsSocketAssignment()

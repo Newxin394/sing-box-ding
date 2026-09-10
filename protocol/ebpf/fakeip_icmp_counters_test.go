@@ -6,9 +6,9 @@ import (
 	"encoding/binary"
 	"testing"
 
-	CiliumEBPF "github.com/cilium/ebpf"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 
+	CiliumEBPF "github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
 

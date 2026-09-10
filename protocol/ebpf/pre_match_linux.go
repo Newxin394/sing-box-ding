@@ -15,9 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coreos/go-iptables/iptables"
-	"github.com/florianl/go-nfqueue/v2"
-	"github.com/mdlayher/netlink"
 	snetlink "github.com/sagernet/netlink"
 	"github.com/sagernet/sing-box/adapter"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
@@ -25,6 +22,9 @@ import (
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	E "github.com/sagernet/sing/common/exceptions"
 
+	"github.com/coreos/go-iptables/iptables"
+	"github.com/florianl/go-nfqueue/v2"
+	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -229,8 +229,12 @@ func (c *preMatchController) install(local bool, shared []string) error {
 	for _, family := range c.families {
 		ipt := family.ipt
 		for _, tableChain := range [][2]string{
-			{"mangle", c.localChain}, {"mangle", c.sharedRoot}, {"mangle", c.sharedChain},
-			{"mangle", c.sharedTPROXY}, {"nat", c.localNAT}, {"filter", c.filterChain},
+			{"mangle", c.localChain},
+			{"mangle", c.sharedRoot},
+			{"mangle", c.sharedChain},
+			{"mangle", c.sharedTPROXY},
+			{"nat", c.localNAT},
+			{"filter", c.filterChain},
 		} {
 			_ = ipt.ClearAndDeleteChain(tableChain[0], tableChain[1])
 		}
@@ -519,8 +523,12 @@ func (c *preMatchController) cleanupChains() {
 			_ = family.ipt.Delete("filter", hook, "-j", c.filterChain)
 		}
 		for _, tableChain := range [][2]string{
-			{"mangle", c.localChain}, {"mangle", c.sharedRoot}, {"mangle", c.sharedChain},
-			{"mangle", c.sharedTPROXY}, {"nat", c.localNAT}, {"filter", c.filterChain},
+			{"mangle", c.localChain},
+			{"mangle", c.sharedRoot},
+			{"mangle", c.sharedChain},
+			{"mangle", c.sharedTPROXY},
+			{"nat", c.localNAT},
+			{"filter", c.filterChain},
 		} {
 			_ = family.ipt.ClearAndDeleteChain(tableChain[0], tableChain[1])
 		}

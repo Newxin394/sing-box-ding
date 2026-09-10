@@ -11,11 +11,12 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/sagernet/sing/common/control"
+	E "github.com/sagernet/sing/common/exceptions"
+
 	CiliumEBPF "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
-	"github.com/sagernet/sing/common/control"
-	E "github.com/sagernet/sing/common/exceptions"
 	"golang.org/x/sys/unix"
 )
 

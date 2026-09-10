@@ -58,15 +58,18 @@ func (i *Inbound) startBypassSelector() error {
 	i.notifyBypassSelectorUpdate(s.Now())
 	return nil
 }
+
 func (i *Inbound) bypassSelectorWantsBypass(selected string) bool {
 	return i.bypassSelectorOptions != nil && common.Contains(i.bypassSelectorOptions.BypassWhen, selected)
 }
+
 func (i *Inbound) guardBypassSelectorUpdate(previous, selected string) error {
 	if err := i.setBypassSelectorState(false, true); err != nil {
 		return E.Cause(err, "disable eBPF bypass before selector update")
 	}
 	return nil
 }
+
 func (i *Inbound) notifyBypassSelectorUpdate(selected string) {
 	i.bypassSelectorGeneration.Add(1)
 	select {
@@ -74,6 +77,7 @@ func (i *Inbound) notifyBypassSelectorUpdate(selected string) {
 	default:
 	}
 }
+
 func (i *Inbound) runBypassSelector(ctx context.Context) {
 	defer close(i.bypassSelectorDone)
 	settle := time.Duration(i.bypassSelectorOptions.SettleDelay)
@@ -173,6 +177,7 @@ func (i *Inbound) runBypassSelector(ctx context.Context) {
 		}
 	}
 }
+
 func (i *Inbound) currentBypassSelectorState() (bool, error) {
 	b := i.tcBackend()
 	if b == nil {
@@ -180,6 +185,7 @@ func (i *Inbound) currentBypassSelectorState() (bool, error) {
 	}
 	return b.BypassCIDREnabled()
 }
+
 func (i *Inbound) setBypassSelectorState(enabled, clean bool) error {
 	i.bypassRuleSetAccess.Lock()
 	defer i.bypassRuleSetAccess.Unlock()
@@ -209,6 +215,7 @@ func (i *Inbound) setBypassSelectorState(enabled, clean bool) error {
 	i.bypassSelectorStateKnown = true
 	return nil
 }
+
 func (i *Inbound) stopBypassSelector() {
 	s := i.bypassSelector
 	if s != nil {

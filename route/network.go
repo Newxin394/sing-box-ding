@@ -43,7 +43,7 @@ type NetworkManager struct {
 	autoDetectInterface      bool
 	defaultOptions           adapter.NetworkOptions
 	autoRedirectOutputMark   uint32
-	ebpfSelfBypass           ebpfSelfBypassState
+	ebpfSelfBypass           ebpfSelfBypassState //nolint:unused // only accessed from network_ebpf.go (with_ebpf + linux/android builds)
 	networkMonitor           tun.NetworkUpdateMonitor
 	interfaceMonitor         tun.DefaultInterfaceMonitor
 	packageManager           tun.PackageManager

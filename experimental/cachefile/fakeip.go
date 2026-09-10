@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/sagernet/bbolt"
+	berrors "github.com/sagernet/bbolt/errors"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -206,7 +207,7 @@ func (c *CacheFile) FakeIPReset() error {
 		// every stale mapping in place, so tolerate it per bucket.
 		for _, bucket := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
 			err := tx.DeleteBucket(bucket)
-			if err != nil && !errors.Is(err, bbolt.ErrBucketNotFound) {
+			if err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
 				return err
 			}
 		}

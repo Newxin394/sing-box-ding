@@ -9,8 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	CiliumEBPF "github.com/cilium/ebpf"
 	E "github.com/sagernet/sing/common/exceptions"
+
+	CiliumEBPF "github.com/cilium/ebpf"
 )
 
 // Linux 6.6.0 through 6.6.46 may report an UBSAN out-of-bounds access when

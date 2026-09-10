@@ -32,8 +32,10 @@ var (
 	_ adapter.PreMatchOutboundGroup = (*Selector)(nil)
 )
 
-type SelectorUpdateCallback func(selected string)
-type SelectorUpdateGuard func(previous string, selected string) error
+type (
+	SelectorUpdateCallback func(selected string)
+	SelectorUpdateGuard    func(previous string, selected string) error
+)
 
 type Selector struct {
 	outbound.Adapter
@@ -256,6 +258,7 @@ func (s *Selector) ClaimController(owner any) error {
 	s.controller = owner
 	return nil
 }
+
 func (s *Selector) ReleaseController(owner any) {
 	if owner == nil {
 		return
@@ -266,11 +269,13 @@ func (s *Selector) ReleaseController(owner any) {
 	}
 	s.callbackAccess.Unlock()
 }
+
 func (s *Selector) RegisterUpdateGuard(guard SelectorUpdateGuard) *list.Element[SelectorUpdateGuard] {
 	s.callbackAccess.Lock()
 	defer s.callbackAccess.Unlock()
 	return s.guards.PushBack(guard)
 }
+
 func (s *Selector) UnregisterUpdateGuard(element *list.Element[SelectorUpdateGuard]) {
 	if element == nil {
 		return
@@ -281,6 +286,7 @@ func (s *Selector) UnregisterUpdateGuard(element *list.Element[SelectorUpdateGua
 	s.guards.Remove(element)
 	s.callbackAccess.Unlock()
 }
+
 func (s *Selector) runUpdateGuards(previous string, selected string) error {
 	s.callbackAccess.Lock()
 	guards := make([]SelectorUpdateGuard, 0, s.guards.Len())
@@ -295,11 +301,13 @@ func (s *Selector) runUpdateGuards(previous string, selected string) error {
 	}
 	return nil
 }
+
 func (s *Selector) RegisterUpdateCallback(callback SelectorUpdateCallback) *list.Element[SelectorUpdateCallback] {
 	s.callbackAccess.Lock()
 	defer s.callbackAccess.Unlock()
 	return s.callbacks.PushBack(callback)
 }
+
 func (s *Selector) UnregisterUpdateCallback(element *list.Element[SelectorUpdateCallback]) {
 	if element == nil {
 		return
@@ -308,6 +316,7 @@ func (s *Selector) UnregisterUpdateCallback(element *list.Element[SelectorUpdate
 	s.callbacks.Remove(element)
 	s.callbackAccess.Unlock()
 }
+
 func (s *Selector) notifyUpdated(tag string) {
 	s.callbackAccess.Lock()
 	callbacks := make([]SelectorUpdateCallback, 0, s.callbacks.Len())
@@ -319,6 +328,7 @@ func (s *Selector) notifyUpdated(tag string) {
 		callback(tag)
 	}
 }
+
 func (s *Selector) InterruptConnections(interruptExternalConnections bool) {
 	s.interruptGroup.Interrupt(interruptExternalConnections)
 }

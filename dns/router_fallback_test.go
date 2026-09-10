@@ -5,8 +5,6 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -14,6 +12,7 @@ import (
 	R "github.com/sagernet/sing-box/route/rule"
 
 	mDNS "github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 )
 
 func fallbackTestMessage() *mDNS.Msg {

@@ -5,10 +5,11 @@ package ebpf
 import (
 	"slices"
 
+	E "github.com/sagernet/sing/common/exceptions"
+
 	CiliumEBPF "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
-	E "github.com/sagernet/sing/common/exceptions"
 )
 
 // DefaultProcessOwnerCapacity is the process-owner table's default capacity. It

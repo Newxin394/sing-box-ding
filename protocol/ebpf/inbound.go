@@ -186,12 +186,15 @@ type Inbound struct {
 func (i *Inbound) localTCEnabled() bool {
 	return i.localEnabled && i.localDataPlane == localDataPlaneTC
 }
+
 func (i *Inbound) localCgroupEnabled() bool {
 	return i.localEnabled && i.localDataPlane == localDataPlaneCgroup
 }
+
 func (i *Inbound) sharedSocketAssignEnabled() bool {
 	return i.sharedEnabled && i.sharedDataPlane == sharedDataPlaneSocketAssign
 }
+
 func (i *Inbound) sharedRewriteEnabled() bool {
 	return i.sharedEnabled && i.sharedDataPlane == sharedDataPlanePacketRewrite
 }

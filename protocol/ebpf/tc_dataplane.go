@@ -15,12 +15,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	CiliumEBPF "github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/sagernet/netlink"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	E "github.com/sagernet/sing/common/exceptions"
 
+	CiliumEBPF "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,8 +32,10 @@ const (
 	tcSharedICMPReplyFilterHandle = 0x5348
 )
 
-var tcVethSequence atomic.Uint32
-var tcxSupport atomic.Int32
+var (
+	tcVethSequence atomic.Uint32
+	tcxSupport     atomic.Int32
+)
 
 const (
 	tcxSupportUnknown int32 = iota

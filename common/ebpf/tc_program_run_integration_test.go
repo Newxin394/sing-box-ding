@@ -89,7 +89,6 @@ func TestTCProgramRunIntegration(t *testing.T) {
 	if action != testTCActShot {
 		t.Fatalf("respect_policy DNS did not override destination bypass: action=%d", action)
 	}
-
 }
 
 func TestTCIPv6PathIsolationIntegration(t *testing.T) {

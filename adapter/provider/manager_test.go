@@ -19,12 +19,15 @@ type closeTestProvider struct {
 	startCalled bool
 }
 
-func (p *closeTestProvider) Type() string                                           { return "test" }
-func (p *closeTestProvider) Tag() string                                            { return p.tag }
-func (p *closeTestProvider) Outbounds() []adapter.Outbound                          { return nil }
-func (p *closeTestProvider) Outbound(string) (adapter.Outbound, bool)               { return nil, false }
-func (p *closeTestProvider) UpdatedAt() time.Time                                   { return time.Time{} }
+func (p *closeTestProvider) Type() string                             { return "test" }
+func (p *closeTestProvider) Tag() string                              { return p.tag }
+func (p *closeTestProvider) Outbounds() []adapter.Outbound            { return nil }
+func (p *closeTestProvider) Outbound(string) (adapter.Outbound, bool) { return nil, false }
+
+func (p *closeTestProvider) UpdatedAt() time.Time { return time.Time{} }
+
 func (p *closeTestProvider) HealthCheck(context.Context) (map[string]uint16, error) { return nil, nil }
+
 func (p *closeTestProvider) RegisterCallback(adapter.ProviderUpdateCallback) *list.Element[adapter.ProviderUpdateCallback] {
 	return nil
 }
@@ -33,6 +36,7 @@ func (p *closeTestProvider) StartContext(context.Context, *adapter.HTTPStartCont
 	p.startCalled = true
 	return p.startErr
 }
+
 func (p *closeTestProvider) Close() error {
 	p.closed = true
 	return p.closeErr

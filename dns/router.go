@@ -493,6 +493,7 @@ func (r *Router) resolveDNSFallback(ctx context.Context, message *mDNS.Msg, resu
 	}
 	return result, nextIndex, false
 }
+
 func (r *Router) continueDNSRulesAfterFallthrough(ctx context.Context, rules []adapter.DNSRule, message *mDNS.Msg, result exchangeWithRulesResult, allowFakeIP bool) exchangeWithRulesResult {
 	state := dnsRuleWalkState{
 		ruleIndex:        result.ruleIndex + 1,

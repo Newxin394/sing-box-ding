@@ -9,10 +9,11 @@ import (
 	"slices"
 	"testing"
 
-	CiliumEBPF "github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/sagernet/netlink"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
+
+	CiliumEBPF "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
 

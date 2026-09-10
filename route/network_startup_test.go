@@ -22,7 +22,7 @@ func TestInterfaceUpdateStartupBoundary(t *testing.T) {
 			name = "notification_after_startup"
 		}
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			ctx = pause.WithDefaultManager(ctx)
 			updateLogger := &startupUpdateLogger{

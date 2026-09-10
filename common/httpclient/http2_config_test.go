@@ -6,6 +6,7 @@ import (
 
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json/badoption"
+
 	"github.com/stretchr/testify/require"
 )
 

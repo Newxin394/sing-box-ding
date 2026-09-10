@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cilium/ebpf/link"
 	"github.com/sagernet/netlink"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	udpnat "github.com/sagernet/sing/common/udpnat2"
+
+	"github.com/cilium/ebpf/link"
 )
 
 type tcRetryResource struct {
@@ -211,7 +212,7 @@ func TestTCDataPlaneRetainsFailedInfrastructure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rp_filter")
 	// Reading a directory fails regardless of whether tests run as root.
-	if err := os.Mkdir(path, 0700); err != nil {
+	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	d := &tcDataPlane{backend: &commonEBPF.TCBackend{}, routing: &tcPolicyRouting{lock: routingLock}, delivery: &tcDeliveryLink{globalSysctls: []tcSysctlState{{path: path, original: "1", applied: "0"}}}}
@@ -225,7 +226,7 @@ func TestTCDataPlaneRetainsFailedInfrastructure(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("0"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {

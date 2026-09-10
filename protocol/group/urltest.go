@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/adapter/outbound"
 	groupAdapter "github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/urltest"
@@ -28,8 +27,8 @@ import (
 	"github.com/sagernet/sing/service/pause"
 )
 
-func RegisterURLTest(registry *outbound.Registry) {
-	outbound.Register[option.URLTestOutboundOptions](registry, C.TypeURLTest, NewURLTest)
+func RegisterURLTest(registry *groupAdapter.Registry) {
+	groupAdapter.Register[option.URLTestOutboundOptions](registry, C.TypeURLTest, NewURLTest)
 }
 
 var (
@@ -70,7 +69,7 @@ func (l *semaphoreHealthCheckLimiter) Release() {
 }
 
 type URLTest struct {
-	outbound.Adapter
+	groupAdapter.Adapter
 	ctx                          context.Context
 	outbound                     adapter.OutboundManager
 	connection                   adapter.ConnectionManager
@@ -106,7 +105,7 @@ type URLTestFallback struct {
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
 	outbound := &URLTest{
-		Adapter:                      outbound.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
+		Adapter:                      groupAdapter.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
 		ctx:                          ctx,
 		outbound:                     service.FromContext[adapter.OutboundManager](ctx),
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
@@ -899,10 +898,5 @@ func containsOutbound(outbounds []adapter.Outbound, selected adapter.Outbound) b
 	if selected == nil {
 		return true
 	}
-	for _, outbound := range outbounds {
-		if outbound == selected {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(outbounds, selected)
 }

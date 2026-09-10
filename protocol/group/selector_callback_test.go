@@ -46,6 +46,7 @@ type testSelectorOutbound struct{ outbound.Adapter }
 func (o *testSelectorOutbound) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
 	return nil, errors.New("not implemented")
 }
+
 func (o *testSelectorOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, errors.New("not implemented")
 }

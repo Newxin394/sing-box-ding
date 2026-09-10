@@ -7,8 +7,9 @@ import (
 	"sync"
 	"unsafe"
 
-	CiliumEBPF "github.com/cilium/ebpf"
 	E "github.com/sagernet/sing/common/exceptions"
+
+	CiliumEBPF "github.com/cilium/ebpf"
 )
 
 // FakeIPICMPBackend answers ICMP Echo Request packets destined to the
