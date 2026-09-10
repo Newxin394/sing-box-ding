@@ -761,8 +761,8 @@ func (s *StartedService) SelectOutbound(ctx context.Context, request *SelectOutb
 	if !isSelector {
 		return nil, status.Error(codes.InvalidArgument, "outbound is not a selector: "+request.GroupTag)
 	}
-	if !selector.SelectOutbound(request.OutboundTag) {
-		return nil, status.Error(codes.NotFound, "outbound not found in selector: "+request.OutboundTag)
+	if err := selector.SelectOutboundContext(request.OutboundTag); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	return &emptypb.Empty{}, nil
 }

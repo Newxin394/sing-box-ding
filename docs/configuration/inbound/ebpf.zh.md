@@ -31,6 +31,15 @@ eBPF 入站不使用[监听字段](/zh/configuration/shared/listen/)。
     "dns_mode": "respect_policy",
     "ipv6": true,
     "bypass_private_address": true,
+    "bypass_selector": {
+      "tag": "国内出口",
+      "bypass_when": ["直连"],
+      "settle_delay": "3s",
+      "final_check_delay": "5s",
+      "rapid_switch_window": "5s",
+      "rapid_switch_threshold": 3,
+      "interrupt_existing_connections": true
+    },
     "include_uid": [],
     "include_uid_range": [],
     "exclude_uid": [],
@@ -129,6 +138,14 @@ DoT 流量。
 #### local.bypass_private_address
 
 绕过私有和特殊用途目标地址，默认 `true`。
+
+#### local.bypass_selector
+
+根据 selector 动态启用 local TC 数据面的 `bypass_rule_set`。该功能要求 `local.data_plane: "tc"`；`bypass_when` 中每个成员都必须是被引用 selector 直接包含的 direct 出站。
+
+selector 离开 `bypass_when` 时，内核绕过会在 selector 切换前关闭；进入 `bypass_when` 后，只有连续稳定达到 `settle_delay` 才开启绕过。`final_check_delay` 会再次读取 selector 和真实内核状态并纠正不一致。`rapid_switch_window` 与 `rapid_switch_threshold` 用于检测频繁切换，命中时将安全等待延长到 `final_check_delay`。四项默认值依次为 `3s`、`5s`、`5s` 和 `3`。
+
+切换期间保留 CIDR map，正常切换只更新一个 TC control 条目，不重写规则集。状态未知或更新失败时保持关闭绕过。`interrupt_existing_connections` 会在内核状态变化时关闭 selector 管理的连接并清理 UDP 状态。
 
 #### local.include_uid
 

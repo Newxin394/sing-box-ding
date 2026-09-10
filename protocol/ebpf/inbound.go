@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -15,6 +16,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
@@ -108,6 +110,17 @@ type Inbound struct {
 	bypassRuleSetStarted   bool
 	bypassRuleSetPolicy    commonEBPF.BypassCIDRPolicy
 
+	bypassSelectorOptions    *option.EBPFBypassSelectorOptions
+	bypassSelector           *group.Selector
+	bypassSelectorGuard      *list.Element[group.SelectorUpdateGuard]
+	bypassSelectorCallback   *list.Element[group.SelectorUpdateCallback]
+	bypassSelectorEvents     chan struct{}
+	bypassSelectorGeneration atomic.Uint64
+	bypassSelectorCancel     context.CancelFunc
+	bypassSelectorDone       chan struct{}
+	bypassSelectorState      bool
+	bypassSelectorStateKnown bool
+
 	udpClientTable    udpClientTable
 	udpReplySockets   udpReplySocketPool
 	udpWarnings       udpWarningLimiters
@@ -137,6 +150,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, err
 	}
 	localEnabled, sharedEnabled := selection.localEnabled, selection.sharedEnabled
+	bypassSelectorOptions, err := normalizeBypassSelector(options.Local.BypassSelector, selection.localDataPlane, len(options.BypassRuleSet) > 0)
+	if err != nil {
+		return nil, err
+	}
 	if err = validateLocalOptions(localEnabled, options.Local); err != nil {
 		return nil, err
 	}
@@ -249,7 +266,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			IncludeUID: includeUIDRanges,
 			ExcludeUID: excludeUIDRanges,
 		},
-		androidUIDOptions: newAndroidUIDOptions(options.Local),
+		androidUIDOptions:     newAndroidUIDOptions(options.Local),
+		bypassSelectorOptions: bypassSelectorOptions,
 	}
 	if inbound.tcPriority == 0 {
 		inbound.tcPriority = defaultTCPriority

@@ -27,6 +27,11 @@ const (
 	tcPortPolicyCapacity = 4096
 )
 
+const (
+	tcFlagBypassIPv4 = 1 << 8
+	tcFlagBypassIPv6 = 1 << 9
+)
+
 // DefaultTCRoutingMark is used only by standalone backend tests and callers
 // that do not install policy routing. The TC data plane selects a free mark
 // before enabling the backend.
@@ -484,7 +489,52 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 	return assignment, nil
 }
 
+func (b *TCBackend) SetBypassCIDREnabled(enabled bool) (bool, error) {
+	if b == nil {
+		return false, errBackendClosed
+	}
+	b.access.Lock()
+	defer b.access.Unlock()
+	if b.runtime == nil {
+		return false, errBackendClosed
+	}
+	previousFlags := b.control.Flags
+	b.control.Flags &^= tcFlagBypassIPv4 | tcFlagBypassIPv6
+	if enabled {
+		if len(b.bypassIPv4) > 0 {
+			b.control.Flags |= tcFlagBypassIPv4
+		}
+		if len(b.bypassIPv6) > 0 {
+			b.control.Flags |= tcFlagBypassIPv6
+		}
+	}
+	if b.control.Flags == previousFlags {
+		return false, nil
+	}
+	if err := b.updateControlLocked(); err != nil {
+		b.control.Flags = previousFlags
+		return false, err
+	}
+	return true, nil
+}
+
+func (b *TCBackend) BypassCIDREnabled() (bool, error) {
+	if b == nil {
+		return false, errBackendClosed
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.runtime == nil {
+		return false, errBackendClosed
+	}
+	return b.control.Flags&(tcFlagBypassIPv4|tcFlagBypassIPv6) != 0, nil
+}
+
 func (b *TCBackend) UpdateCompiledBypassCIDR(policy BypassCIDRPolicy) (bool, error) {
+	return b.UpdateCompiledBypassCIDRState(policy, true)
+}
+
+func (b *TCBackend) UpdateCompiledBypassCIDRState(policy BypassCIDRPolicy, enabled bool) (bool, error) {
 	if len(policy.ipv4) > maxBypassCIDRPolicyEntries || len(policy.ipv6) > maxBypassCIDRPolicyEntries {
 		return false, E.New("TC eBPF bypass CIDR policy exceeds map capacity")
 	}
@@ -496,6 +546,9 @@ func (b *TCBackend) UpdateCompiledBypassCIDR(policy BypassCIDRPolicy) (bool, err
 	if b.runtime == nil {
 		return false, errBackendClosed
 	}
+	previousIPv4 := slices.Clone(b.bypassIPv4)
+	previousIPv6 := slices.Clone(b.bypassIPv6)
+	previousFlags := b.control.Flags
 	changed, err := replaceDualStackCIDRPolicy(
 		b.runtime.maps["tc_bypass_ipv4"],
 		b.runtime.maps["tc_bypass_ipv6"],
@@ -509,20 +562,34 @@ func (b *TCBackend) UpdateCompiledBypassCIDR(policy BypassCIDRPolicy) (bool, err
 	}
 	b.bypassIPv4 = slices.Clone(policy.ipv4)
 	b.bypassIPv6 = slices.Clone(policy.ipv6)
-	if len(b.bypassIPv4) > 0 {
-		b.control.Flags |= 1 << 8
+	if enabled && len(b.bypassIPv4) > 0 {
+		b.control.Flags |= tcFlagBypassIPv4
 	} else {
-		b.control.Flags &^= 1 << 8
+		b.control.Flags &^= tcFlagBypassIPv4
 	}
-	if len(b.bypassIPv6) > 0 {
-		b.control.Flags |= 1 << 9
+	if enabled && len(b.bypassIPv6) > 0 {
+		b.control.Flags |= tcFlagBypassIPv6
 	} else {
-		b.control.Flags &^= 1 << 9
+		b.control.Flags &^= tcFlagBypassIPv6
 	}
 	if err = b.updateControlLocked(); err != nil {
-		return false, err
+		b.bypassIPv4 = previousIPv4
+		b.bypassIPv6 = previousIPv6
+		b.control.Flags = previousFlags
+		rollbackErr := rollbackCIDRPolicyMaps(
+			b.runtime.maps["tc_bypass_ipv4"],
+			b.runtime.maps["tc_bypass_ipv6"],
+			dualStackCIDRPrefixes(policy),
+			dualStackCIDRPrefixes{previousIPv4, previousIPv6},
+		)
+		return false, E.Errors(err, rollbackErr)
 	}
 	return changed, nil
+}
+
+func rollbackCIDRPolicyMaps(ipv4Map, ipv6Map *CiliumEBPF.Map, current, previous dualStackCIDRPrefixes) error {
+	_, err := replaceDualStackCIDRPolicy(ipv4Map, ipv6Map, current, previous, "TC ", "bypass CIDR rollback")
+	return err
 }
 
 func (b *TCBackend) UpdateHostAddresses(addresses []netip.Addr) error {

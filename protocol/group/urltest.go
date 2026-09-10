@@ -5,12 +5,14 @@ import (
 	"maps"
 	"net"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	groupAdapter "github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
@@ -36,6 +38,37 @@ var (
 	_ adapter.Referrer                = (*URLTest)(nil)
 )
 
+type healthCheckLimiter interface {
+	Acquire(ctx context.Context) error
+	Release()
+}
+
+type semaphoreHealthCheckLimiter struct {
+	semaphore chan struct{}
+}
+
+func ContextWithHealthCheckConcurrency(ctx context.Context, limit int) context.Context {
+	if limit <= 0 {
+		return ctx
+	}
+	return service.ContextWith[healthCheckLimiter](ctx, &semaphoreHealthCheckLimiter{
+		semaphore: make(chan struct{}, limit),
+	})
+}
+
+func (l *semaphoreHealthCheckLimiter) Acquire(ctx context.Context) error {
+	select {
+	case l.semaphore <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (l *semaphoreHealthCheckLimiter) Release() {
+	<-l.semaphore
+}
+
 type URLTest struct {
 	outbound.Adapter
 	ctx                          context.Context
@@ -48,6 +81,8 @@ type URLTest struct {
 	tolerance                    uint16
 	idleTimeout                  time.Duration
 	fallback                     URLTestFallback
+	udpOutboundTag               string
+	udpFallbackTag               string
 	group                        *URLTestGroup
 	checkAccess                  sync.Mutex
 	interruptExternalConnections bool
@@ -98,6 +133,21 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 			maxDelay: uint16(time.Duration(options.Fallback.MaxDelay).Milliseconds()),
 		}
 	}
+	if options.UDPFallbackOutbound != "" && options.UDPOutbound == "" {
+		return nil, E.New("udp_fallback_outbound requires udp_outbound in urltest: ", tag)
+	}
+	if options.UDPOutbound == tag {
+		return nil, E.New("udp_outbound must not reference itself in urltest: ", tag)
+	}
+	if options.UDPFallbackOutbound == tag {
+		return nil, E.New("udp_fallback_outbound must not reference itself in urltest: ", tag)
+	}
+	if options.UDPOutbound != "" || options.UDPFallbackOutbound != "" {
+		dependencies := append(slices.Clone(options.Outbounds), options.UDPOutbound, options.UDPFallbackOutbound)
+		outbound.Adapter = groupAdapter.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, common.Uniq(dependencies))
+	}
+	outbound.udpOutboundTag = options.UDPOutbound
+	outbound.udpFallbackTag = options.UDPFallbackOutbound
 	return outbound, nil
 }
 
@@ -284,6 +334,32 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 }
 
 func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	if s.udpOutboundTag != "" {
+		if s.outbound == nil {
+			return nil, E.New("missing outbound manager for udp_outbound: ", s.udpOutboundTag)
+		}
+		delegate, loaded := s.outbound.Outbound(s.udpOutboundTag)
+		if !loaded {
+			return nil, E.New("udp_outbound not found: ", s.udpOutboundTag)
+		}
+		conn, err := delegate.ListenPacket(ctx, destination)
+		if err == nil {
+			return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
+		}
+		if s.udpFallbackTag != "" {
+			fallback, fallbackLoaded := s.outbound.Outbound(s.udpFallbackTag)
+			if !fallbackLoaded {
+				return nil, E.Cause(err, "udp_fallback_outbound not found: ", s.udpFallbackTag, "; primary udp_outbound ", s.udpOutboundTag, " failed")
+			}
+			conn, fallbackErr := fallback.ListenPacket(ctx, destination)
+			if fallbackErr == nil {
+				s.logger.DebugContext(ctx, "udp_outbound ", s.udpOutboundTag, " failed, using fallback ", s.udpFallbackTag, ": ", err)
+				return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
+			}
+			return nil, E.Cause(fallbackErr, "delegate udp_fallback_outbound failed: ", s.udpFallbackTag, "; primary udp_outbound ", s.udpOutboundTag, " failed: ", err)
+		}
+		return nil, E.Cause(err, "delegate udp_outbound failed: ", s.udpOutboundTag)
+	}
 	s.group.Touch()
 	outbound := s.group.selectedOutboundUDP.Load()
 	if outbound == nil {
@@ -367,6 +443,7 @@ type URLTestGroup struct {
 	close                        chan struct{}
 	started                      atomic.Bool
 	lastActive                   common.TypedValue[time.Time]
+	healthCheckLimiter           healthCheckLimiter
 
 	fallback URLTestFallback
 }
@@ -402,6 +479,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		pause:                        service.FromContext[pause.Manager](ctx),
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: interruptExternalConnections,
+		healthCheckLimiter:           service.FromContext[healthCheckLimiter](ctx),
 	}
 	group.storeOutbounds(outbounds)
 	return group, nil
@@ -630,30 +708,33 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
 }
 
 type urlTestBatch struct {
-	ctx      context.Context
-	outbound adapter.OutboundManager
-	history  *urltest.HistoryStorage
-	logger   log.Logger
-	session  *urlTestSession
-	batch    *batch.Batch[any]
-	checked  map[string]bool
-	groups   []adapter.OutboundGroup
-	access   sync.Mutex
-	result   map[string]uint16
+	ctx                context.Context
+	outbound           adapter.OutboundManager
+	history            *urltest.HistoryStorage
+	logger             log.Logger
+	session            *urlTestSession
+	batch              *batch.Batch[any]
+	healthCheckLimiter healthCheckLimiter
+	checked            map[string]bool
+	groups             []adapter.OutboundGroup
+	access             sync.Mutex
+	result             map[string]uint16
 }
 
 func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool) map[string]uint16 {
 	ctx, session := urlTestSessionFromContext(ctx)
+	limiter := service.FromContext[healthCheckLimiter](ctx)
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
 	testBatch := &urlTestBatch{
-		ctx:      ctx,
-		outbound: outboundManager,
-		history:  history,
-		logger:   logger,
-		session:  session,
-		batch:    b,
-		checked:  make(map[string]bool),
-		result:   make(map[string]uint16),
+		ctx:                ctx,
+		outbound:           outboundManager,
+		history:            history,
+		logger:             logger,
+		session:            session,
+		batch:              b,
+		healthCheckLimiter: limiter,
+		checked:            make(map[string]bool),
+		result:             make(map[string]uint16),
 	}
 	testBatch.test(outbounds, link, interval, force)
 	b.Wait()
@@ -697,6 +778,13 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 			}
 			b.checked[tag] = true
 			b.batch.Go(tag, func() (any, error) {
+				if b.healthCheckLimiter != nil {
+					if err := b.healthCheckLimiter.Acquire(b.ctx); err != nil {
+						b.logger.Debug("outbound ", tag, " health check canceled while waiting: ", err)
+						return nil, nil
+					}
+					defer b.healthCheckLimiter.Release()
+				}
 				testResult := b.session.test(b.ctx, urlTestSessionKey{tag: tag, link: link}, func() urlTestResult {
 					testCtx, cancel := context.WithTimeout(b.ctx, C.TCPTimeout)
 					defer cancel()

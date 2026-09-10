@@ -32,6 +32,15 @@ The eBPF inbound does not use [Listen Fields](/configuration/shared/listen/).
     "dns_mode": "respect_policy",
     "ipv6": true,
     "bypass_private_address": true,
+    "bypass_selector": {
+      "tag": "domestic-out",
+      "bypass_when": ["direct"],
+      "settle_delay": "3s",
+      "final_check_delay": "5s",
+      "rapid_switch_window": "5s",
+      "rapid_switch_threshold": 3,
+      "interrupt_existing_connections": true
+    },
     "include_uid": [],
     "include_uid_range": [],
     "exclude_uid": [],
@@ -141,6 +150,14 @@ traffic bypasses this inbound.
 #### local.bypass_private_address
 
 Bypass private and special-use destinations. Default is `true`.
+
+#### local.bypass_selector
+
+Dynamically enables `bypass_rule_set` for the local TC data plane according to a selector. It requires `local.data_plane: "tc"`; every `bypass_when` member must be a direct outbound contained by the referenced selector.
+
+When the selector leaves `bypass_when`, kernel bypass is disabled before the selector changes. When it enters `bypass_when`, bypass remains disabled until `settle_delay` elapses without another change. `final_check_delay` performs a final comparison against the actual kernel state. `rapid_switch_window` and `rapid_switch_threshold` detect repeated changes and extend safe-mode waiting to `final_check_delay`. Defaults are `3s`, `5s`, `5s`, and `3` respectively.
+
+The CIDR maps are retained across changes; normal switching updates one TC control entry instead of rewriting the rule set. Unknown or failed states keep bypass disabled. `interrupt_existing_connections` closes selector-managed connections and clears UDP state when the kernel state changes.
 
 #### local.include_uid
 

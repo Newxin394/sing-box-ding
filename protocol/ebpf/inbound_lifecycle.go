@@ -168,6 +168,9 @@ func (i *Inbound) startInbound() error {
 	if err = i.startBypassRuleSets(); err != nil {
 		return E.Cause(err, "initialize TC eBPF bypass_rule_set")
 	}
+	if err = i.startBypassSelector(); err != nil {
+		return E.Cause(err, "initialize TC eBPF bypass_selector")
+	}
 	if sharedRewriteEnabled {
 		i.sharedRewrite = newSharedRewrite(i, i.sharedOptions)
 		if err = i.sharedRewrite.Start(sharedInterfaces, hostAddresses); err != nil {
@@ -180,6 +183,11 @@ func (i *Inbound) startInbound() error {
 		}
 	}
 	if backend != nil {
+		if i.bypassSelectorOptions != nil {
+			if _, err = backend.SetBypassCIDREnabled(false); err != nil {
+				return E.Cause(err, "prepare safe TC eBPF bypass_selector state")
+			}
+		}
 		if err = backend.Enable(); err != nil {
 			return err
 		}
@@ -516,6 +524,7 @@ func (i *Inbound) cleanupStartFailure() error {
 
 func (i *Inbound) closeResources() error {
 	monitorErr := i.stopTCInterfaceMonitor()
+	i.stopBypassSelector()
 	i.stopBypassRuleSets()
 	preMatchErr := error(nil)
 	if i.preMatchController != nil {

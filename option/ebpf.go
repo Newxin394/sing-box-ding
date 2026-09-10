@@ -24,6 +24,7 @@ type EBPFLocalOptions struct {
 	CgroupPath           string                     `json:"cgroup_path,omitempty"`
 	IPv6                 *bool                      `json:"ipv6,omitempty"`
 	BypassPrivateAddress *bool                      `json:"bypass_private_address,omitempty"`
+	BypassSelector       *EBPFBypassSelectorOptions `json:"bypass_selector,omitempty"`
 	IncludeUID           badoption.Listable[uint32] `json:"include_uid,omitempty"`
 	IncludeUIDRange      badoption.Listable[string] `json:"include_uid_range,omitempty"`
 	ExcludeUID           badoption.Listable[uint32] `json:"exclude_uid,omitempty"`
@@ -33,6 +34,16 @@ type EBPFLocalOptions struct {
 	ExcludePackage       badoption.Listable[string] `json:"exclude_package,omitempty"`
 	BypassPort           badoption.Listable[uint16] `json:"bypass_port,omitempty"`
 	BypassPortRange      badoption.Listable[string] `json:"bypass_port_range,omitempty"`
+}
+
+type EBPFBypassSelectorOptions struct {
+	Tag                          string                     `json:"tag" reference:"outbound"`
+	BypassWhen                   badoption.Listable[string] `json:"bypass_when" reference:"outbound"`
+	SettleDelay                  badoption.Duration         `json:"settle_delay,omitempty"`
+	FinalCheckDelay              badoption.Duration         `json:"final_check_delay,omitempty"`
+	RapidSwitchWindow            badoption.Duration         `json:"rapid_switch_window,omitempty"`
+	RapidSwitchThreshold         uint16                     `json:"rapid_switch_threshold,omitempty"`
+	InterruptExistingConnections bool                       `json:"interrupt_existing_connections,omitempty"`
 }
 
 type EBPFSharedOptions struct {

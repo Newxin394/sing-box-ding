@@ -175,9 +175,9 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !selector.SelectOutbound(req.Name) {
+	if err := selector.SelectOutboundContext(req.Name); err != nil {
 		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, newError("Selector update error: not found"))
+		render.JSON(w, r, newError("Selector update error: "+err.Error()))
 		return
 	}
 

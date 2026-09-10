@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json/badoption"
 )
@@ -91,6 +93,58 @@ func normalizeLocalDataPlane(options option.EBPFLocalOptions) (string, string, e
 	return dataPlane, filepath.Clean(options.CgroupPath), nil
 }
 
+func normalizeBypassSelector(options *option.EBPFBypassSelectorOptions, localDataPlane string, hasBypassRuleSet bool) (*option.EBPFBypassSelectorOptions, error) {
+	if options == nil {
+		return nil, nil
+	}
+	if localDataPlane != localDataPlaneTC {
+		return nil, E.New("local.bypass_selector requires local.data_plane=tc")
+	}
+	if !hasBypassRuleSet {
+		return nil, E.New("local.bypass_selector requires bypass_rule_set")
+	}
+	if options.Tag == "" {
+		return nil, E.New("local.bypass_selector.tag is required")
+	}
+	if len(options.BypassWhen) == 0 {
+		return nil, E.New("local.bypass_selector.bypass_when is required")
+	}
+	settleDelay := time.Duration(options.SettleDelay)
+	finalCheckDelay := time.Duration(options.FinalCheckDelay)
+	rapidSwitchWindow := time.Duration(options.RapidSwitchWindow)
+	if settleDelay < 0 || finalCheckDelay < 0 || rapidSwitchWindow < 0 {
+		return nil, E.New("local.bypass_selector delays must not be negative")
+	}
+	if settleDelay == 0 {
+		settleDelay = 3 * time.Second
+	}
+	if finalCheckDelay == 0 {
+		finalCheckDelay = 5 * time.Second
+	}
+	if rapidSwitchWindow == 0 {
+		rapidSwitchWindow = 5 * time.Second
+	}
+	if options.RapidSwitchThreshold == 0 {
+		options.RapidSwitchThreshold = 3
+	}
+	if options.RapidSwitchThreshold < 2 {
+		return nil, E.New("local.bypass_selector.rapid_switch_threshold must be at least 2")
+	}
+	if settleDelay > time.Minute || finalCheckDelay > time.Minute || rapidSwitchWindow > time.Minute {
+		return nil, E.New("local.bypass_selector delays must not exceed 1m")
+	}
+	if finalCheckDelay < settleDelay {
+		return nil, E.New("local.bypass_selector.final_check_delay must be greater than or equal to settle_delay")
+	}
+	normalized := *options
+	normalized.SettleDelay = badoption.Duration(settleDelay)
+	normalized.FinalCheckDelay = badoption.Duration(finalCheckDelay)
+	normalized.RapidSwitchWindow = badoption.Duration(rapidSwitchWindow)
+	normalized.RapidSwitchThreshold = options.RapidSwitchThreshold
+	normalized.BypassWhen = common.Uniq(normalized.BypassWhen)
+	return &normalized, nil
+}
+
 func validateLocalOptions(enabled bool, options option.EBPFLocalOptions) error {
 	if enabled {
 		return nil
@@ -109,6 +163,9 @@ func validateLocalOptions(enabled bool, options option.EBPFLocalOptions) error {
 	}
 	if options.BypassPrivateAddress != nil {
 		return E.New("local.bypass_private_address requires local interception")
+	}
+	if options.BypassSelector != nil {
+		return E.New("local.bypass_selector requires local interception")
 	}
 	if len(options.IncludeUID) > 0 || len(options.IncludeUIDRange) > 0 ||
 		len(options.ExcludeUID) > 0 || len(options.ExcludeUIDRange) > 0 ||

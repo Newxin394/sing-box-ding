@@ -78,8 +78,12 @@ func (i *Inbound) refreshBypassRuleSetsLocked(startup bool) error {
 	if err != nil {
 		return err
 	}
+	if startup && i.bypassSelectorOptions != nil && len(prefixes) == 0 {
+		return E.New("local.bypass_selector requires bypass_rule_set with destination IP CIDRs")
+	}
 	if backend := i.tcBackend(); backend != nil {
-		if _, err = backend.UpdateCompiledBypassCIDR(policy); err != nil {
+		enabled := i.bypassSelectorOptions == nil || i.bypassSelectorStateKnown && i.bypassSelectorState
+		if _, err = backend.UpdateCompiledBypassCIDRState(policy, enabled); err != nil {
 			return err
 		}
 	}
