@@ -34,12 +34,18 @@ func newAndroidUIDOptions(options option.EBPFLocalOptions) *androidUIDOptions {
 
 func (i *Inbound) resolveAndroidUIDPolicy() error {
 	packageManager := i.networkManager.PackageManager()
-	if (len(i.androidUIDOptions.includePackage) > 0 || len(i.androidUIDOptions.excludePackage) > 0) && packageManager == nil {
+	needsPackageLookup := len(i.androidUIDOptions.includePackage) > 0 || len(i.androidUIDOptions.excludePackage) > 0
+	if needsPackageLookup && packageManager == nil {
 		return E.New("Android package manager is unavailable")
 	}
+	if needsPackageLookup && i.androidUIDResolved {
+		return nil
+	}
 	warnSharedUID := make(map[uint32]struct{})
-	i.inspectAndroidPackages(packageManager, "include", i.androidUIDOptions.includePackage, warnSharedUID)
-	i.inspectAndroidPackages(packageManager, "exclude", i.androidUIDOptions.excludePackage, warnSharedUID)
+	if needsPackageLookup {
+		i.inspectAndroidPackages(packageManager, "include", i.androidUIDOptions.includePackage, warnSharedUID)
+		i.inspectAndroidPackages(packageManager, "exclude", i.androidUIDOptions.excludePackage, warnSharedUID)
+	}
 	tunOptions := tun.Options{
 		IncludeUID:         toTunUIDRanges(i.localPolicy.IncludeUID),
 		ExcludeUID:         toTunUIDRanges(i.localPolicy.ExcludeUID),
@@ -51,6 +57,9 @@ func (i *Inbound) resolveAndroidUIDPolicy() error {
 	tunOptions.BuildAndroidRules(packageManager)
 	i.localPolicy.IncludeUID = fromTunUIDRanges(tunOptions.IncludeUID)
 	i.localPolicy.ExcludeUID = fromTunUIDRanges(tunOptions.ExcludeUID)
+	if needsPackageLookup {
+		i.androidUIDResolved = true
+	}
 	return nil
 }
 

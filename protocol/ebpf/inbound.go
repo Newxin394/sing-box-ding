@@ -82,6 +82,7 @@ type Inbound struct {
 	localPolicy              commonEBPF.LocalPolicy
 	compiledPolicy           commonEBPF.CompiledPolicy
 	androidUIDOptions        *androidUIDOptions
+	androidUIDResolved       bool
 	sharedOptions            option.EBPFSharedOptions
 	sharedEnabled            bool
 	sharedDataPlane          string

@@ -37,6 +37,16 @@ const (
 	// so idle sockets do not simply wait for capacity pressure to be reclaimed.
 	udpReplySocketIdleTimeout   = 5 * time.Minute
 	udpReplySocketSweepInterval = time.Minute
+
+	// udpReplySocketIdleSweepInterval is the ticker interval used while the
+	// pool holds no sockets at all. Sweeping an empty pool is nearly free,
+	// but on a quiet device with UDP proxying momentarily inactive it would
+	// still wake the runtime and walk every shard lock once a minute for
+	// nothing; a much longer interval keeps the reclaimer present without
+	// that steady wakeup cost. The first socket insertion switches the loop
+	// back to the precise udpReplySocketSweepInterval, so reclamation
+	// latency after real UDP activity resumes is unchanged.
+	udpReplySocketIdleSweepInterval = 10 * time.Minute
 )
 
 type udpClientTable struct {
@@ -305,6 +315,7 @@ type udpReplySocketPool struct {
 	stats       udpReplySocketPoolStats
 	sweepAccess sync.Mutex
 	sweepCancel context.CancelFunc
+	sweepWakeup chan struct{}
 }
 
 type udpReplySocketShard struct {
@@ -388,7 +399,34 @@ func (p *udpReplySocketPool) get(
 	shard.sockets[source] = entry
 	shard.access.Unlock()
 	p.addCount(1)
+	// Only the first socket needs to wake the reclaimer out of its relaxed
+	// empty-pool interval; every later insertion is already on the precise
+	// interval. This keeps the common path (destinations coming and going
+	// while the pool is non-empty) free of the sweepAccess lock.
+	if p.stats.count.Load() == 1 {
+		p.notifySweeperActive()
+	}
 	return socket, releaseUDPReplySocketEntry(entry), nil
+}
+
+// notifySweeperActive pokes the reclaimer loop so an empty pool that had
+// relaxed its ticker to udpReplySocketIdleSweepInterval switches back to
+// the precise udpReplySocketSweepInterval without waiting for the next
+// slow tick. Non-blocking: the sweeper's own tick will re-check the pool
+// count and converge if the wakeup is missed. A nil channel after
+// stopSweeper is fine — sending on nil would block, so the zero wakeup is
+// simply dropped.
+func (p *udpReplySocketPool) notifySweeperActive() {
+	p.sweepAccess.Lock()
+	wakeup := p.sweepWakeup
+	p.sweepAccess.Unlock()
+	if wakeup == nil {
+		return
+	}
+	select {
+	case wakeup <- struct{}{}:
+	default:
+	}
 }
 
 func releaseUDPReplySocketEntry(entry *udpReplySocketEntry) func() {
@@ -441,6 +479,7 @@ func (p *udpReplySocketPool) startSweeper(ctx context.Context) {
 	}
 	sweepCtx, cancel := context.WithCancel(ctx)
 	p.sweepCancel = cancel
+	p.sweepWakeup = make(chan struct{}, 1)
 	go p.runSweeper(sweepCtx)
 }
 
@@ -450,6 +489,7 @@ func (p *udpReplySocketPool) stopSweeper() {
 	p.sweepAccess.Lock()
 	cancel := p.sweepCancel
 	p.sweepCancel = nil
+	p.sweepWakeup = nil
 	p.sweepAccess.Unlock()
 	if cancel != nil {
 		cancel()
@@ -457,14 +497,35 @@ func (p *udpReplySocketPool) stopSweeper() {
 }
 
 func (p *udpReplySocketPool) runSweeper(ctx context.Context) {
-	ticker := time.NewTicker(udpReplySocketSweepInterval)
+	interval := udpReplySocketSweepInterval
+	if p.stats.count.Load() == 0 {
+		interval = udpReplySocketIdleSweepInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	sweep := func() {
+		p.sweepIdle(udpReplySocketIdleTimeout)
+		if p.stats.count.Load() > 0 {
+			if interval != udpReplySocketSweepInterval {
+				interval = udpReplySocketSweepInterval
+				ticker.Reset(interval)
+			}
+		} else if interval != udpReplySocketIdleSweepInterval {
+			interval = udpReplySocketIdleSweepInterval
+			ticker.Reset(interval)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.sweepIdle(udpReplySocketIdleTimeout)
+			sweep()
+		case <-p.sweepWakeup:
+			if p.stats.count.Load() > 0 && interval != udpReplySocketSweepInterval {
+				interval = udpReplySocketSweepInterval
+				ticker.Reset(interval)
+			}
 		}
 	}
 }
@@ -474,7 +535,7 @@ func (p *udpReplySocketPool) runSweeper(ctx context.Context) {
 // destination that stops being contacted does not simply hold its socket
 // until the shard happens to fill up.
 func (p *udpReplySocketPool) sweepIdle(idleTimeout time.Duration) {
-	if p.closed.Load() {
+	if p.closed.Load() || p.stats.count.Load() == 0 {
 		return
 	}
 	deadline := time.Now().Add(-idleTimeout).UnixNano()
