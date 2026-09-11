@@ -4,12 +4,13 @@ package ebpf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newLoopbackUDPSocket(netip.AddrPort) (*net.UDPConn, error) {
@@ -32,12 +33,10 @@ func destinationOnShard(pool *udpReplySocketPool, shard int, ordinal int) netip.
 	panic("could not find enough distinct ports on the requested shard")
 }
 
-// TestUDPReplySocketPoolBoundsShardCapacity proves the pool never lets one
-// shard grow past udpReplySocketShardCapacity: filling it with sockets held
-// in use (never released) must eventually refuse a new destination rather
-// than keep creating sockets, and the rejection must be counted.
-func TestUDPReplySocketPoolBoundsShardCapacity(t *testing.T) {
-	var pool udpReplySocketPool
+// TestUDPReplySocketPoolBoundsGlobalCapacity proves one busy shard can use the
+// available pool while the global limit still bounds all sockets together.
+func TestUDPReplySocketPoolBoundsGlobalCapacity(t *testing.T) {
+	pool := udpReplySocketPool{capacity: 32}
 	var releases []func()
 	t.Cleanup(func() {
 		for _, release := range releases {
@@ -46,35 +45,33 @@ func TestUDPReplySocketPoolBoundsShardCapacity(t *testing.T) {
 		_ = pool.close()
 	})
 
-	for i := 0; i < udpReplySocketShardCapacity; i++ {
+	for i := 0; i < int(pool.socketCapacity()); i++ {
 		_, release, err := pool.get(destinationOnShard(&pool, 0, i), newLoopbackUDPSocket)
 		if err != nil {
 			t.Fatalf("get %d: %v", i, err)
 		}
 		releases = append(releases, release)
 	}
-	if got := pool.snapshot().Count; got != udpReplySocketShardCapacity {
-		t.Fatalf("pool count = %d, want exactly the shard capacity %d", got, udpReplySocketShardCapacity)
+	if got := pool.snapshot().Count; got != pool.socketCapacity() {
+		t.Fatalf("pool count = %d, want exactly the global capacity %d", got, pool.socketCapacity())
 	}
 
-	_, _, err := pool.get(destinationOnShard(&pool, 0, udpReplySocketShardCapacity), newLoopbackUDPSocket)
+	_, _, err := pool.get(destinationOnShard(&pool, 1, 0), newLoopbackUDPSocket)
 	if err == nil {
-		t.Fatal("shard accepted a socket past its capacity while every existing one was still in use")
+		t.Fatal("pool accepted a socket past its global capacity while every existing one was still in use")
 	}
 	if rejected := pool.snapshot().CapacityRejected; rejected != 1 {
 		t.Fatalf("capacityRejected = %d, want 1", rejected)
 	}
 }
 
-// TestUDPReplySocketPoolEvictsIdleUnderPressure proves a full shard reclaims
-// an idle (released) socket to admit a new destination instead of refusing
-// it outright — capacity pressure alone must not turn into a rejection when
-// something in the shard is actually safe to reclaim.
+// TestUDPReplySocketPoolEvictsIdleUnderPressure proves a full pool can reclaim
+// an idle socket from a different shard to admit a new destination.
 func TestUDPReplySocketPoolEvictsIdleUnderPressure(t *testing.T) {
-	var pool udpReplySocketPool
+	pool := udpReplySocketPool{capacity: 32}
 	t.Cleanup(func() { _ = pool.close() })
 
-	for i := 0; i < udpReplySocketShardCapacity; i++ {
+	for i := 0; i < int(pool.socketCapacity()); i++ {
 		_, release, err := pool.get(destinationOnShard(&pool, 1, i), newLoopbackUDPSocket)
 		if err != nil {
 			t.Fatalf("get %d: %v", i, err)
@@ -82,16 +79,16 @@ func TestUDPReplySocketPoolEvictsIdleUnderPressure(t *testing.T) {
 		release() // idle immediately: nothing is "in flight" on it
 	}
 
-	extra := destinationOnShard(&pool, 1, udpReplySocketShardCapacity)
+	extra := destinationOnShard(&pool, 2, 0)
 	_, release, err := pool.get(extra, newLoopbackUDPSocket)
 	if err != nil {
-		t.Fatalf("shard refused a new destination despite having idle sockets to reclaim: %v", err)
+		t.Fatalf("pool refused a new destination despite having idle sockets to reclaim: %v", err)
 	}
 	release()
 
 	snapshot := pool.snapshot()
-	if snapshot.Count != udpReplySocketShardCapacity {
-		t.Fatalf("pool count = %d, want it to stay at the shard capacity %d after eviction", snapshot.Count, udpReplySocketShardCapacity)
+	if snapshot.Count != pool.socketCapacity() {
+		t.Fatalf("pool count = %d, want it to stay at the global capacity %d after eviction", snapshot.Count, pool.socketCapacity())
 	}
 	if snapshot.Evicted < 1 {
 		t.Fatal("evicted counter did not increase for the reclaim that just happened")
@@ -106,7 +103,7 @@ func TestUDPReplySocketPoolEvictsIdleUnderPressure(t *testing.T) {
 // release func not yet called) must survive both capacity-triggered eviction
 // and the idle sweeper, even when every timing signal says it looks idle.
 func TestUDPReplySocketPoolNeverEvictsAnInUseSocket(t *testing.T) {
-	var pool udpReplySocketPool
+	pool := udpReplySocketPool{capacity: 32}
 	t.Cleanup(func() { _ = pool.close() })
 
 	inUseDestination := destinationOnShard(&pool, 2, 0)
@@ -127,16 +124,16 @@ func TestUDPReplySocketPoolNeverEvictsAnInUseSocket(t *testing.T) {
 		t.Fatalf("the held-in-use socket was closed out from under the simulated send: %v", err)
 	}
 
-	// Filling the rest of the shard to capacity must also skip the in-use
+	// Filling the rest of the pool to capacity must also skip the in-use
 	// entry when looking for something to reclaim.
-	for i := 1; i < udpReplySocketShardCapacity; i++ {
+	for i := 1; i < int(pool.socketCapacity()); i++ {
 		_, release, getErr := pool.get(destinationOnShard(&pool, 2, i), newLoopbackUDPSocket)
 		if getErr != nil {
 			t.Fatalf("get %d: %v", i, getErr)
 		}
 		release()
 	}
-	extra := destinationOnShard(&pool, 2, udpReplySocketShardCapacity)
+	extra := destinationOnShard(&pool, 3, 0)
 	_, extraRelease, err := pool.get(extra, newLoopbackUDPSocket)
 	if err != nil {
 		t.Fatalf("shard could not admit a new destination by reclaiming an idle one: %v", err)
@@ -195,11 +192,11 @@ func TestUDPReplySocketPoolSweepsIdleSockets(t *testing.T) {
 // capacity-rejection get() returns must still show up in the pool's own
 // CapacityRejected counter.
 func TestUDPReplySocketPoolStableUnderManyDestinations(t *testing.T) {
-	var pool udpReplySocketPool
+	pool := udpReplySocketPool{capacity: 128}
 	t.Cleanup(func() { _ = pool.close() })
 
-	const totalCapacity = udpClientShardCount * udpReplySocketShardCapacity
-	const attempts = totalCapacity * 4
+	totalCapacity := int(pool.socketCapacity())
+	attempts := totalCapacity * 4
 
 	var wg sync.WaitGroup
 	errs := make(chan error, attempts)
@@ -221,14 +218,14 @@ func TestUDPReplySocketPoolStableUnderManyDestinations(t *testing.T) {
 
 	var rejected int64
 	for err := range errs {
-		if strings.Contains(err.Error(), "at capacity") {
+		if errors.Is(err, errUDPReplySocketCapacity) {
 			rejected++
 			continue
 		}
 		t.Error(err)
 	}
 
-	if got := pool.snapshot().Count; got > totalCapacity {
+	if got := pool.snapshot().Count; got > int64(totalCapacity) {
 		t.Fatalf("pool count = %d, want at most the total capacity %d", got, totalCapacity)
 	}
 	if got := pool.snapshot().CapacityRejected; got != rejected {
@@ -236,11 +233,32 @@ func TestUDPReplySocketPoolStableUnderManyDestinations(t *testing.T) {
 	}
 }
 
-// TestUDPReplySocketPoolSweeperStartStop confirms startSweeper/stopSweeper
-// are idempotent and that a stopped sweeper does not keep running: sweepIdle
-// is invoked directly here rather than waiting a real udpReplySocketSweepInterval,
-// so this only exercises the start/stop bookkeeping, not the ticker's own
-// timing.
+func TestUDPReplySocketPoolReclaimsAtIdleDeadline(t *testing.T) {
+	pool := udpReplySocketPool{idleTimeout: 20 * time.Millisecond}
+	t.Cleanup(func() {
+		pool.stopSweeper()
+		_ = pool.close()
+	})
+	pool.startSweeper(context.Background())
+	if _, release, err := pool.get(destinationOnShard(&pool, 4, 0), newLoopbackUDPSocket); err != nil {
+		t.Fatalf("get: %v", err)
+	} else {
+		release()
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for pool.snapshot().Count != 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("idle socket was not reclaimed at its deadline")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestUDPReplySocketPoolSweeperStartStop confirms startSweeper/stopSweeper are
+// idempotent and that stop waits for the deadline worker to exit.
 func TestUDPReplySocketPoolSweeperStartStop(t *testing.T) {
 	var pool udpReplySocketPool
 	t.Cleanup(func() { _ = pool.close() })
