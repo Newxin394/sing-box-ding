@@ -181,6 +181,12 @@ func (s *Selector) Now() string {
 	if selected == nil {
 		s.stateAccess.RLock()
 		defer s.stateAccess.RUnlock()
+		for _, tag := range s.tags {
+			if tag == s.udpOutboundTag || tag == s.udpFallbackTag {
+				continue
+			}
+			return tag
+		}
 		return s.tags[0]
 	}
 	return selected.Tag()
@@ -189,7 +195,22 @@ func (s *Selector) Now() string {
 func (s *Selector) All() []string {
 	s.stateAccess.RLock()
 	defer s.stateAccess.RUnlock()
-	return slices.Clone(s.tags)
+	tags := s.tags
+	if s.udpOutboundTag == "" && s.udpFallbackTag == "" {
+		return slices.Clone(tags)
+	}
+	// The UDP delegate is a backend detail, not a user-selectable member:
+	// it lives in Dependencies so the group starts in the right order and
+	// UDP traffic is handed to it, but it must not show up in the panel's
+	// selectable list (clash-api /proxies returns All()). Filter it out.
+	filtered := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if tag == s.udpOutboundTag || tag == s.udpFallbackTag {
+			continue
+		}
+		filtered = append(filtered, tag)
+	}
+	return filtered
 }
 
 func (s *Selector) References() []string {
@@ -217,6 +238,14 @@ func (s *Selector) SelectOutboundContext(tag string) error {
 	s.stateAccess.RUnlock()
 	if !loaded {
 		return E.New("outbound not found in selector: ", tag)
+	}
+	// The UDP delegate is a backend detail: it is part of the dependency
+	// set so the group can hand UDP traffic to it, but selecting it through
+	// the panel (clash-api PUT /proxies) would misroute the group's TCP —
+	// the whole point of udp_outbound is that UDP uses it automatically
+	// while the panel keeps choosing a normal member. Reject direct picks.
+	if tag == s.udpOutboundTag || tag == s.udpFallbackTag {
+		return E.New("udp_outbound is not selectable: ", tag)
 	}
 	if previous == detour {
 		return nil
