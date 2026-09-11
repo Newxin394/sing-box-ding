@@ -390,6 +390,14 @@ func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, enable
 			probeProgramHelper(report, "local", KernelProbePerformance, CiliumEBPF.CGroupSockAddr,
 				helper.fn, helper.name, helper.detail)
 		}
+		probeProgramType(report, "local", KernelProbePerformance, CiliumEBPF.CGroupSock,
+			"Removes socket process ownership at release; the bounded LRU owner map remains the fallback.")
+		probeProgramHelper(report, "local", KernelProbePerformance, CiliumEBPF.CGroupSock,
+			asm.FnGetSocketCookie, "bpf_get_socket_cookie",
+			"Identifies the process-owner entry to remove at socket release.")
+		probeProgramHelper(report, "local", KernelProbePerformance, CiliumEBPF.CGroupSock,
+			asm.FnMapDeleteElem, "bpf_map_delete_elem",
+			"Removes released sockets from the process-owner map.")
 	}
 	if enableTCP && needSocketAssignment {
 		helpers = append(helpers, struct {
