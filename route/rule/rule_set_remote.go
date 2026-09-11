@@ -90,7 +90,7 @@ func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag stri
 }
 
 func (s *RemoteRuleSet) String() string {
-	return strings.Join(F.MapToString(s.rules), " ")
+	return strings.Join(F.MapToString(s.loadRules()), " ")
 }
 
 func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.HTTPStartContext) error {
@@ -136,7 +136,7 @@ func (s *RemoteRuleSet) update() {
 	if err != nil {
 		s.logger.ErrorContext(ctx, "fetch rule-set ", s.tag, ": ", err)
 	} else if s.refs.Load() == 0 {
-		s.rules = nil
+		s.clearRules()
 	}
 }
 
@@ -145,7 +145,7 @@ func (s *RemoteRuleSet) Update(ctx context.Context) error {
 	if err != nil {
 		return err
 	} else if s.refs.Load() == 0 {
-		s.rules = nil
+		s.clearRules()
 	}
 	return nil
 }
@@ -344,7 +344,7 @@ func (s *RemoteRuleSet) saveCacheFile(content []byte) error {
 }
 
 func (s *RemoteRuleSet) Close() error {
-	s.rules = nil
+	s.clearRules()
 	s.cancel()
 	return nil
 }

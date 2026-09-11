@@ -22,6 +22,10 @@ import (
 	"go4.org/netipx"
 )
 
+type ruleSetSnapshot struct {
+	rules []adapter.HeadlessRule
+}
+
 type abstractRuleSet struct {
 	ctx         context.Context
 	logger      logger.ContextLogger
@@ -31,6 +35,7 @@ type abstractRuleSet struct {
 	path        string
 	format      string
 	rules       []adapter.HeadlessRule
+	snapshot    atomic.Pointer[ruleSetSnapshot]
 	ruleCount   uint64
 	metadata    adapter.RuleSetMetadata
 	lastUpdated time.Time
@@ -68,8 +73,21 @@ func (s *abstractRuleSet) setUpdatedTime(updatedAt time.Time) {
 	s.lastUpdated = updatedAt
 }
 
+func (s *abstractRuleSet) loadRules() []adapter.HeadlessRule {
+	if snapshot := s.snapshot.Load(); snapshot != nil {
+		return snapshot.rules
+	}
+	// Keep zero-value and test-constructed rule sets functional. Production
+	// rule sets publish a snapshot during reloadRules and stay on the lock-free
+	// path above.
+	s.access.RLock()
+	rules := s.rules
+	s.access.RUnlock()
+	return rules
+}
+
 func (s *abstractRuleSet) String() string {
-	return strings.Join(F.MapToString(s.rules), " ")
+	return strings.Join(F.MapToString(s.loadRules()), " ")
 }
 
 func (s *abstractRuleSet) Metadata() adapter.RuleSetMetadata {
@@ -79,9 +97,7 @@ func (s *abstractRuleSet) Metadata() adapter.RuleSetMetadata {
 }
 
 func (s *abstractRuleSet) ExtractIPSet() []*netipx.IPSet {
-	s.access.RLock()
-	defer s.access.RUnlock()
-	return common.FlatMap(s.rules, extractIPSetFromRule)
+	return common.FlatMap(s.loadRules(), extractIPSetFromRule)
 }
 
 func (s *abstractRuleSet) IncRef() {
@@ -94,9 +110,16 @@ func (s *abstractRuleSet) DecRef() {
 	}
 }
 
+func (s *abstractRuleSet) clearRules() {
+	s.access.Lock()
+	s.rules = nil
+	s.snapshot.Store(nil)
+	s.access.Unlock()
+}
+
 func (s *abstractRuleSet) Cleanup() {
 	if s.refs.Load() == 0 {
-		s.rules = nil
+		s.clearRules()
 	}
 }
 
@@ -159,6 +182,7 @@ func (s *abstractRuleSet) reloadRules(headlessRules []option.HeadlessRule, ruleS
 	s.rules = rules
 	s.ruleCount = ruleCount
 	s.metadata = metadata
+	s.snapshot.Store(&ruleSetSnapshot{rules: rules})
 	callbacks := s.callbacks.Array()
 	s.access.Unlock()
 	for _, callback := range callbacks {
@@ -168,9 +192,9 @@ func (s *abstractRuleSet) reloadRules(headlessRules []option.HeadlessRule, ruleS
 }
 
 func (s *abstractRuleSet) Match(metadata *adapter.InboundContext) bool {
-	return matchAnyHeadlessRule(s.rules, metadata)
+	return matchAnyHeadlessRule(s.loadRules(), metadata)
 }
 
 func (s *abstractRuleSet) mergeableRule() *DefaultHeadlessRule {
-	return mergeableRuleIn(s.rules)
+	return mergeableRuleIn(s.loadRules())
 }
