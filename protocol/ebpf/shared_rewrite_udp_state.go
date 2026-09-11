@@ -11,10 +11,14 @@ import (
 	ECommon "github.com/sagernet/sing-box/common/ebpf"
 )
 
+type redirectReferenceShard struct {
+	access     sync.Mutex
+	references map[sharedUDPRedirectReference]uint32
+}
+
 type sharedUDPClientTable struct {
-	clientShards       [sharedUDPClientShardCount]sharedUDPClientShard
-	redirectAccess     sync.Mutex
-	redirectReferences map[sharedUDPRedirectReference]uint32
+	clientShards   [sharedUDPClientShardCount]sharedUDPClientShard
+	redirectShards [sharedUDPClientShardCount]redirectReferenceShard
 }
 
 const sharedUDPClientShardCount = 16
@@ -322,8 +326,6 @@ func (t *sharedUDPClientTable) setClientBinding(
 		clientState.deleteUnusedOriginalLocked(current.address)
 	}
 
-	t.redirectAccess.Lock()
-	defer t.redirectAccess.Unlock()
 	if !connected {
 		t.retainRedirectLocked(reference)
 	}
@@ -369,8 +371,8 @@ func (t *sharedUDPClientTable) deleteClient(client netip.AddrPort, expectedState
 
 	expectedState.access.Lock()
 	defer expectedState.access.Unlock()
-	t.redirectAccess.Lock()
-	defer t.redirectAccess.Unlock()
+	t.redirectShards[shardIndexForAddrPort(client, sharedUDPClientShardCount)].access.Lock()
+	defer t.redirectShards[shardIndexForAddrPort(client, sharedUDPClientShardCount)].access.Unlock()
 	var released []sharedUDPRedirectRelease
 	for _, binding := range expectedState.bindings {
 		if !binding.connected && t.releaseRedirectLocked(binding.reference) {
@@ -388,20 +390,26 @@ func (t *sharedUDPClientTable) deleteClient(client netip.AddrPort, expectedState
 }
 
 func (t *sharedUDPClientTable) retainRedirectLocked(reference sharedUDPRedirectReference) {
-	if t.redirectReferences == nil {
-		t.redirectReferences = make(map[sharedUDPRedirectReference]uint32)
+	shard := &t.redirectShards[shardIndexForAddrPort(reference.client, sharedUDPClientShardCount)]
+	shard.access.Lock()
+	if shard.references == nil {
+		shard.references = make(map[sharedUDPRedirectReference]uint32)
 	}
-	t.redirectReferences[reference]++
+	shard.references[reference]++
+	shard.access.Unlock()
 }
 
 func (t *sharedUDPClientTable) releaseRedirectLocked(reference sharedUDPRedirectReference) bool {
-	references := t.redirectReferences[reference]
+	shard := &t.redirectShards[shardIndexForAddrPort(reference.client, sharedUDPClientShardCount)]
+	shard.access.Lock()
+	defer shard.access.Unlock()
+	references := shard.references[reference]
 	if references > 1 {
-		t.redirectReferences[reference] = references - 1
+		shard.references[reference] = references - 1
 		return false
 	}
 	if references == 1 {
-		delete(t.redirectReferences, reference)
+		delete(shard.references, reference)
 		return true
 	}
 	return false
