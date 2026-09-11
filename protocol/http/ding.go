@@ -34,6 +34,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -42,6 +43,30 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	sHTTP "github.com/sagernet/sing/protocol/http"
 )
+
+// dingBufioReaderPool recycles CONNECT response readers. Every HTTP tunnel
+// handshake allocates a fresh std_bufio.Reader (4KB default buffer); the
+// ding-direct path is dominated by short-lived connections (WeChat media,
+// per-request dials through the 钉钉 gateway), so the allocation churn is
+// measurable. Reset() reuses the backing array, so pooled readers keep
+// their 4KB buffer across handshakes. The pool is global and unbounded in
+// the same sense sync.Pool normally is: idle entries are GC'd by the
+// runtime, and a reader is never returned while a handshake still uses it.
+var dingBufioReaderPool = sync.Pool{
+	New: func() any {
+		return std_bufio.NewReaderSize(nil, 4096)
+	},
+}
+
+func acquireDingBufioReader(conn net.Conn) *std_bufio.Reader {
+	reader := dingBufioReaderPool.Get().(*std_bufio.Reader)
+	reader.Reset(conn)
+	return reader
+}
+
+func releaseDingBufioReader(reader *std_bufio.Reader) {
+	dingBufioReaderPool.Put(reader)
+}
 
 // dingHeader is the header that carries the decoy host appended to the CONNECT
 // target. It is consumed by newDingClient and never sent on the wire.
@@ -156,9 +181,10 @@ func (c *dingClient) DialContext(ctx context.Context, network string, destinatio
 		conn.Close()
 		return nil, err
 	}
-	reader := std_bufio.NewReader(conn)
+	reader := acquireDingBufioReader(conn)
 	response, err := http.ReadResponse(reader, request)
 	if err != nil {
+		releaseDingBufioReader(reader)
 		conn.Close()
 		return nil, err
 	}
@@ -167,13 +193,16 @@ func (c *dingClient) DialContext(ctx context.Context, network string, destinatio
 			buffer := buf.NewSize(reader.Buffered())
 			_, err = buffer.ReadFullFrom(reader, buffer.FreeLen())
 			if err != nil {
+				releaseDingBufioReader(reader)
 				conn.Close()
 				return nil, err
 			}
 			conn = bufio.NewCachedConn(conn, buffer)
 		}
+		releaseDingBufioReader(reader)
 		return conn, nil
 	}
+	releaseDingBufioReader(reader)
 	conn.Close()
 	switch response.StatusCode {
 	case http.StatusProxyAuthRequired:

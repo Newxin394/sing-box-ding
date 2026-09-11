@@ -95,19 +95,24 @@ func TestValidateScopedOptions(t *testing.T) {
 		}
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{Interface: []string{"ap0"}}); err == nil {
-		t.Fatal("expected shared-only options to be rejected")
+		t.Fatal("expected shared-only options to be rejected without explicit enablement")
 	}
 	if err := validateLocalOptions(false, option.EBPFLocalOptions{DataPlane: localDataPlaneCgroup}); err == nil {
 		t.Fatal("expected a local data plane to be rejected when local interception is disabled")
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{DataPlane: sharedDataPlanePacketRewrite}); err == nil {
-		t.Fatal("expected a shared data plane to be rejected when shared interception is disabled")
+		t.Fatal("expected a shared data plane to be rejected without explicit enablement")
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{IPv6: common.Ptr(false)}); err == nil {
-		t.Fatal("expected shared IPv6 option to be rejected without shared mode")
+		t.Fatal("expected shared IPv6 option to be rejected without explicit enablement")
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{BypassPrivateAddress: common.Ptr(false)}); err == nil {
-		t.Fatal("expected shared private-address policy to be rejected without shared mode")
+		t.Fatal("expected shared private-address policy to be rejected without explicit enablement")
+	}
+	// Explicit "enabled": false keeps the block as a paused configuration:
+	// fields may stay, it must not be an error.
+	if err := validateSharedOptions(false, option.EBPFSharedOptions{Enabled: common.Ptr(false), Interface: []string{"ap0"}, DataPlane: sharedDataPlanePacketRewrite}); err != nil {
+		t.Fatal("expected explicitly disabled shared options to be accepted: ", err)
 	}
 }
 

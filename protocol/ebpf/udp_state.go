@@ -271,11 +271,27 @@ func (s *udpClientState) isCgroupDataPlane() bool {
 	return s.cgroupDataPlane
 }
 
+// packetInfoCache caches ControlMessage marshal results per source address.
+// sourcePacketInfo is called on every UDP binding (setCgroupBinding,
+// setReplyBinding, setSharedBinding) and each call allocates a fresh slice
+// via ipv4/ipv6 ControlMessage.Marshal. The redirect addresses come from a
+// small fixed pool, so caching by address keeps the hot path allocation-free
+// with bounded memory. Results are immutable; entries may be evicted at any
+// time and simply regenerate.
+var packetInfoCache sync.Map // netip.Addr -> []byte
+
 func sourcePacketInfo(address netip.Addr) []byte {
-	if address.Is4() {
-		return (&ipv4.ControlMessage{Src: net.IP(address.AsSlice())}).Marshal()
+	if cached, loaded := packetInfoCache.Load(address); loaded {
+		return cached.([]byte)
 	}
-	return (&ipv6.ControlMessage{Src: net.IP(address.AsSlice())}).Marshal()
+	var encoded []byte
+	if address.Is4() {
+		encoded = (&ipv4.ControlMessage{Src: net.IP(address.AsSlice())}).Marshal()
+	} else {
+		encoded = (&ipv6.ControlMessage{Src: net.IP(address.AsSlice())}).Marshal()
+	}
+	packetInfoCache.Store(address, encoded)
+	return encoded
 }
 
 // udpReplySocketPool shares transparent reply sockets between all clients of
@@ -402,7 +418,14 @@ func (p *udpReplySocketPool) get(
 	shard.sockets[source] = entry
 	shard.access.Unlock()
 	p.addCount(1)
-	p.requestSweep()
+	// A non-empty pool is already on the precise sweep interval, so only the
+	// first socket (pool transitions empty → non-empty) needs to wake the
+	// reclaimer out of its relaxed state. Every later insertion would only
+	// take the sweepAccess lock for nothing.
+	nextCount := p.stats.count.Load()
+	if nextCount == 1 {
+		p.requestSweep()
+	}
 	return socket, releaseUDPReplySocketEntry(entry), nil
 }
 

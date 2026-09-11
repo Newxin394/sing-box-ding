@@ -363,13 +363,26 @@ func validateSharedOptions(enabled bool, options option.EBPFSharedOptions) error
 	if enabled {
 		return nil
 	}
-	if options.DataPlane != "" || options.DNSMode != "" || len(options.Interface) > 0 || options.IPv6 != nil || options.BypassPrivateAddress != nil ||
-		len(options.IncludeSourceCIDR) > 0 || len(options.ExcludeSourceCIDR) > 0 ||
-		len(options.IncludeMACAddress) > 0 || len(options.ExcludeMACAddress) > 0 ||
-		len(options.BypassPort) > 0 || len(options.BypassPortRange) > 0 {
+	// A shared block with explicit "enabled": false is a paused data plane:
+	// the leftover fields (data_plane, interface, ipv6, ...) are kept for
+	// the next time the switch flips back on, which must not be an error.
+	// Only a stray shared block with NO explicit enablement (so the default
+	// path disabled it) is a misconfiguration worth rejecting.
+	if options.Enabled != nil {
+		return nil
+	}
+	if hasAnySharedOption(options) {
 		return E.New("shared options require shared interception")
 	}
 	return nil
+}
+
+func hasAnySharedOption(options option.EBPFSharedOptions) bool {
+	return options.DataPlane != "" || options.DNSMode != "" || len(options.Interface) > 0 ||
+		options.IPv6 != nil || options.BypassPrivateAddress != nil ||
+		len(options.IncludeSourceCIDR) > 0 || len(options.ExcludeSourceCIDR) > 0 ||
+		len(options.IncludeMACAddress) > 0 || len(options.ExcludeMACAddress) > 0 ||
+		len(options.BypassPort) > 0 || len(options.BypassPortRange) > 0
 }
 
 func parsePortRanges(name string, ports []uint16, ranges []string) ([]commonEBPF.PortRange, error) {
