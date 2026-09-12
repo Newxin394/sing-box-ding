@@ -423,10 +423,10 @@ func (h *HysteriaOption) Build() any {
 	return outbound
 }
 
-func clashMemoryBytes(value int) byteformats.MemoryBytes {
+func clashMemoryBytes(value int) *byteformats.MemoryBytes {
 	var result byteformats.MemoryBytes
 	_ = result.UnmarshalJSON(strconv.AppendInt(nil, int64(value), 10))
-	return result
+	return &result
 }
 
 type Hysteria2Option struct {
