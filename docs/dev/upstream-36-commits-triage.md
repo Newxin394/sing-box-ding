@@ -18,8 +18,7 @@
    真正要决定的是「reF1nd 的 sing-tun fork 是否跟进上游」，不是逐个 cherry-pick。
 3. 本地已有 `tun.Port` 接口（`re!f1nd/sing-tun@v0.9.1-0.20260904094216/flow.go:58`），
    所以依赖该 API 的提交**不需要先升依赖**。
-
-## 已落地：15 条
+## 已落地：21 条
 
 手工应用（1 条）：
 
@@ -47,39 +46,87 @@ cherry-pick（14 条，按提交顺序）：
 | `b7eb49bb` | `596197e8` | Fix cronet-go |
 | `378f151c` | `6793fb9c` | documentation: Fix endpoint_independent_nat |
 
+手工三方合并（6 条，原"搁置"里真正可吸收的部分）：
+
+| 上游 SHA | 本地 SHA | 标题 | 冲突处理 |
+|---|---|---|---|
+| `a93416c8` | `2e6c2eda` | Improve process search | `searcher_linux.go` 取本地（`completeProcessInfo()` 已覆盖上游内联逻辑）；`connections.go` 取上游（ProcessPaths 优先）；`resolve1.go` 取本地（上游后续 `59760e6c` 正是改回 `ReadFile`） |
+| `5f774fd2` | `ef31e1a2` | Report every process sharing a socket | 本地已有多路径实现（`buildProcessPaths` 返回 `map[uint32][]string`），仅 import 行合并 `slices` + `strconv` |
+| `515a73e4` | `f81c5d4a` | Fix selector not interrupting routed connections | 取上游 `selected` 优先逻辑（本地已有 `adapter.ConnectionHandler` 接口） |
+| `0d7fae13` | `f8dd4344` | Fix process search for socks UDP associate | go.mod/go.sum 取本地；socks/mixed inbound 各加 2 行 |
+| `8d0500ed` | `537a9b7c` | Fix auto redirect pre-match and L3 forwarding | go.mod 取本地；`route/route.go` 加 3 行 ICMP 处理 |
+| `6d1fc214` | `b740d096` | Authorize enabling insecure mode with PolicyKit | 采纳上游的文件合并结构，PolicyKit action 保留本地品牌前缀 `io.reF1nd.sfl`，补上游新增的 `set-insecure-mode` |
+
+另有 1 条本地独有文件的类型修复（不是上游提交）：
+
+- `4ea764b5` fix(parser): return pointer from clashMemoryBytes
+
 备份分支：`backup/pre-upstream-pick`（= `ac60d220`，即手工提交后的状态）。
 
 ## 内容已存在（空补丁，无需动作）：3 条
 
 `59760e6c`、`218ce4b1`、`1111604c` —— cherry-pick 报 "previous cherry-pick is now empty"，
 对应的等价改动已在仓库中。
+## 语义已存在：11 条（无需吸收）
 
-## 搁置：18 条（真冲突，需手工三方合并）
+空补丁（3 条，cherry-pick 报 "previous cherry-pick is now empty"）：
 
-| 上游 SHA | 标题 | 冲突文件 |
+`59760e6c`、`218ce4b1`、`1111604c`
+
+本地基底已有同名提交（6 条，改动都已在 `origin/testing-ebpf-tc-rewrite` 的 2880 条历史里）：
+
+| 上游 SHA | 标题 |
+|---|---|
+| `a713c4ff` | Load rule-sets through mmap on iOS |
+| `2950ce9e` | Implement fully functional auto redirect for Android |
+| `b011cf5b` | Close idle connections of unreferenced outbounds and DNS servers |
+| `86377efc` | Improve idle connection management |
+| `a5395a22` | Improve power report attribution and sampling |
+| `9a6e6b9b` | Migrate anytls into our own library |
+
+本地独立实现已覆盖（2 条）：
+
+- `6364d9a5` Fix WireGuard endpoint stopping on device sleep —— 本地
+  `transport/wireguard/endpoint.go` 的 `case` 行早已是 `pause.EventNetworkPause` /
+  `pause.EventNetworkWake`（不含 `EventDevicePaused`），且本地多了 `networkPaused`
+  标志与 `pause.IsPaused() || suspended` 保护。cherry-pick 解决后与 HEAD 完全一致，`--skip`。
+- `c129a806` Buffer cache file writes —— 本地 `402bf831` 与上游**同名同规模**
+  （都是 `15 files changed, 517 insertions(+), 339 deletions(-)`），且之后还有
+  `a1cbb94c DNS: Fix some cache issues` 的进一步修复。
+
+## 依赖阻塞：4 条（无法 cherry-pick）
+
+| 上游 SHA | 标题 | 阻塞原因 |
 |---|---|---|
-| `515a73e4` | Fix selector not interrupting routed connections | `protocol/group/selector.go` |
-| `c129a806` | Buffer cache file writes | `experimental/cachefile/dns_cache.go` 等 |
-| `a93416c8` | Improve process search | `common/process/searcher_linux.go` |
-| `5f774fd2` | Report every process sharing a socket in Linux process search | `common/process/searcher_linux.go` |
-| `0d7fae13` | Fix process search for socks UDP associate | `go.mod` |
-| `6364d9a5` | Fix WireGuard endpoint stopping on device sleep | `transport/wireguard/endpoint.go` |
-| `70d0ba72` | Fix network monitor spinning after netlink receive overrun | `go.mod`（修在 sing-tun v0.9.2 内） |
-| `8d0500ed` | Fix auto redirect pre-match and L3 forwarding | `go.mod` |
-| `2950ce9e` | Implement fully functional auto redirect for Android | `go.mod`、`protocol/tun/inbound.go`、TUN 文档 |
-| `b011cf5b` | Close idle connections of unreferenced outbounds and DNS servers | `adapter/outbound.go`、`box.go`、`protocol/*/outbound.go` |
-| `86377efc` | Improve idle connection management | `daemon/instance.go` 等 60+ 文件 |
-| `a5395a22` | Improve power report attribution and sampling | `common/dialer/default.go`、`daemon/instance.go` |
-| `b84b42bc` | Add go TUN stack | `common/interrupt/conn.go`、`route/conn.go`、`constant/network.go` |
-| `0c041aa7` | Fix direct inbound UDP on 32-bit Linux before 5.1 | `go.mod` |
-| `b2a5ac3f` | Fix Tailscale endpoint not binding IPv6 sockets on Windows | `go.mod` |
-| `6d1fc214` | Authorize enabling insecure mode with PolicyKit on Linux | `experimental/boxdd/authorize_linux.go` |
-| `a713c4ff` | Load rule-sets through mmap on iOS | `go.mod`、`route/rule/rule_set_*.go` |
-| `9a6e6b9b` | Migrate anytls into our own library | `go.mod`、`protocol/anytls/*` |
+| `70d0ba72` | Fix network monitor spinning after netlink receive overrun | 全部 diff 就是 `sing-tun v0.9.1 → v0.9.2`，修复在库内部 |
+| `0c041aa7` | Fix direct inbound UDP on 32-bit Linux before privilege drop | 仅 go.mod/go.sum 各 3 行，纯依赖升级 |
+| `b2a5ac3f` | Fix Tailscale endpoint not binding IPv6 socket | 仅 go.mod/go.sum 各 3 行，纯依赖升级 |
+| `b84b42bc` | Add go TUN stack | 22 文件 / 650 行，依赖 sing-tun 新 API —— 已实测编译失败 |
 
-**处理优先级建议**：`a93416c8` / `5f774fd2`（进程搜索，uid 判定正确性，直接关系 eBPF 分流）
-> `70d0ba72`（netlink overrun 空转，与 WiFi 抖动史对应，但受依赖链阻塞）
-> `515a73e4` / `c129a806`（单点、低耦合）> 其余（大改或平台无关）。
+`b84b42bc` 撤销前的实测编译错误：
+
+```
+common\interrupt\conn.go:49:27: c.PacketConn undefined (type *PacketConn has no field or method PacketConn)
+common\listener\listener_udp.go:88:71: undefined: control.UDPSocketBuffer
+service\oomkiller\service.go:52:40: undefined: tun.MemoryPressure
+service\oomkiller\timer.go:333:30: undefined: tun.MemoryPressureCritical
+```
+
+这两个符号已在本地 fork 里直接验证为不存在：
+
+```bash
+grep -rn 'func UDPSocketBuffer' \
+  '/d/GoCache/mod/github.com/re!f1nd/sing-tun@v0.9.1-0.20260904094216-8ac41c38bd38/common/control/'
+grep -rn 'MemoryPressure' \
+  '/d/GoCache/mod/github.com/re!f1nd/sing-tun@v0.9.1-0.20260904094216-8ac41c38bd38/'
+# → 均为空
+```
+
+**这 4 条不是取舍问题，是同一个前置条件的四种表现**：reF1nd 的 sing-tun fork
+停在 `v0.9.1-0.20260904`，官方已到 `v0.9.4-0.20260912`。要吸收它们，
+先决定 fork 是否跟进上游；逐个 cherry-pick 没有意义。
+
+**对账**：21 吸收 + 11 语义已存在 + 4 依赖阻塞 = **36**，与基准差距一致。
 
 ## 编译验证：通过
 
