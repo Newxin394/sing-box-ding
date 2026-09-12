@@ -11,14 +11,15 @@
 1. **remote 里没有官方仓库**。`upstream` 指向 `CHIZI-0618/sing-box`，`origin` 指向 `Newxin394/sing-box-ding`，
    `chizi-fork` 指向 `Newxin394/sing-box`，`ref1nd` 是本地路径 `D:/AI/ref1nd-build`。
    官方 `SagerNet/sing-box` 是另行浅 fetch 的，官方主分支名为 **`testing`**（不是 main）。
-2. **依赖链是瓶颈**。`go.mod` 用 replace 指向 reF1nd fork：
-   `sing-tun v0.9.1-0.20260904094216-8ac41c38bd38`、`sing-anytls`。
-   官方 tip 已到 `sing-tun v0.9.4-0.20260912075549`、`sing v0.9.4`。
-   **凡"修复"实质只改 go.mod 升 sing-tun 的提交，本仓库无法直接吸收** ——
-   真正要决定的是「reF1nd 的 sing-tun fork 是否跟进上游」，不是逐个 cherry-pick。
-3. 本地已有 `tun.Port` 接口（`re!f1nd/sing-tun@v0.9.1-0.20260904094216/flow.go:58`），
+2. **依赖链已跟进**。`go.mod` 的 replace 一度指向停在 `v0.9.1` 的 reF1nd fork，
+   而官方 tip 已到 `sing v0.9.4` / `sing-tun v0.9.4-0.20260912075549`。
+   `d78483bd` 把 `sing` 升到 `v0.9.4-0.20260912053229`、`sing-tun` 换到
+   `reF1nd/dev`（`25060df`），4 条依赖阻塞提交由此解开。
+   **凡"修复"实质只改 go.mod 升依赖的提交，形式上是 cherry-pick、实质是版本对齐** ——
+   冲突只落在 go.mod/go.sum，取 HEAD 后净变化为零即说明修复已随新版本到位。
+3. 本地已有 `tun.Port` 接口（`re!f1nd/sing-tun@v0.9.1-0.20260909111036/flow.go:58`），
    所以依赖该 API 的提交**不需要先升依赖**。
-## 已落地：21 条
+## 已落地：22 条
 
 手工应用（1 条）：
 
@@ -94,43 +95,74 @@ cherry-pick（14 条，按提交顺序）：
   （都是 `15 files changed, 517 insertions(+), 339 deletions(-)`），且之后还有
   `a1cbb94c DNS: Fix some cache issues` 的进一步修复。
 
-## 依赖阻塞：4 条（无法 cherry-pick）
+## 依赖阻塞：4 条（已全部解决）
 
-| 上游 SHA | 标题 | 阻塞原因 |
+四条都只是「依赖版本」的不同表现，不是取舍问题。先统一依赖，再逐条处理。
+
+### 依赖升级（提交 `d78483bd`）
+
+| 依赖 | 原 | 现 |
 |---|---|---|
-| `70d0ba72` | Fix network monitor spinning after netlink receive overrun | 全部 diff 就是 `sing-tun v0.9.1 → v0.9.2`，修复在库内部 |
-| `0c041aa7` | Fix direct inbound UDP on 32-bit Linux before privilege drop | 仅 go.mod/go.sum 各 3 行，纯依赖升级 |
-| `b2a5ac3f` | Fix Tailscale endpoint not binding IPv6 socket | 仅 go.mod/go.sum 各 3 行，纯依赖升级 |
-| `b84b42bc` | Add go TUN stack | 22 文件 / 650 行，依赖 sing-tun 新 API —— 已实测编译失败 |
+| `github.com/sagernet/sing` | `v0.9.1-0.20260904133552-ffcabb706b1c` | `v0.9.4-0.20260912053229-7776850263cd` |
+| `replace` `sing-tun` | `reF1nd/sing-tun v0.9.1-0.20260904094216-8ac41c38bd38` | `reF1nd/sing-tun v0.9.1-0.20260909111036-25060dfbbb5f`（`dev` 分支 tip） |
 
-`b84b42bc` 撤销前的实测编译错误：
+选 `reF1nd/dev`（`25060df Add go stack`）而不是官方 `869f0a4`，是因为它带
+`tun.MemoryPressure` 且保留 reF1nd 的定制（`81b66829` 引入的虚拟 TUN DNS
+ICMP 本地应答）。官方 `869f0a4` 同样包含 `answerEcho`
+（`stack_go_engine.go:876`），所以该定制在功能上并不唯一，但**切换 fork 属于
+减法，按既定原则留到后面**。
 
+### 逐条结果
+
+| 上游 SHA | 标题 | 处理 | 依据 |
+|---|---|---|---|
+| `0c041aa7` | Fix direct inbound UDP on 32-bit Linux before privilege drop | **已覆盖** | 实质是 `sing v0.9.1 → v0.9.2`，现为 v0.9.4 |
+| `b2a5ac3f` | Fix Tailscale endpoint not binding IPv6 socket | **已覆盖** | 实质是 `sing v0.9.2 → v0.9.3`，现为 v0.9.4 |
+| `b84b42bc` | Add go TUN stack | **已吸收** | `c8dc68f3` + `2aba258f` + `80f6901a` |
+| `70d0ba72` | Fix network monitor spinning after netlink receive overrun | **未覆盖（待办）** | 实质是 `sing-tun v0.9.1 → v0.9.2`，fork 仍停在 v0.9.1 基线 |
+
+前两条 cherry-pick 时只冲突 `go.mod`/`go.sum`，`git checkout HEAD -- go.mod go.sum`
+后净变化为零，`--skip` 收场；因为 `sing` 已升到 v0.9.4，两条修复实际已在。
+
+### 待办：`70d0ba72` 的 netlink overrun 修复
+
+官方 `monitor_linux.go:92`：
+
+```go
+_, err := m.socket.Read(buffer)
+if err != nil && !errors.Is(err, unix.ENOBUFS) {
 ```
-common\interrupt\conn.go:49:27: c.PacketConn undefined (type *PacketConn has no field or method PacketConn)
-common\listener\listener_udp.go:88:71: undefined: control.UDPSocketBuffer
-service\oomkiller\service.go:52:40: undefined: tun.MemoryPressure
-service\oomkiller\timer.go:333:30: undefined: tun.MemoryPressureCritical
-```
 
-这两个符号已在本地 fork 里直接验证为不存在：
+reF1nd 的 `dev` 分支没有这个 `ENOBUFS` 判断，netlink 接收缓冲区溢出时
+`loopRead` 会直接 `return`（reF1nd 的 `main` 分支 `c11c256` 有、`dev` 没有）。
+影响面：Linux 上路由/接口消息突发后网络变化监听停摆，Android 切网场景可能触发。
 
-```bash
-grep -rn 'func UDPSocketBuffer' \
-  '/d/GoCache/mod/github.com/re!f1nd/sing-tun@v0.9.1-0.20260904094216-8ac41c38bd38/common/control/'
-grep -rn 'MemoryPressure' \
-  '/d/GoCache/mod/github.com/re!f1nd/sing-tun@v0.9.1-0.20260904094216-8ac41c38bd38/'
-# → 均为空
-```
+三条可选路线，**全部属于减法或改依赖，按原则留后**：
 
-**这 4 条不是取舍问题，是同一个前置条件的四种表现**：reF1nd 的 sing-tun fork
-停在 `v0.9.1-0.20260904`，官方已到 `v0.9.4-0.20260912`。要吸收它们，
-先决定 fork 是否跟进上游；逐个 cherry-pick 没有意义。
+1. 等 reF1nd 把 `dev` 分支 rebase 到官方 `869f0a4` —— 零成本，被动。
+2. 把 `replace` 换成官方 `sing-tun v0.9.4-0.20260912075549-869f0a4` —— 一次拿到
+   netlink 修复 + 最新 go stack + `SplicePacketOptions.Offload`，代价是丢掉
+   reF1nd fork 的 5 个独有文件与 34 个文件差异。
+3. 维持现状 —— 只有这一个已知缺口，其余功能完整。
 
-**对账**：21 吸收 + 11 语义已存在 + 4 依赖阻塞 = **36**，与基准差距一致。
+### `b84b42bc` 的适配
 
-## 编译验证：通过
+依赖到位后该提交 22 个文件中有 8 个冲突，逐文件解决。另有四处 fork 与官方
+`869f0a4` 的 API 漂移需要桥接，**全部按加法处理，不删本地代码**：
 
-必须带工具链约束与链接参数，缺一即误报：
+| 位置 | 官方 `869f0a4` | reF1nd `dev` | 处理 |
+|---|---|---|---|
+| `SpliceSocket.Attach` | `Attach(io.Closer) (io.Closer, bool)` | `Attach(io.Closer) bool` | 保留 `socketOwner` 原两值语义为未导出 `attach`，其上叠加满足 fork 接口的 `Attach` 薄包装 |
+| `SplicePacketOptions` | 有 `Offload`/`FrontHeadroom`/`RearHeadroom` | 无 | 保留 `offload` 字段与原始 `unwrapSpliceTarget` 分支不动；保护条件加到 splice 调用点（`target.offload == nil &&`），offload 连接走回退路径而不是静默丢描述符 |
+| `interrupt.PacketConn` / `trackedPacketConn` 的 `ReadPacket`/`WritePacket` | 无（靠接口提升） | 无 | 保留 `6a66df0e` 加的两个方法，改为读 `NetPacketConn` 字段并保留 `net.PacketConn` 类型断言回退 |
+| `PacketConn` 嵌入字段 | `net.PacketConn` → `N.NetPacketConn` | 同官方 | 随上游 |
+
+**对账**：24 吸收（21 + `b84b42bc` + 2 条随 `sing` 升级覆盖）+ 11 语义已存在 +
+1 待办（`70d0ba72`）= **36**，与基准差距一致。
+
+## 验证：通过
+
+两个构建目标，必须带工具链约束与链接参数，缺一即误报：
 
 ```bash
 TAGS="with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
@@ -138,7 +170,22 @@ GOTOOLCHAIN=go1.25.5 GOOS=android GOARCH=arm64 \
   go build -tags "$TAGS" -ldflags=-checklinkname=0 ./...
 ```
 
-→ 退出码 0。`linux/amd64` 同样通过。15 条 cherry-pick + 1 条手工提交 + 1 条修复均在树内。
+→ 退出码 0；`linux/amd64` 同样通过。29 个提交全部在树内。
+
+订阅组功能回归（windows/amd64 本机执行；`with_ebpf` 仅 Linux 可用故去掉）：
+
+```bash
+GOTOOLCHAIN=go1.25.5 GOOS=windows GOARCH=amd64 go test \
+  -tags "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0" \
+  -ldflags=-checklinkname=0 -count=1 ./protocol/group/... ./provider/...
+```
+
+→ `ok` 4/4：`protocol/group`、`provider/local`、`provider/parser`、`provider/remote`。
+
+这条必须跑：`515a73e4` 动过 `protocol/group/selector.go`，而该文件是本地 510 行的
+定制版（`PreMatchOutboundGroup`、`SelectorUpdateCallback`/`SelectorUpdateGuard`、
+`UDPOutbound`/`UDPFallbackOutbound`、`provider` 管理器），一旦被上游覆盖即失去订阅组行为。
+
 
 ### 三个坑（按暴露顺序）
 
@@ -167,4 +214,8 @@ Go 1.27 解析该模块图失败，把所有依赖包误报为 `no required modu
 ## 复核要点（未逐条读 diff）
 
 多数"是否需要新版依赖"的判断依据是 go.mod 变更，其余按标题与改动范围推断。
-落某一批前需展开确认 API 版本门槛。
+
+**工作原则（已定）**：优先加法 —— 不改动本仓库现有实现，只做新增；
+确需减法的改动（例如把 `sing-tun` fork 换成官方版本）一律留到后面单独处理。
+
+**剩余唯一待办**：`70d0ba72` 的 netlink overrun 修复（见上文 §待办）。
