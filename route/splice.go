@@ -20,7 +20,6 @@ import (
 
 type spliceTarget struct {
 	socket        tun.SpliceSocket
-	offload       N.PacketOffload
 	readCounters  []N.CountFunc
 	writeCounters []N.CountFunc
 }
@@ -61,15 +60,11 @@ func unwrapSpliceTarget(conn any, allowOffload bool) (spliceTarget, bool) {
 			continue
 		}
 		if allowOffload {
-			upstream, offload := N.UnwrapPacketOffload(conn)
-			if offload != nil {
-				socket, isSocket := upstream.(tun.SpliceSocket)
-				if !isSocket {
-					return spliceTarget{}, false
-				}
-				target.socket = socket
-				target.offload = offload
-				return target, true
+			if _, offload := N.UnwrapPacketOffload(conn); offload != nil {
+				// The pinned sing-tun fork predates SplicePacketOptions.Offload.
+				// Splicing an offloaded conn without the offload descriptor would
+				// drop the GRO/GSO framing, so decline and let the caller fall back.
+				return spliceTarget{}, false
 			}
 		}
 		readerWithUpstream, isReaderWithUpstream := conn.(N.ReaderWithUpstream)
@@ -274,12 +269,9 @@ func (m *ConnectionManager) splicePacketConnection(ctx context.Context, conn N.P
 			WriteCounters: append(target.readCounters, spliceSource.writeCounters...),
 			OnClose:       m.spliceClose(ctx, conn, remote.(io.Closer), onClose),
 		},
-		Timeout:       udpTimeout,
-		NAT:           nat,
-		Cached:        cached,
-		Offload:       target.offload,
-		FrontHeadroom: N.CalculateFrontHeadroom(remote),
-		RearHeadroom:  N.CalculateRearHeadroom(remote),
+		Timeout: udpTimeout,
+		NAT:     nat,
+		Cached:  cached,
 	}) {
 		return conn, true
 	}
