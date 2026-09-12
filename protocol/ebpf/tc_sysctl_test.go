@@ -64,7 +64,7 @@ func TestClearTCAggregateRPFilterPinsOtherInterfaces(t *testing.T) {
 		"sbd00010001": "0",
 	})
 
-	states, err := clearTCAggregateRPFilter("sbd00010001")
+	states, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestClearTCAggregateRPFilterPinsOtherInterfaces(t *testing.T) {
 func TestClearTCAggregateRPFilterSkipsDisabledAggregate(t *testing.T) {
 	newTestSysctlRoot(t, map[string]string{"all": "0", "wlan0": "0"})
 
-	states, err := clearTCAggregateRPFilter("sbd00010001")
+	states, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestClearTCAggregateRPFilterSkipsDisabledAggregate(t *testing.T) {
 func TestRestoreTCSysctlStatesKeepsExternalChange(t *testing.T) {
 	newTestSysctlRoot(t, map[string]string{"all": "2", "wlan0": "0"})
 
-	states, err := clearTCAggregateRPFilter("sbd00010001")
+	states, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestDeliveryReplacementKeepsAggregateRPFilterCleared(t *testing.T) {
 	})
 
 	first := &tcDeliveryLink{deliveryName: "sbd00010001"}
-	firstStates, err := clearTCAggregateRPFilter(first.deliveryName)
+	firstStates, err := clearTCAggregateRPFilter(first.deliveryName, first.redirectName)
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter for the first link: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestDeliveryReplacementKeepsAggregateRPFilterCleared(t *testing.T) {
 	// The replacement is built before the old link is closed, and finds nothing
 	// left to clear.
 	second := &tcDeliveryLink{deliveryName: "sbd00010002"}
-	secondStates, err := clearTCAggregateRPFilter(second.deliveryName)
+	secondStates, err := clearTCAggregateRPFilter(second.deliveryName, second.redirectName)
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter for the replacement: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestAppendTCSysctlStatesTracksLatestApplied(t *testing.T) {
 		"sbd00010001": "0",
 	})
 
-	first, err := clearTCAggregateRPFilter("sbd00010001")
+	first, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAppendTCSysctlStatesTracksLatestApplied(t *testing.T) {
 	if err = os.WriteFile(tcInterfaceSysctlPath("all", "rp_filter"), []byte("2\n"), 0o644); err != nil {
 		t.Fatalf("simulate external change: %v", err)
 	}
-	second, err := clearTCAggregateRPFilter("sbd00010001")
+	second, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter again: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestRestoreTCSysctlStatesRaisesBeforeLowering(t *testing.T) {
 		"sbd00010001": "0",
 	})
 
-	first, err := clearTCAggregateRPFilter("sbd00010001")
+	first, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestRestoreTCSysctlStatesRaisesBeforeLowering(t *testing.T) {
 	if err = os.WriteFile(tcInterfaceSysctlPath("all", "rp_filter"), []byte("2\n"), 0o644); err != nil {
 		t.Fatalf("simulate external reset: %v", err)
 	}
-	second, err := clearTCAggregateRPFilter("sbd00010001")
+	second, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("clear aggregate rp_filter again: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestClearTCAggregateRPFilterRejectsUnparsableAggregate(t *testing.T) {
 		"sbd00010001": "0",
 	})
 
-	states, err := clearTCAggregateRPFilter("sbd00010001")
+	states, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err == nil {
 		t.Fatalf("an unparsable aggregate was accepted, recording %+v", states)
 	}
@@ -353,7 +353,7 @@ func TestClearTCAggregateRPFilterRejectsUnparsableInterface(t *testing.T) {
 		"zzz0":        "corrupt",
 	})
 
-	states, err := clearTCAggregateRPFilter("sbd00010001")
+	states, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err == nil {
 		t.Fatalf("an unparsable interface value was accepted, recording %+v", states)
 	}
@@ -382,7 +382,7 @@ func TestClearTCAggregateRPFilterSkipsVanishedInterface(t *testing.T) {
 		t.Fatalf("create gone0: %v", err)
 	}
 
-	states, err := clearTCAggregateRPFilter("sbd00010001")
+	states, err := clearTCAggregateRPFilter("sbd00010001", "sbt00010001")
 	if err != nil {
 		t.Fatalf("a vanished interface should be skipped: %v", err)
 	}

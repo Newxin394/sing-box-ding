@@ -938,19 +938,21 @@ func (d *tcDeliveryLink) repair(backend *commonEBPF.TCBackend, priority uint16) 
 		{"rp_filter", "0"},
 		{"accept_local", "1"},
 	} {
-		state, settingChanged, settingErr := setTCInterfaceSysctl(d.deliveryName, setting.name, setting.value)
-		if errors.Is(settingErr, os.ErrNotExist) {
-			return changed, true, nil
-		}
-		if settingErr != nil {
-			return changed, false, settingErr
-		}
-		if settingChanged {
-			d.sysctls = appendTCSysctlStates(d.sysctls, []tcSysctlState{state})
-			changed = true
+		for _, iface := range []string{d.redirectName, d.deliveryName} {
+			state, settingChanged, settingErr := setTCInterfaceSysctl(iface, setting.name, setting.value)
+			if errors.Is(settingErr, os.ErrNotExist) {
+				return changed, true, nil
+			}
+			if settingErr != nil {
+				return changed, false, settingErr
+			}
+			if settingChanged {
+				d.sysctls = appendTCSysctlStates(d.sysctls, []tcSysctlState{state})
+				changed = true
+			}
 		}
 	}
-	aggregateStates, err := clearTCAggregateRPFilter(d.deliveryName)
+	aggregateStates, err := clearTCAggregateRPFilter(d.deliveryName, d.redirectName)
 	if len(aggregateStates) > 0 {
 		d.globalSysctls = appendTCSysctlStates(d.globalSysctls, aggregateStates)
 		changed = true
@@ -1785,15 +1787,17 @@ func (d *tcDataPlane) createTCDeliveryLink() (*tcDeliveryLink, error) {
 		{"rp_filter", "0"},
 		{"accept_local", "1"},
 	} {
-		state, changed, settingErr := setTCInterfaceSysctl(deliveryName, setting.name, setting.value)
-		if settingErr != nil {
-			return cleanup(settingErr)
-		}
-		if changed {
-			delivery.sysctls = appendTCSysctlStates(delivery.sysctls, []tcSysctlState{state})
+		for _, iface := range []string{delivery.redirectName, deliveryName} {
+			state, changed, settingErr := setTCInterfaceSysctl(iface, setting.name, setting.value)
+			if settingErr != nil {
+				return cleanup(settingErr)
+			}
+			if changed {
+				delivery.sysctls = appendTCSysctlStates(delivery.sysctls, []tcSysctlState{state})
+			}
 		}
 	}
-	aggregateStates, err := clearTCAggregateRPFilter(deliveryName)
+	aggregateStates, err := clearTCAggregateRPFilter(deliveryName, delivery.redirectName)
 	delivery.globalSysctls = appendTCSysctlStates(delivery.globalSysctls, aggregateStates)
 	if err != nil {
 		return cleanup(err)
@@ -1981,7 +1985,7 @@ func tcSysctlRestoreRaises(state tcSysctlState) bool {
 //
 // Lower the aggregate knob, but first pin every other interface to the previous
 // aggregate value so their effective policy is unchanged.
-func clearTCAggregateRPFilter(deliveryName string) ([]tcSysctlState, error) {
+func clearTCAggregateRPFilter(deliveryName string, redirectName string) ([]tcSysctlState, error) {
 	aggregatePath := tcInterfaceSysctlPath("all", "rp_filter")
 	current, err := os.ReadFile(aggregatePath)
 	if err != nil {
@@ -2013,7 +2017,7 @@ func clearTCAggregateRPFilter(deliveryName string) ([]tcSysctlState, error) {
 		return states, E.Errors(cause, restoreErr)
 	}
 	for _, entry := range entries {
-		if entry.Name() == "all" || entry.Name() == deliveryName {
+		if entry.Name() == "all" || entry.Name() == deliveryName || entry.Name() == redirectName {
 			continue
 		}
 		state, changed, pinErr := pinTCInterfaceRPFilter(entry.Name(), aggregate)
