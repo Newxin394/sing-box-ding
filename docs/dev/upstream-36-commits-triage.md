@@ -81,30 +81,41 @@ cherry-pick（14 条，按提交顺序）：
 > `70d0ba72`（netlink overrun 空转，与 WiFi 抖动史对应，但受依赖链阻塞）
 > `515a73e4` / `c129a806`（单点、低耦合）> 其余（大改或平台无关）。
 
-## 编译验证：受阻（环境问题，与改动无关）
+## 编译验证：通过
 
-`go build ./adapter/... ./route/...`（GOOS=linux）报 130 行错误，**全部**是
-`no required module provides package`（65 条），**零语法/类型错误**。
-
-**根因**：go **无法解析伪版本模块** `github.com/sagernet/sing v0.9.1-0.20260904133552-ffcabb706b1c`。
-用 `GOFLAGS=-mod=mod go list ./route/` 探测，go 直接报
-`finding module for package github.com/sagernet/sing/common`，
-并试图把 go.mod 改成 `go 1.26.0` + `sing v0.9.3`（正式版）——
-即它认为该伪版本不存在，于是找不到由它提供的包。探测产生的 go.mod/go.sum 改动已回滚。
-
-中途尝试过手工解压 `cache/download` 里的 zip 去填充空目录（x/net、x/sys、sing、dns），
-报错一字不变，确认与"解压目录为空"无关。`proxy.golang.org` 可达（200），
-`sing` 模块的 `.mod` 元数据存在且 module path 正确。
-
-修复方式（未执行，需数 GB 重下）：
+必须带工具链约束与链接参数，缺一即误报：
 
 ```bash
-go clean -modcache && go mod download
+TAGS="with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
+GOTOOLCHAIN=go1.25.5 GOOS=android GOARCH=arm64 \
+  go build -tags "$TAGS" -ldflags=-checklinkname=0 ./...
 ```
 
-这是本机 module cache 的既存损坏，与本次 cherry-pick 无关 ——
-受影响的 `miekg/dns`、`common/tlsspoof` 等文件都不是本次改动涉及的。
-**真实编译验证需走 CI 或修复 cache 后重跑。**
+→ 退出码 0。`linux/amd64` 同样通过。15 条 cherry-pick + 1 条手工提交 + 1 条修复均在树内。
+
+### 三个坑（按暴露顺序）
+
+**1. 工具链版本（根因）**：本机 `go1.27.0`，而 go.mod 声明 `go 1.25.5`。
+Go 1.27 解析该模块图失败，把所有依赖包误报为 `no required module provides package`
+（130 行错误、零语法错）。加 `GOTOOLCHAIN=go1.25.5` 后单包编译立即通过。
+环境值：`GOROOT=C:\Program Files\Go`、`GOMODCACHE=D:\GoCache\mod`、`GOFLAGS` 空、`GOTOOLCHAIN=auto`。
+
+排查中曾误判为 module cache 损坏，`go clean -modcache` 重建了 2.5 G（无害但非必要）；
+另有一次手工解压 zip 填空目录的尝试，内层前缀取错，后由重新下载覆盖。
+**换用 go1.25.5 后这些都不再相关。**
+
+**2. `-checklinkname=0`**：`experimental/libbox/internal/oomprofile/linkname.go:42`
+用 `//go:linkname` 引用 `runtime/pprof.parseProcSelfMaps`，Go 1.23+ 的链接检查会拒绝。
+项目本来就依赖 `cmd/internal/build_shared/flags.go:9` 的 `-checklinkname=0` 与
+`tfogo_checklinkname0` 标签，只有手动 build 漏带时才暴露。
+
+**3. 一个真实类型错误（已修，`4ea764b5`）**：`provider/parser/clash.go:416-417`。
+`445dab7d`（上游 `d6ec014c` "Fix omitempty for JSON struct fields"）把
+`option/http.go` 的 `StreamReceiveWindow` / `ConnectionReceiveWindow` 改成
+`*byteformats.MemoryBytes`，而 `provider/parser/clash.go` 是本地独有文件
+（`863a755b add outbound provider`），上游从未改动它 —— 所以 cherry-pick
+不携带对应调用点修改。已把 `clashMemoryBytes` 的返回值改为指针，两处调用点自动适配，
+且它们是该函数的全部调用点。
 
 ## 复核要点（未逐条读 diff）
 
