@@ -20,6 +20,7 @@ import (
 
 type spliceTarget struct {
 	socket        tun.SpliceSocket
+	offload       N.PacketOffload
 	readCounters  []N.CountFunc
 	writeCounters []N.CountFunc
 }
@@ -60,11 +61,15 @@ func unwrapSpliceTarget(conn any, allowOffload bool) (spliceTarget, bool) {
 			continue
 		}
 		if allowOffload {
-			if _, offload := N.UnwrapPacketOffload(conn); offload != nil {
-				// The pinned sing-tun fork predates SplicePacketOptions.Offload.
-				// Splicing an offloaded conn without the offload descriptor would
-				// drop the GRO/GSO framing, so decline and let the caller fall back.
-				return spliceTarget{}, false
+			upstream, offload := N.UnwrapPacketOffload(conn)
+			if offload != nil {
+				socket, isSocket := upstream.(tun.SpliceSocket)
+				if !isSocket {
+					return spliceTarget{}, false
+				}
+				target.socket = socket
+				target.offload = offload
+				return target, true
 			}
 		}
 		readerWithUpstream, isReaderWithUpstream := conn.(N.ReaderWithUpstream)
@@ -263,7 +268,10 @@ func (m *ConnectionManager) splicePacketConnection(ctx context.Context, conn N.P
 	}
 	nat.Unidirectional = !isFakeIP && metadata.UDPDisableDomainUnmapping && !metadata.Destination.IsIP()
 	cached := spliceSource.takeCached()
-	if spliceSource.natConn.Splice(target.socket, tun.SplicePacketOptions{
+	// The pinned sing-tun fork predates SplicePacketOptions.Offload. Splicing an
+	// offloaded conn without its GRO/GSO descriptor would mis-frame packets, so
+	// skip the splice path and let the cached packets be replayed below.
+	if target.offload == nil && spliceSource.natConn.Splice(target.socket, tun.SplicePacketOptions{
 		SpliceOptions: tun.SpliceOptions{
 			ReadCounters:  append(spliceSource.readCounters, target.writeCounters...),
 			WriteCounters: append(target.readCounters, spliceSource.writeCounters...),

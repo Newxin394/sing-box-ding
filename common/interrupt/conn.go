@@ -2,8 +2,11 @@ package interrupt
 
 import (
 	"net"
+	"os"
 
+	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
 )
@@ -41,6 +44,35 @@ type PacketConn struct {
 
 func newPacketConn(group *Group, conn net.PacketConn, element *list.Element[*groupConnItem]) *PacketConn {
 	return &PacketConn{NetPacketConn: bufio.NewPacketConn(conn), group: group, element: element}
+}
+
+func (c *PacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	if packetReader, ok := c.NetPacketConn.(N.PacketReader); ok {
+		return packetReader.ReadPacket(buffer)
+	}
+	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
+	if !isPacketConn {
+		return M.Socksaddr{}, os.ErrInvalid
+	}
+	_, addr, err := buffer.ReadPacketFrom(packetConn)
+	if err != nil {
+		return M.Socksaddr{}, err
+	}
+	return M.SocksaddrFromNet(addr).Unwrap(), err
+}
+
+func (c *PacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	if packetWriter, ok := c.NetPacketConn.(N.PacketWriter); ok {
+		return packetWriter.WritePacket(buffer, destination)
+	}
+	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
+	if !isPacketConn {
+		buffer.Release()
+		return os.ErrInvalid
+	}
+	defer buffer.Release()
+	_, err := packetConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
+	return err
 }
 
 func (c *PacketConn) Close() error {

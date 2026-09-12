@@ -427,14 +427,23 @@ type socketOwner struct {
 	closed   bool
 }
 
-func (o *socketOwner) Attach(closer io.Closer) bool {
+// attach stores closer as the current owner and returns the original socket so
+// the caller can migrate it. ok reports whether the attach succeeded.
+func (o *socketOwner) attach(closer io.Closer) (io.Closer, bool) {
 	o.access.Lock()
 	defer o.access.Unlock()
 	if o.closed || o.owner != nil {
-		return false
+		return nil, false
 	}
 	o.owner = closer
-	return true
+	return o.original, true
+}
+
+// Attach satisfies tun.SpliceSocket. The pinned sing-tun fork declares
+// Attach(io.Closer) bool, so the original socket returned by attach is dropped.
+func (o *socketOwner) Attach(closer io.Closer) bool {
+	_, ok := o.attach(closer)
+	return ok
 }
 
 func (o *socketOwner) detach() bool {
@@ -504,6 +513,35 @@ type trackedPacketConn struct {
 	socketOwner
 	manager *ConnectionManager
 	element *list.Element[io.Closer]
+}
+
+func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	if packetReader, ok := c.NetPacketConn.(N.PacketReader); ok {
+		return packetReader.ReadPacket(buffer)
+	}
+	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
+	if !isPacketConn {
+		return M.Socksaddr{}, os.ErrInvalid
+	}
+	_, addr, err := buffer.ReadPacketFrom(packetConn)
+	if err != nil {
+		return M.Socksaddr{}, err
+	}
+	return M.SocksaddrFromNet(addr).Unwrap(), err
+}
+
+func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	if packetWriter, ok := c.NetPacketConn.(N.PacketWriter); ok {
+		return packetWriter.WritePacket(buffer, destination)
+	}
+	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
+	if !isPacketConn {
+		buffer.Release()
+		return os.ErrInvalid
+	}
+	defer buffer.Release()
+	_, err := packetConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
+	return err
 }
 
 func (c *trackedPacketConn) SyscallConn() (syscall.RawConn, error) {
