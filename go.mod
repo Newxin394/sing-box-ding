@@ -57,7 +57,7 @@ require (
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
 	github.com/sagernet/sing-shadowtls v0.2.1
 	github.com/sagernet/sing-snell v0.0.0-20260904135315-bc5a12ac736f
-	github.com/sagernet/sing-tun v0.9.1-0.20260902150540-98e457e39c90
+	github.com/sagernet/sing-tun v0.9.4-0.20260912075549-869f0a4d76af
 	github.com/sagernet/sing-usbip v0.0.0-20260817040617-28bd42667eca
 	github.com/sagernet/sing-vmess v0.2.8
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1
@@ -84,8 +84,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.1
 )
-
-replace github.com/sagernet/sing-tun => github.com/reF1nd/sing-tun v0.9.1-0.20260909111036-25060dfbbb5f
 
 replace github.com/sagernet/sing-anytls => github.com/reF1nd/sing-anytls v0.0.0-20260905062301-7eeaaeb4fb19
 

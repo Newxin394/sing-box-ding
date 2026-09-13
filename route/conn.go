@@ -439,11 +439,11 @@ func (o *socketOwner) attach(closer io.Closer) (io.Closer, bool) {
 	return o.original, true
 }
 
-// Attach satisfies tun.SpliceSocket. The pinned sing-tun fork declares
-// Attach(io.Closer) bool, so the original socket returned by attach is dropped.
-func (o *socketOwner) Attach(closer io.Closer) bool {
-	_, ok := o.attach(closer)
-	return ok
+// Attach satisfies tun.SpliceSocket. The original socket is handed back so the
+// splice path can take ownership of it, which is what the current sing-tun
+// declares; the owner is stored so it can be closed or detached later.
+func (o *socketOwner) Attach(closer io.Closer) (io.Closer, bool) {
+	return o.attach(closer)
 }
 
 func (o *socketOwner) detach() bool {
