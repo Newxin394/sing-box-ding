@@ -28,6 +28,20 @@ const (
 	pathProc = "/proc"
 
 	processPathsAllUsers = ^uint32(0)
+
+	// processPathCacheLifetime bounds how long a process path snapshot stays
+	// usable. Building one costs a walk over every fd of every process in
+	// procfs, so the lifetime has to outlast the rescan interval by a wide
+	// margin; otherwise a snapshot expires before it can serve a single lookup.
+	processPathCacheLifetime = time.Minute
+
+	// processPathRescanInterval is the shortest gap allowed between two full
+	// rebuilds for the same uid. A new connection always carries an inode the
+	// current snapshot cannot contain, so rebuilding on every miss degenerates
+	// into a continuous procfs walk whenever short-lived sockets arrive in
+	// bursts (DNS queries being the worst case). The cost of throttling is
+	// that a freshly started process stays unresolved for up to this interval.
+	processPathRescanInterval = 10 * time.Second
 )
 
 var _ Searcher = (*linuxSearcher)(nil)
@@ -41,11 +55,12 @@ type linuxSearcher struct {
 
 type uidProcessPaths struct {
 	entries map[uint32][]string
+	builtAt time.Time
 }
 
 func NewSearcher(config Config) (Searcher, error) {
 	processPathCache := common.Must1(freelru.New[uint32, *uidProcessPaths](64, maphash.NewHasher[uint32]().Hash32, true))
-	processPathCache.SetLifetime(time.Second)
+	processPathCache.SetLifetime(processPathCacheLifetime)
 	searcher := &linuxSearcher{
 		logger:           config.Logger,
 		packageManager:   config.PackageManager,
@@ -138,17 +153,26 @@ func (s *linuxSearcher) resolveSocketByNetlink(network string, source netip.Addr
 // current uid of the process, so a socket created before a privilege drop
 // only appears under a scan of all users.
 func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, error) {
+	now := time.Now()
 	for _, scanUID := range []uint32{uid, processPathsAllUsers} {
 		if cached, ok := s.processPathCache.Get(scanUID); ok {
 			if processPaths, found := cached.entries[targetInode]; found {
 				return processPaths, nil
+			}
+			// The snapshot is still fresh and simply does not contain this
+			// inode, so the socket was created after the last build. Rebuilding
+			// would answer this one lookup while costing a full procfs walk, and
+			// the next new socket would miss again, so hold off until the rescan
+			// interval has elapsed.
+			if now.Sub(cached.builtAt) < processPathRescanInterval {
+				continue
 			}
 		}
 		processPaths, err := buildProcessPaths(scanUID)
 		if err != nil {
 			return nil, err
 		}
-		s.processPathCache.Add(scanUID, &uidProcessPaths{entries: processPaths})
+		s.processPathCache.Add(scanUID, &uidProcessPaths{entries: processPaths, builtAt: now})
 		inodePaths, found := processPaths[targetInode]
 		if found {
 			return inodePaths, nil
