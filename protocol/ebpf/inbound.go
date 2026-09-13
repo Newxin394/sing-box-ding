@@ -69,7 +69,6 @@ type Inbound struct {
 	selfBypass               *commonEBPF.SelfBypass
 	selfBypassCgroup         bool
 	processTracker           *commonEBPF.ProcessTracker
-	processInfoCache         *processInfoCache
 	usePlatformProcessFinder bool
 	listeners                internalListenerSet
 	udpNat                   *udpnat.Service
@@ -296,12 +295,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 	}
 	inbound := &Inbound{
-		Adapter:          inbound.NewAdapter(C.TypeEBPF, tag),
-		ctx:              ctx,
-		router:           router,
-		logger:           logger,
-		networkManager:   networkManager,
-		processInfoCache: newProcessInfoCache(),
+		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
+		ctx:            ctx,
+		router:         router,
+		logger:         logger,
+		networkManager: networkManager,
 		usePlatformProcessFinder: func() bool {
 			platform := service.FromContext[adapter.PlatformInterface](ctx)
 			return platform != nil && platform.UsePlatformConnectionOwnerFinder()

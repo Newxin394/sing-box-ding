@@ -60,14 +60,6 @@ type udpRedirectBinding struct {
 	connected       bool
 }
 
-// isDirect reports whether the binding is the plain direct-redirect form: no
-// reply alias installed, no connected or redirect-address refinement, and no
-// cached packet info. It is exactly the value setDirectBinding writes, so a
-// binding that satisfies it carries no information for that write to add.
-func (b udpRedirectBinding) isDirect() bool {
-	return !b.replyAlias && !b.connected && b.redirectAddress == netip.Addr{} && len(b.packetInfo) == 0
-}
-
 func (t *udpClientTable) load(client netip.AddrPort) (*udpClientState, bool) {
 	shard := t.clientShard(client)
 	shard.access.RLock()
@@ -215,19 +207,6 @@ func (t *udpClientTable) setDirectBinding(
 	socketCookie uint64,
 ) {
 	state := t.loadOrCreate(client)
-	// A repeat datagram of an already-registered flow needs no write: the direct
-	// binding is its zero value, the socket cookie is unchanged, and the source
-	// MAC comes from the same assignment lookup the cookie does, so it cannot
-	// differ while the cookie matches. Checking this under the read lock keeps
-	// concurrent datagrams of the same flow from serializing on the write lock,
-	// which is the common case for any sustained UDP stream.
-	state.access.RLock()
-	binding, loaded := state.bindings[destination]
-	cookieMatches := state.socketCookie == socketCookie
-	state.access.RUnlock()
-	if loaded && cookieMatches && binding.isDirect() {
-		return
-	}
 	state.access.Lock()
 	defer state.access.Unlock()
 	if len(sourceMAC) > 0 {
