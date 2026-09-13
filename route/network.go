@@ -46,6 +46,8 @@ type NetworkManager struct {
 	ebpfSelfBypass           ebpfSelfBypassState //nolint:unused // only accessed from network_ebpf.go (with_ebpf + linux/android builds)
 	networkMonitor           tun.NetworkUpdateMonitor
 	interfaceMonitor         tun.DefaultInterfaceMonitor
+	interfaceRecheckAccess   sync.Mutex
+	interfaceRecheckTimer    *time.Timer
 	packageManager           tun.PackageManager
 	powerListener            winpowrprof.EventListener
 	pauseManager             pause.Manager
@@ -528,8 +530,16 @@ func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interfa
 	if defaultInterface == nil {
 		r.pauseManager.NetworkPause()
 		r.logger.Error("missing default interface")
+		// The default interface can disappear without any link change: Android
+		// withdraws a Wi-Fi network's default route when its connectivity check
+		// fails, and re-adds it when the check later succeeds, leaving the
+		// interface itself untouched the whole time. The monitor only re-runs on
+		// a network update, so without re-arming it here every outbound bound to
+		// the default interface keeps failing until the process is restarted.
+		r.scheduleInterfaceMonitorRecheck()
 		return
 	}
+	r.cancelInterfaceMonitorRecheck()
 	r.pauseManager.NetworkWake()
 	updateContext, updateCancel := context.WithCancel(r.ctx)
 	r.interfaceUpdateAccess.Lock()
@@ -544,6 +554,56 @@ func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interfa
 		r.updateInterface(updateContext, defaultInterface, resetNetwork)
 	}()
 }
+
+// defaultInterfaceRecheckInterval is how long to wait before asking the default
+// interface monitor again after it reported no default interface. The check is
+// a rule and route listing, so retrying this often stays inexpensive.
+const defaultInterfaceRecheckInterval = 5 * time.Second
+
+// scheduleInterfaceMonitorRecheck arms a retry for a monitor that reported no
+// default interface. Only one retry is ever pending.
+func (r *NetworkManager) scheduleInterfaceMonitorRecheck() {
+	r.interfaceRecheckAccess.Lock()
+	defer r.interfaceRecheckAccess.Unlock()
+	if r.interfaceMonitor == nil || r.interfaceRecheckTimer != nil {
+		return
+	}
+	r.interfaceRecheckTimer = time.AfterFunc(defaultInterfaceRecheckInterval, r.recheckInterfaceMonitor)
+}
+
+// cancelInterfaceMonitorRecheck drops a pending retry once an interface is back.
+func (r *NetworkManager) cancelInterfaceMonitorRecheck() {
+	r.interfaceRecheckAccess.Lock()
+	defer r.interfaceRecheckAccess.Unlock()
+	if r.interfaceRecheckTimer != nil {
+		r.interfaceRecheckTimer.Stop()
+		r.interfaceRecheckTimer = nil
+	}
+}
+
+// recheckInterfaceMonitor re-arms the default interface monitor and keeps
+// retrying while it still reports nothing. Start() re-registers the network
+// update callback and runs one check synchronously, so Close() runs first to
+// keep repeated re-arms from stacking callbacks on the update monitor.
+func (r *NetworkManager) recheckInterfaceMonitor() {
+	r.interfaceRecheckAccess.Lock()
+	r.interfaceRecheckTimer = nil
+	monitor := r.interfaceMonitor
+	r.interfaceRecheckAccess.Unlock()
+	if monitor == nil {
+		return
+	}
+	_ = monitor.Close()
+	if err := monitor.Start(); err != nil {
+		r.logger.Error("re-arm default interface monitor: ", err)
+	}
+	// A recovered interface is delivered through notifyInterfaceUpdate, which
+	// cancels this loop. While nothing is delivered, keep asking.
+	if monitor.DefaultInterface() == nil {
+		r.scheduleInterfaceMonitorRecheck()
+	}
+}
+
 
 func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *control.Interface, resetNetwork bool) {
 	r.interfaceUpdateRunAccess.Lock()
