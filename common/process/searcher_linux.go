@@ -39,8 +39,41 @@ type linuxSearcher struct {
 	processPathCache *freelru.Cache[uint32, *uidProcessPaths]
 }
 
+// uidProcessPaths holds one /proc scan, keyed by socket inode and grouped by the
+// uid of the process holding it. The socket keeps the uid it was created with
+// while /proc reflects the current uid of the process, so a socket created
+// before a privilege drop is only reachable from a different uid. Keeping the
+// uid alongside each entry lets a single scan answer both the exact match and
+// the cross-user fallback, instead of rescanning /proc for the fallback.
 type uidProcessPaths struct {
-	entries map[uint32][]string
+	entries map[uint32]map[uint32][]string
+}
+
+// lookup returns the paths holding targetInode, preferring processes running as
+// uid and falling back to every uid when none of them matches.
+func (u *uidProcessPaths) lookup(targetInode, uid uint32) ([]string, bool) {
+	byUID, found := u.entries[targetInode]
+	if !found {
+		return nil, false
+	}
+	if paths, matched := byUID[uid]; matched {
+		return paths, true
+	}
+	var merged []string
+	for _, paths := range byUID {
+		for _, path := range paths {
+			if !slices.Contains(merged, path) {
+				merged = append(merged, path)
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return nil, false
+	}
+	// Map iteration order is random, and the first path is the one reported to
+	// the user, so keep the result stable across calls.
+	slices.Sort(merged)
+	return merged, true
 }
 
 func NewSearcher(config Config) (Searcher, error) {
@@ -134,36 +167,36 @@ func (s *linuxSearcher) resolveSocketByNetlink(network string, source netip.Addr
 	return dumpSocketDiag(family, protocol, source, destination)
 }
 
-// The socket keeps the uid it was created with, while /proc reflects the
-// current uid of the process, so a socket created before a privilege drop
-// only appears under a scan of all users.
+// findProcessPaths resolves the processes holding targetInode. A single scan
+// covers both the exact uid match and the cross-user fallback, so a cache miss
+// walks /proc once instead of once per candidate uid.
 func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, error) {
-	for _, scanUID := range []uint32{uid, processPathsAllUsers} {
-		if cached, ok := s.processPathCache.Get(scanUID); ok {
-			if processPaths, found := cached.entries[targetInode]; found {
-				return processPaths, nil
-			}
+	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
+		if processPaths, found := cached.lookup(targetInode, uid); found {
+			return processPaths, nil
 		}
-		processPaths, err := buildProcessPaths(scanUID)
-		if err != nil {
-			return nil, err
-		}
-		s.processPathCache.Add(scanUID, &uidProcessPaths{entries: processPaths})
-		inodePaths, found := processPaths[targetInode]
-		if found {
-			return inodePaths, nil
-		}
+	}
+	processPaths, err := buildProcessPaths()
+	if err != nil {
+		return nil, err
+	}
+	cached := &uidProcessPaths{entries: processPaths}
+	s.processPathCache.Add(processPathsAllUsers, cached)
+	if inodePaths, found := cached.lookup(targetInode, uid); found {
+		return inodePaths, nil
 	}
 	return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
 }
 
-func buildProcessPaths(uid uint32) (map[uint32][]string, error) {
+// buildProcessPaths scans /proc once and indexes every socket inode it finds
+// together with the uid of the process holding it.
+func buildProcessPaths() (map[uint32]map[uint32][]string, error) {
 	files, err := os.ReadDir(pathProc)
 	if err != nil {
 		return nil, err
 	}
 	buffer := make([]byte, syscall.PathMax)
-	processPaths := make(map[uint32][]string)
+	processPaths := make(map[uint32]map[uint32][]string)
 	for _, file := range files {
 		if !file.IsDir() || !isPid(file.Name()) {
 			continue
@@ -175,9 +208,7 @@ func buildProcessPaths(uid uint32) (map[uint32][]string, error) {
 			}
 			return nil, err
 		}
-		if uid != processPathsAllUsers && info.Sys().(*syscall.Stat_t).Uid != uid {
-			continue
-		}
+		processUID := info.Sys().(*syscall.Stat_t).Uid
 		processPath := filepath.Join(pathProc, file.Name())
 		fdPath := filepath.Join(processPath, "fd")
 		exePath, err := os.Readlink(filepath.Join(processPath, "exe"))
@@ -200,8 +231,13 @@ func buildProcessPaths(uid uint32) (map[uint32][]string, error) {
 			if !ok {
 				continue
 			}
-			if !slices.Contains(processPaths[inode], exePath) {
-				processPaths[inode] = append(processPaths[inode], exePath)
+			byUID, loaded := processPaths[inode]
+			if !loaded {
+				byUID = make(map[uint32][]string)
+				processPaths[inode] = byUID
+			}
+			if !slices.Contains(byUID[processUID], exePath) {
+				byUID[processUID] = append(byUID[processUID], exePath)
 			}
 		}
 	}
