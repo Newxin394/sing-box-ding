@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -52,44 +53,24 @@ type linuxSearcher struct {
 	packageManager   tun.PackageManager
 	diagConns        [4]*socketDiagConn
 	processPathCache *freelru.Cache[uint32, *uidProcessPaths]
+	// rebuildAccess serializes the full rebuild so a burst of concurrent misses
+	// performs one walk instead of one per caller: without it, N requests
+	// arriving together all see a missing or stale snapshot and each start its
+	// own full /proc walk, which is what made concurrency cost many times more
+	// than the serialized case.
+	rebuildAccess sync.Mutex
 }
 
-// uidProcessPaths holds one /proc scan, keyed by socket inode and grouped by the
-// uid of the process holding it. The socket keeps the uid it was created with
-// while /proc reflects the current uid of the process, so a socket created
-// before a privilege drop is only reachable from a different uid. Keeping the
-// uid alongside each entry lets a single scan answer both the exact match and
-// the cross-user fallback, instead of rescanning /proc for the fallback.
+// uidProcessPaths holds one /proc scan, keyed by socket inode.
 type uidProcessPaths struct {
-	entries map[uint32]map[uint32][]string
+	entries map[uint32][]string
 	builtAt time.Time
 }
 
-// lookup returns the paths holding targetInode, preferring processes running as
-// uid and falling back to every uid when none of them matches.
-func (u *uidProcessPaths) lookup(targetInode, uid uint32) ([]string, bool) {
-	byUID, found := u.entries[targetInode]
-	if !found {
-		return nil, false
-	}
-	if paths, matched := byUID[uid]; matched {
-		return paths, true
-	}
-	var merged []string
-	for _, paths := range byUID {
-		for _, path := range paths {
-			if !slices.Contains(merged, path) {
-				merged = append(merged, path)
-			}
-		}
-	}
-	if len(merged) == 0 {
-		return nil, false
-	}
-	// Map iteration order is random, and the first path is the one reported to
-	// the user, so keep the result stable across calls.
-	slices.Sort(merged)
-	return merged, true
+// lookup returns the paths holding targetInode.
+func (u *uidProcessPaths) lookup(targetInode uint32) ([]string, bool) {
+	paths, found := u.entries[targetInode]
+	return paths, found
 }
 
 func NewSearcher(config Config) (Searcher, error) {
@@ -183,44 +164,66 @@ func (s *linuxSearcher) resolveSocketByNetlink(network string, source netip.Addr
 	return dumpSocketDiag(family, protocol, source, destination)
 }
 
-// findProcessPaths resolves the processes holding targetInode. A single scan
-// covers both the exact uid match and the cross-user fallback, so a cache miss
-// walks /proc once instead of once per candidate uid.
+// findProcessPaths resolves the processes holding targetInode.
+//
+// The cached snapshot is consulted first and is rebuilt at most once per
+// rescan interval, because every new socket carries an inode no existing
+// snapshot can contain and rebuilding per miss turns short-lived traffic (DNS
+// being the worst case) into a continuous procfs walk.
+//
+// Rebuilds are serialized, so a burst of concurrent misses shares one walk
+// rather than starting one each, and the walk itself is cheap for the common
+// case: it fills the uid table first and abandons the rest of /proc as soon as
+// that table answers, which is the case whenever the socket belongs to the
+// process that created it.
 func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, error) {
 	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
-		if processPaths, found := cached.lookup(targetInode, uid); found {
+		if processPaths, found := cached.lookup(targetInode); found {
 			return processPaths, nil
 		}
-		// The snapshot is still fresh and simply does not contain this inode,
-		// so the socket was created after the last build. Rebuilding would
-		// answer this one lookup while costing a full procfs walk, and the next
-		// new socket would miss again, so hold off until the rescan interval
-		// has elapsed.
-		if time.Since(cached.builtAt) < processPathRescanInterval {
+	}
+	s.rebuildAccess.Lock()
+	defer s.rebuildAccess.Unlock()
+	// Another caller may have completed the walk while we waited.
+	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
+		if now := time.Now(); now.Sub(cached.builtAt) < processPathRescanInterval {
+			if processPaths, found := cached.lookup(targetInode); found {
+				return processPaths, nil
+			}
 			return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
 		}
 	}
-	processPaths, err := buildProcessPaths()
+	uidPaths, allPaths, err := buildProcessPaths(targetInode, uid)
 	if err != nil {
 		return nil, err
 	}
-	cached := &uidProcessPaths{entries: processPaths, builtAt: time.Now()}
+	if processPaths, found := uidPaths[targetInode]; found {
+		return processPaths, nil
+	}
+	cached := &uidProcessPaths{entries: allPaths, builtAt: time.Now()}
 	s.processPathCache.Add(processPathsAllUsers, cached)
-	if inodePaths, found := cached.lookup(targetInode, uid); found {
-		return inodePaths, nil
+	if processPaths, found := cached.lookup(targetInode); found {
+		return processPaths, nil
 	}
 	return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
 }
 
-// buildProcessPaths scans /proc once and indexes every socket inode it finds
-// together with the uid of the process holding it.
-func buildProcessPaths() (map[uint32]map[uint32][]string, error) {
+// buildProcessPaths walks /proc once for both tables: processes owned by uid,
+// and every process.
+//
+// Filling the all-users table costs the exe and fd reads of processes we do not
+// own, so it is abandoned as soon as the uid table holds targetInode: from that
+// point the fallback can never be consulted, and the all-users table is then
+// partial. When the uid table misses, no process was ever skipped, so the
+// all-users table is complete and safe to cache.
+func buildProcessPaths(targetInode, uid uint32) (uidPaths map[uint32][]string, allPaths map[uint32][]string, err error) {
 	files, err := os.ReadDir(pathProc)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	uidPaths = make(map[uint32][]string)
+	allPaths = make(map[uint32][]string)
 	buffer := make([]byte, syscall.PathMax)
-	processPaths := make(map[uint32]map[uint32][]string)
 	for _, file := range files {
 		if !file.IsDir() || !isPid(file.Name()) {
 			continue
@@ -230,9 +233,14 @@ func buildProcessPaths() (map[uint32]map[uint32][]string, error) {
 			if isIgnorableProcError(err) {
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
-		processUID := info.Sys().(*syscall.Stat_t).Uid
+		ownedByUID := info.Sys().(*syscall.Stat_t).Uid == uid
+		if !ownedByUID {
+			if _, matched := uidPaths[targetInode]; matched {
+				continue
+			}
+		}
 		processPath := filepath.Join(pathProc, file.Name())
 		fdPath := filepath.Join(processPath, "fd")
 		exePath, err := os.Readlink(filepath.Join(processPath, "exe"))
@@ -240,7 +248,7 @@ func buildProcessPaths() (map[uint32]map[uint32][]string, error) {
 			if isIgnorableProcError(err) {
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		fds, err := os.ReadDir(fdPath)
 		if err != nil {
@@ -255,17 +263,18 @@ func buildProcessPaths() (map[uint32]map[uint32][]string, error) {
 			if !ok {
 				continue
 			}
-			byUID, loaded := processPaths[inode]
-			if !loaded {
-				byUID = make(map[uint32][]string)
-				processPaths[inode] = byUID
+			if ownedByUID && !slices.Contains(uidPaths[inode], exePath) {
+				uidPaths[inode] = append(uidPaths[inode], exePath)
 			}
-			if !slices.Contains(byUID[processUID], exePath) {
-				byUID[processUID] = append(byUID[processUID], exePath)
+			if !slices.Contains(allPaths[inode], exePath) {
+				allPaths[inode] = append(allPaths[inode], exePath)
 			}
 		}
 	}
-	return processPaths, nil
+	if _, matched := uidPaths[targetInode]; matched {
+		allPaths = nil
+	}
+	return uidPaths, allPaths, nil
 }
 
 func isIgnorableProcError(err error) bool {
