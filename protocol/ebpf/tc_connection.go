@@ -91,6 +91,17 @@ func (i *Inbound) lookupProcessInfo(socketCookie uint64) *adapter.ConnectionOwne
 		i.logger.Trace("lookup eBPF socket process owner: ", err)
 		return nil
 	}
+	// The owner lookup above is a single map hit and stays uncached because a
+	// socket cookie is unique per socket. Resolving that owner into a process
+	// path and package name is the expensive half -- a /proc readlink plus a
+	// package manager lookup -- and every new connection from the same app
+	// repeats it with an identical answer.
+	if i.processInfoCache != nil {
+		return i.processInfoCache.load(
+			processInfoCacheKey{processID: owner.ProcessID, userID: owner.UserID},
+			i.networkManager.PackageManager(),
+		)
+	}
 	processInfo, pathErr := process.FindProcessInfoByPID(
 		owner.ProcessID,
 		owner.UserID,
