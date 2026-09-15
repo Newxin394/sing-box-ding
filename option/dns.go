@@ -162,11 +162,15 @@ func (o DNSServerOptions) DescribeSchema(builder schema.Builder) (*schema.Node, 
 }
 
 type DNSServerAddressOptions struct {
-	Server     string `json:"server"`
-	ServerPort uint16 `json:"server_port,omitempty"`
+	Server          string                     `json:"server"`
+	ServerPort      uint16                     `json:"server_port,omitempty"`
+	ServerAddresses badoption.Listable[string] `json:"server_addresses,omitempty"`
 }
 
 func (o DNSServerAddressOptions) Build() M.Socksaddr {
+	if o.Server == "" && len(o.ServerAddresses) > 0 {
+		return M.ParseSocksaddrHostPort(o.ServerAddresses[0], o.ServerPort)
+	}
 	return M.ParseSocksaddrHostPort(o.Server, o.ServerPort)
 }
 
