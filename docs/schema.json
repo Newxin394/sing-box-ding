@@ -743,6 +743,19 @@
           "minimum": 0,
           "maximum": 65535
         },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "host": {
           "type": "string"
         },
@@ -2354,6 +2367,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "tls": {
               "$ref": "#/$defs/OutboundTLSOptions"
             },
@@ -2534,6 +2560,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "tls": {
               "$ref": "#/$defs/OutboundTLSOptions"
@@ -2999,6 +3038,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "tls": {
               "$ref": "#/$defs/OutboundTLSOptions"
             }
@@ -3171,6 +3223,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             }
           },
           "required": [
@@ -3296,6 +3361,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "tls": {
               "$ref": "#/$defs/OutboundTLSOptions"
@@ -3424,6 +3502,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             }
           },
           "required": [
@@ -4436,6 +4527,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "system": {
               "type": "boolean"
@@ -5853,6 +5957,19 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535
+        },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         },
         "bypass_domain": {
           "anyOf": [
@@ -9141,6 +9258,19 @@
           "minimum": 0,
           "maximum": 65535
         },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "detour": {
           "type": "string",
           "x-tag-reference": "outbound"
@@ -9568,6 +9698,19 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535
+        },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         },
         "detour": {
           "type": "string",
@@ -11754,6 +11897,19 @@
           "minimum": 0,
           "maximum": 65535
         },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "network": {
           "type": "string",
           "enum": [
@@ -11888,6 +12044,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "tls": {
               "$ref": "#/$defs/OutboundTLSOptions"
@@ -12210,6 +12379,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "username": {
               "type": "string"
             },
@@ -12353,6 +12535,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "server_ports": {
               "anyOf": [
@@ -12604,6 +12799,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "server_ports": {
               "anyOf": [
@@ -12937,6 +13145,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "username": {
               "type": "string"
             },
@@ -13204,6 +13425,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "method": {
               "type": "string",
               "enum": [
@@ -13410,6 +13644,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "version": {
               "type": "integer",
               "enum": [
@@ -13553,6 +13800,19 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "server_addresses": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
                 },
                 "psk": {
                   "type": "string"
@@ -13724,6 +13984,19 @@
                   "minimum": 0,
                   "maximum": 65535
                 },
+                "server_addresses": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
                 "psk": {
                   "type": "string"
                 },
@@ -13893,6 +14166,19 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "server_addresses": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
                 },
                 "psk": {
                   "type": "string"
@@ -14064,6 +14350,19 @@
                   "minimum": 0,
                   "maximum": 65535
                 },
+                "server_addresses": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
                 "psk": {
                   "type": "string"
                 },
@@ -14232,6 +14531,19 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "server_addresses": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
                 },
                 "psk": {
                   "type": "string"
@@ -14402,6 +14714,19 @@
                   "minimum": 0,
                   "maximum": 65535
                 },
+                "server_addresses": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
                 "psk": {
                   "type": "string"
                 },
@@ -14570,6 +14895,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "version": {
               "type": "string",
@@ -14758,6 +15096,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "user": {
               "type": "string"
@@ -15112,6 +15463,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "password": {
               "type": "string"
             },
@@ -15269,6 +15633,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "uuid": {
               "type": "string"
@@ -15552,6 +15929,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "uuid": {
               "type": "string"
             },
@@ -15715,6 +16105,19 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535
+            },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
             },
             "uuid": {
               "type": "string"
@@ -18070,6 +18473,19 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535
+        },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -19436,6 +19852,19 @@
               "minimum": 0,
               "maximum": 65535
             },
+            "server_addresses": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
             "devices": {
               "type": "array",
               "items": {
@@ -19640,6 +20069,19 @@
           "minimum": 0,
           "maximum": 65535
         },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "detour": {
           "type": "string",
           "x-tag-reference": "outbound"
@@ -19773,6 +20215,19 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535
+        },
+        "server_addresses": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false
