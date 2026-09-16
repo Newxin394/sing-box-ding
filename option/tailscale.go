@@ -14,6 +14,7 @@ import (
 
 type TailscaleEndpointOptions struct {
 	DialerOptions
+	InnerDomainResolver        *DomainResolveOptions      `json:"inner_domain_resolver,omitempty"`
 	StateDirectory             string                     `json:"state_directory,omitempty"`
 	AuthKey                    string                     `json:"auth_key,omitempty"`
 	ControlURL                 string                     `json:"control_url,omitempty"`
@@ -30,11 +31,16 @@ type TailscaleEndpointOptions struct {
 	RelayServerStaticEndpoints []netip.AddrPort           `json:"relay_server_static_endpoints,omitempty"`
 	SystemInterface            bool                       `json:"system_interface,omitempty"`
 	SystemInterfaceName        string                     `json:"system_interface_name,omitempty"`
+	SystemInterfaceGSO         *bool                      `json:"system_interface_gso,omitempty"`
 	SystemInterfaceMTU         uint32                     `json:"system_interface_mtu,omitempty"`
 	UDPTimeout                 UDPTimeoutCompat           `json:"udp_timeout,omitempty"`
 	SSHServer                  *TailscaleSSHServerOptions `json:"ssh_server,omitempty"`
 	TaildropDirectory          string                     `json:"taildrop_directory,omitempty"`
 	OnDemand                   bool                       `json:"on_demand,omitempty"`
+}
+
+func (o *TailscaleEndpointOptions) TakeInnerDomainResolverOptions() *DomainResolveOptions {
+	return o.InnerDomainResolver
 }
 
 type _TailscaleSSHServerOptions struct {
@@ -86,8 +92,6 @@ type DERPServiceOptions struct {
 	ConfigPath           string                                          `json:"config_path,omitempty"`
 	VerifyClientEndpoint badoption.Listable[string]                      `json:"verify_client_endpoint,omitempty"`
 	VerifyClientURL      badoption.Listable[*DERPVerifyClientURLOptions] `json:"verify_client_url,omitempty"`
-	VerifyClientInbound  badoption.Listable[string]                      `json:"verify_client_inbound,omitempty"`
-	VerifyClientKey      badoption.Listable[string]                      `json:"verify_client_key,omitempty"`
 	Home                 string                                          `json:"home,omitempty"`
 	MeshWith             badoption.Listable[*DERPMeshOptions]            `json:"mesh_with,omitempty"`
 	MeshPSK              string                                          `json:"mesh_psk,omitempty"`

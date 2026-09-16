@@ -56,7 +56,19 @@ func requestRequiresHTTP1(request *http.Request) bool {
 }
 
 func requestReplayable(request *http.Request) bool {
-	return request.Body == nil || request.Body == http.NoBody || request.GetBody != nil
+	if request == nil {
+		return false
+	}
+	// A resettable body is not enough: replaying a non-idempotent request can
+	// duplicate an upload, payment, or control-plane mutation when H3 races H2
+	// or falls back after a network switch. Permit those methods only when the
+	// caller explicitly supplied an idempotency key.
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return request.Body == nil || request.Body == http.NoBody || request.GetBody != nil
+	default:
+		return request.GetBody != nil && (request.Header.Get("Idempotency-Key") != "" || request.Header.Get("X-Idempotency-Key") != "")
+	}
 }
 
 func cloneRequestForRetry(request *http.Request) *http.Request {

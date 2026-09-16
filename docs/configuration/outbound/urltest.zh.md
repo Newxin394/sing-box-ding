@@ -10,10 +10,21 @@
     "proxy-b",
     "proxy-c"
   ],
+  "providers": [
+    "provider-a",
+    "provider-b",
+  ],
+  "exclude": "",
+  "include": "",
   "url": "",
   "interval": "",
   "tolerance": 50,
   "idle_timeout": "",
+  "use_all_providers": false,
+  "fallback": {
+    "enabled": false,
+    "max_delay": ""
+  },
   "interrupt_exist_connections": false
 }
 ```
@@ -22,9 +33,19 @@
 
 #### outbounds
 
-==必填==
-
 用于测试的出站标签列表。
+
+#### providers
+
+用于测试的[订阅](/zh/configuration/provider)标签列表。
+
+#### exclude
+
+排除 `providers` 节点的正则表达式。
+
+#### include
+
+包含 `providers` 节点的正则表达式。
 
 #### url
 
@@ -42,8 +63,44 @@
 
 空闲超时。默认使用 `30m`。
 
+#### use_all_providers
+
+是否使用所有提供者。默认使用 `false`。
+
+#### fallback
+
+回退选择配置。
+
+启用后，将按配置顺序选择首个可用出站，而不是选择延迟最低的出站。
+
+##### fallback.enabled
+
+启用回退选择。
+
+##### fallback.max_delay
+
+可接受的最大延迟。
+
+延迟超过该值的出站会被跳过。如果所有可用出站均超过该值，则选择其中延迟最低的出站。
+
 #### interrupt_exist_connections
 
 当选定的出站发生更改时，中断现有连接。
 
 仅入站连接受此设置影响，内部连接将始终被中断。
+
+#### udp_outbound
+
+> [!NOTE]
+> 该字段由本 fork 添加，上游不存在。
+
+将 UDP（数据包）流量委派给指定出站处理，而不是交给当前选中的成员出站。
+目标出站必须支持 UDP。
+
+#### udp_fallback_outbound
+
+> [!NOTE]
+> 该字段由本 fork 添加，上游不存在。
+
+主 `udp_outbound` 失败时使用的备用出站。必须先设置 `udp_outbound`，
+且两个字段都不能指向本 urltest 自身的 tag。

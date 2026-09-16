@@ -11,22 +11,30 @@ import (
 	"sync"
 	"time"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 )
 
 // EBPFAttachmentDiagnostics describes one place this inbound is actually
 // intercepting traffic right now: either a TC attachment on a network
 // interface, or (Mechanism == "cgroup") the cgroup local data plane, which
 // has no per-interface attachment of its own.
-type EBPFAttachmentDiagnostics = commonEBPF.AttachmentInfo
+type EBPFAttachmentDiagnostics struct {
+	// InterfaceName is the network interface name for a TC attachment, or
+	// the cgroup path for the cgroup local data plane.
+	InterfaceName string `json:"interface_name"`
+	// InterfaceIndex is 0 for the cgroup local data plane, which has no
+	// interface index.
+	InterfaceIndex int    `json:"interface_index,omitempty"`
+	Role           string `json:"role"`      // "local", "shared", or "local+shared"
+	Framing        string `json:"framing"`   // "ethernet" or "raw_ip"; empty for cgroup
+	Mechanism      string `json:"mechanism"` // "tcx", "clsact", or "cgroup"
+	FakeIPICMP     bool   `json:"fakeip_icmp"`
+}
 
 // Runtime states EBPFDiagnostics.State reports. These summarize the fields
 // below into the one value most operators actually want at a glance; the
 // individual fields remain available for anything more specific.
 const (
-	ebpfDiagnosticsSchemaVersion = 1
-	ebpfDiagnosticsJSONCacheTTL  = 500 * time.Millisecond
-
 	// EBPFDiagnosticsStateNormal is every configured data plane attached and
 	// no recovery outstanding.
 	EBPFDiagnosticsStateNormal = "normal"
@@ -63,10 +71,8 @@ type BypassRuleSetBackendState struct {
 // this is computed from live state (Inbound.Diagnostics), not probed from a
 // separate process.
 type EBPFDiagnostics struct {
-	SchemaVersion int       `json:"schema_version"`
-	ObservedAt    time.Time `json:"observed_at"`
-	Tag           string    `json:"tag"`
-	State         string    `json:"state"`
+	Tag   string `json:"tag"`
+	State string `json:"state"`
 
 	LocalEnabled    bool   `json:"local_enabled"`
 	LocalDataPlane  string `json:"local_data_plane,omitempty"`
@@ -269,16 +275,7 @@ func (i *Inbound) recordTCUpdateOutcome(outcome tcUpdateOutcome) {
 // configured) can report this inbound's status without importing this
 // package or its with_ebpf build tag.
 func (i *Inbound) DiagnosticsJSON() any {
-	now := time.Now()
-	i.diagnosticsJSONAccess.Lock()
-	defer i.diagnosticsJSONAccess.Unlock()
-	if !i.diagnosticsJSONAt.IsZero() && now.Sub(i.diagnosticsJSONAt) < ebpfDiagnosticsJSONCacheTTL {
-		return i.diagnosticsJSONValue
-	}
-	diagnostics := i.Diagnostics()
-	i.diagnosticsJSONAt = now
-	i.diagnosticsJSONValue = diagnostics
-	return diagnostics
+	return i.Diagnostics()
 }
 
 // Diagnostics reports this inbound's current interception state. Safe to
@@ -287,8 +284,6 @@ func (i *Inbound) DiagnosticsJSON() any {
 // longer than one of those already does elsewhere.
 func (i *Inbound) Diagnostics() EBPFDiagnostics {
 	diagnostics := EBPFDiagnostics{
-		SchemaVersion:   ebpfDiagnosticsSchemaVersion,
-		ObservedAt:      time.Now(),
 		Tag:             i.Tag(),
 		LocalEnabled:    i.localEnabled,
 		SharedEnabled:   i.sharedEnabled,
@@ -304,13 +299,9 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 	i.tcDataPlaneAccess.RLock()
 	tcDataPlane := i.tcDataPlane
 	i.tcDataPlaneAccess.RUnlock()
-	if tcDataPlane != nil {
-		diagnostics.Attachments = append(diagnostics.Attachments, tcDataPlane.AttachmentDiagnostics()...)
-	}
+	diagnostics.Attachments = append(diagnostics.Attachments, tcDataPlane.attachmentDiagnostics()...)
 	if shared := i.sharedRewriteInstance(); shared != nil {
-		if sharedDataPlane := shared.dataPlaneInstance(); sharedDataPlane != nil {
-			diagnostics.Attachments = append(diagnostics.Attachments, sharedDataPlane.AttachmentDiagnostics()...)
-		}
+		diagnostics.Attachments = append(diagnostics.Attachments, shared.dataPlaneInstance().attachmentDiagnostics()...)
 	}
 	if i.localCgroupEnabled() {
 		if backend := i.cgroupBackendInstance(); backend != nil && !backend.IsClosed() {
@@ -339,7 +330,6 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 		&i.udpWarnings.packetInfo,
 		&i.udpWarnings.originalDestination,
 		&i.udpWarnings.cleanup,
-		&i.udpWarnings.replySocketCapacity,
 	} {
 		message, at := limiter.last()
 		if at.After(lastErrorAt) {
@@ -398,7 +388,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
 
 	diagnostics.Counters = i.counters.snapshot()
-	var sharedRewriteBackend *commonEBPF.SharedPacketRewriteBackend
+	var sharedRewriteBackend *commonEBPF.SharedNetworkBackend
 	if shared := i.sharedRewriteInstance(); shared != nil {
 		sharedRewriteBackend = shared.sharedBackendInstance()
 	}
@@ -412,40 +402,41 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 	}
 	// fakeip_icmp can be hosted independently by the TC backend (local TC,
 	// shared socket_assign) and by the shared packet-rewrite backend at the
-	// same time -- each loads its own copy of the object -- so their counts
-	// are summed rather than one overwriting the other.
-	addFakeIPICMPCounters(&diagnostics.Counters, i.tcBackend(), sharedRewriteBackend)
-	if tcBackend := i.tcBackend(); tcBackend != nil {
-		if stats, err := tcBackend.Stats(); err == nil {
-			diagnostics.Counters.TCSocketLookupFailures = stats.SocketLookupFailures
-			diagnostics.Counters.TCSKAssignFailures = stats.SKAssignFailures
-			diagnostics.Counters.TCAssignmentUpdateFailures = stats.AssignmentUpdateFailures
+	// same time -- each loads its own copy of the object (see
+	// common/ebpf/fakeip_icmp_backend.go) -- so their counts are summed
+	// rather than one overwriting the other.
+	for _, addCount := range []func() (uint64, uint64, uint64, bool){
+		func() (uint64, uint64, uint64, bool) {
+			backend := i.tcBackend()
+			if backend == nil || !backend.FakeIPICMPEnabled() {
+				return 0, 0, 0, false
+			}
+			replies, _ := backend.FakeIPICMPReplyCount()
+			passThrough, _ := backend.FakeIPICMPPassThroughCount()
+			rewriteFailures, _ := backend.FakeIPICMPRewriteFailureCount()
+			return replies, passThrough, rewriteFailures, true
+		},
+		func() (uint64, uint64, uint64, bool) {
+			if sharedRewriteBackend == nil || !sharedRewriteBackend.FakeIPICMPEnabled() {
+				return 0, 0, 0, false
+			}
+			replies, _ := sharedRewriteBackend.FakeIPICMPReplyCount()
+			passThrough, _ := sharedRewriteBackend.FakeIPICMPPassThroughCount()
+			rewriteFailures, _ := sharedRewriteBackend.FakeIPICMPRewriteFailureCount()
+			return replies, passThrough, rewriteFailures, true
+		},
+	} {
+		replies, passThrough, rewriteFailures, enabled := addCount()
+		if !enabled {
+			continue
 		}
+		diagnostics.Counters.FakeIPICMPReplies += replies
+		diagnostics.Counters.FakeIPICMPPassThrough += passThrough
+		diagnostics.Counters.FakeIPICMPRewriteFailureDrops += rewriteFailures
 	}
 
 	diagnostics.State = deriveDiagnosticsState(diagnostics)
 	return diagnostics
-}
-
-type fakeIPICMPCounterSource interface {
-	ICMPEchoReplyEnabled() bool
-	ICMPEchoReplyCount() (uint64, error)
-	ICMPEchoPassThroughCount() (uint64, error)
-	ICMPEchoRewriteFailureCount() (uint64, error)
-}
-
-func addFakeIPICMPCounters(counters *EBPFCounters, sources ...fakeIPICMPCounterSource) {
-	for _, source := range sources {
-		if source == nil || !source.ICMPEchoReplyEnabled() {
-			continue
-		}
-		replies, _ := source.ICMPEchoReplyCount()
-		passThrough, _ := source.ICMPEchoPassThroughCount()
-		rewriteFailures, _ := source.ICMPEchoRewriteFailureCount()
-		counters.FakeIPICMPReplies += replies
-		counters.FakeIPICMPPassThrough += passThrough
-		counters.FakeIPICMPRewriteFailureDrops += rewriteFailures
-	}
 }
 
 // deriveDiagnosticsState computes EBPFDiagnostics.State from the rest of the
@@ -483,7 +474,7 @@ func attachmentHasRole(attachments []EBPFAttachmentDiagnostics, role string) boo
 	return false
 }
 
-// WriteJSON writes d as JSON, matching the shape sing-ebpf's kernel-probe
+// WriteJSON writes d as JSON, matching the shape common/ebpf's kernel-probe
 // report already uses for `sing-box tools ebpf status --json`.
 func (d EBPFDiagnostics) WriteJSON(w io.Writer) error {
 	encoder := json.NewEncoder(w)
@@ -515,7 +506,7 @@ func (d EBPFDiagnostics) WriteText(w io.Writer) error {
 			}
 			lines = append(lines, fmt.Sprintf(
 				"  %s: role=%s mechanism=%s framing=%s fakeip_icmp=%t",
-				attachment.InterfaceName, attachment.Role, attachment.Mechanism, framing, attachment.ICMPEchoReply,
+				attachment.InterfaceName, attachment.Role, attachment.Mechanism, framing, attachment.FakeIPICMP,
 			))
 		}
 	}
@@ -536,10 +527,9 @@ func (d EBPFDiagnostics) WriteText(w io.Writer) error {
 		d.UDPReplySockets.Count, d.UDPReplySockets.Peak, d.UDPReplySockets.Evicted, d.UDPReplySockets.CapacityRejected,
 	))
 	lines = append(lines, fmt.Sprintf(
-		"Counters: assignment_lookup_failures=%d tc_socket_lookup_failures=%d tc_sk_assign_failures=%d tc_assignment_update_failures=%d token_reservation_failures=%d rewrite_failures=%d "+
+		"Counters: assignment_lookup_failures=%d token_reservation_failures=%d rewrite_failures=%d "+
 			"shared_reconcile_failures=%d recovery_attempts=%d recovery_successes=%d recovery_failures=%d",
-		d.Counters.AssignmentLookupFailures, d.Counters.TCSocketLookupFailures, d.Counters.TCSKAssignFailures, d.Counters.TCAssignmentUpdateFailures,
-		d.Counters.TokenReservationFailures, d.Counters.RewriteFailures,
+		d.Counters.AssignmentLookupFailures, d.Counters.TokenReservationFailures, d.Counters.RewriteFailures,
 		d.Counters.SharedReconcileFailures, d.Counters.RecoveryAttempts, d.Counters.RecoverySuccesses, d.Counters.RecoveryFailures,
 	))
 	lines = append(lines, fmt.Sprintf(
@@ -608,7 +598,7 @@ func (i *Inbound) logStartupSummary() {
 	if diagnostics.FakeIPICMPReply {
 		covered := make([]string, 0, len(diagnostics.Attachments))
 		for _, attachment := range diagnostics.Attachments {
-			if attachment.ICMPEchoReply {
+			if attachment.FakeIPICMP {
 				covered = append(covered, attachment.InterfaceName+"("+attachment.Role+")")
 			}
 		}
@@ -618,7 +608,7 @@ func (i *Inbound) logStartupSummary() {
 		}
 	}
 
-	i.logger.Debug(
+	i.logger.Info(
 		"eBPF inbound started: paths=[", pathsSummary, "] mounts=[", mountsSummary,
 		"] waiting_for_interface=[", waitingSummary, "] fakeip_icmp=[", fakeIPICMPSummary, "]",
 	)

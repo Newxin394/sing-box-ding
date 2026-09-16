@@ -22,6 +22,7 @@ type TunInboundOptions struct {
 	IPRoute2TableIndex            int                              `json:"iproute2_table_index,omitempty"`
 	IPRoute2RuleIndex             int                              `json:"iproute2_rule_index,omitempty"`
 	AutoRedirect                  bool                             `json:"auto_redirect,omitempty"`
+	AutoRedirectDisableMarkMode   bool                             `json:"auto_redirect_disable_mark_mode,omitempty"`
 	AutoRedirectInputMark         FwMark                           `json:"auto_redirect_input_mark,omitempty"`
 	AutoRedirectOutputMark        FwMark                           `json:"auto_redirect_output_mark,omitempty"`
 	AutoRedirectResetMark         FwMark                           `json:"auto_redirect_reset_mark,omitempty"`
@@ -50,11 +51,10 @@ type TunInboundOptions struct {
 	UDPMapping                    UDPNATBehavior                   `json:"udp_mapping,omitempty"`
 	UDPFiltering                  UDPNATBehavior                   `json:"udp_filtering,omitempty"`
 	UDPNATMax                     uint32                           `json:"udp_nat_max,omitempty"`
+	Stack                         string                           `json:"stack,omitempty" enum:"go,system,gvisor,mixed"`
 	MultiQueue                    bool                             `json:"multi_queue,omitempty"`
 	Platform                      *TunPlatformOptions              `json:"platform,omitempty"`
 	InboundOptions
-
-	Stack string `json:"stack,omitempty" schema:"omit"`
 
 	// Deprecated: removed
 	GSO bool `json:"gso,omitempty" schema:"omit"`

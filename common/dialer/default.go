@@ -60,7 +60,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 
 	var (
 		dialer                 net.Dialer
-		listenConfig           net.ListenConfig
+		listener               net.ListenConfig
 		interfaceFinder        control.InterfaceFinder
 		networkStrategy        *C.NetworkStrategy
 		defaultNetworkStrategy bool
@@ -74,23 +74,23 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	} else {
 		interfaceFinder = control.NewDefaultInterfaceFinder()
 	}
-	socketBufferFunc := control.UDPSocketBuffer(listener.UDPSocketBufferSize())
+	socketBufferFunc := control.UDPSocketBuffer(C.UDPSocketBufferSize)
 	dialer.Control = control.Append(dialer.Control, socketBufferFunc)
-	listenConfig.Control = control.Append(listenConfig.Control, socketBufferFunc)
+	listener.Control = control.Append(listener.Control, socketBufferFunc)
 	if options.BindInterface != "" {
 		if !(C.IsLinux || C.IsDarwin || C.IsWindows) {
 			return nil, E.New("`bind_interface` is only supported on Linux, macOS and Windows")
 		}
 		bindFunc := control.BindToInterface(interfaceFinder, options.BindInterface, -1)
 		dialer.Control = control.Append(dialer.Control, bindFunc)
-		listenConfig.Control = control.Append(listenConfig.Control, bindFunc)
+		listener.Control = control.Append(listener.Control, bindFunc)
 	}
 	if options.RoutingMark > 0 {
 		if !C.IsLinux {
 			return nil, E.New("`routing_mark` is only supported on Linux")
 		}
 		dialer.Control = control.Append(dialer.Control, setMarkWrapper(networkManager, uint32(options.RoutingMark), false))
-		listenConfig.Control = control.Append(listenConfig.Control, setMarkWrapper(networkManager, uint32(options.RoutingMark), false))
+		listener.Control = control.Append(listener.Control, setMarkWrapper(networkManager, uint32(options.RoutingMark), false))
 	}
 	disableDefaultBind := options.BindInterface != "" || options.Inet4BindAddress != nil || options.Inet6BindAddress != nil
 	if disableDefaultBind || options.TCPFastOpen {
@@ -104,7 +104,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		if defaultOptions.BindInterface != "" && !disableDefaultBind {
 			bindFunc := control.BindToInterface(networkManager.InterfaceFinder(), defaultOptions.BindInterface, -1)
 			dialer.Control = control.Append(dialer.Control, bindFunc)
-			listenConfig.Control = control.Append(listenConfig.Control, bindFunc)
+			listener.Control = control.Append(listener.Control, bindFunc)
 		} else if networkManager.AutoDetectInterface() && !disableDefaultBind {
 			if platformInterface != nil && platformInterface.UsePlatformNetworkInterfaces() {
 				networkStrategy = (*C.NetworkStrategy)(options.NetworkStrategy)
@@ -125,7 +125,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 				}
 				bindFunc := networkManager.ProtectFunc()
 				dialer.Control = control.Append(dialer.Control, bindFunc)
-				listenConfig.Control = control.Append(listenConfig.Control, bindFunc)
+				listener.Control = control.Append(listener.Control, bindFunc)
 			} else {
 				bindFunc := networkManager.AutoDetectInterfaceFunc()
 				dialer.Control = control.Append(dialer.Control, bindFunc)
@@ -134,21 +134,21 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		}
 		if options.RoutingMark == 0 && defaultOptions.RoutingMark != 0 {
 			dialer.Control = control.Append(dialer.Control, setMarkWrapper(networkManager, defaultOptions.RoutingMark, true))
-			listenConfig.Control = control.Append(listenConfig.Control, setMarkWrapper(networkManager, defaultOptions.RoutingMark, true))
+			listener.Control = control.Append(listener.Control, setMarkWrapper(networkManager, defaultOptions.RoutingMark, true))
 		}
 	}
 	if networkManager != nil {
 		markFunc := networkManager.AutoRedirectOutputMarkFunc()
 		dialer.Control = control.Append(dialer.Control, markFunc)
-		listenConfig.Control = control.Append(listenConfig.Control, markFunc)
-		dialer.Control, listenConfig.Control = appendEBPFSelfBypass(networkManager, dialer.Control, listenConfig.Control)
+		listener.Control = control.Append(listener.Control, markFunc)
+		dialer.Control, listener.Control = appendEBPFSelfBypass(networkManager, dialer.Control, listener.Control)
 	}
 	if options.ReuseAddr {
-		listenConfig.Control = control.Append(listenConfig.Control, control.ReuseAddr())
+		listener.Control = control.Append(listener.Control, control.ReuseAddr())
 	}
 	if options.ProtectPath != "" {
 		dialer.Control = control.Append(dialer.Control, control.ProtectPath(options.ProtectPath))
-		listenConfig.Control = control.Append(listenConfig.Control, control.ProtectPath(options.ProtectPath))
+		listener.Control = control.Append(listener.Control, control.ProtectPath(options.ProtectPath))
 	}
 	if options.BindAddressNoPort {
 		if !C.IsLinux {
@@ -180,10 +180,12 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		if keepInterval == 0 {
 			keepInterval = C.TCPKeepAliveInterval
 		}
+		keepCount := max(options.TCPKeepAliveCount, 0)
 		dialer.KeepAliveConfig = net.KeepAliveConfig{
 			Enable:   true,
 			Idle:     keepIdle,
 			Interval: keepInterval,
+			Count:    keepCount,
 		}
 	}
 	var udpFragment bool
@@ -194,7 +196,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	}
 	if !udpFragment {
 		dialer.Control = control.Append(dialer.Control, control.DisableUDPFragment())
-		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
+		listener.Control = control.Append(listener.Control, control.DisableUDPFragment())
 	}
 	var (
 		dialer4    = dialer
@@ -234,7 +236,7 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		dialer6:                tcpDialer6,
 		udpDialer4:             udpDialer4,
 		udpDialer6:             udpDialer6,
-		udpListener:            listenConfig,
+		udpListener:            listener,
 		udpAddr4:               udpAddr4,
 		udpAddr6:               udpAddr6,
 		netns:                  options.NetNs,

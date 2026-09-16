@@ -3,154 +3,79 @@
 package ebpf
 
 import (
-	"errors"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 )
 
-func TestProcessInfoCacheLifetime(t *testing.T) {
+// TestProcessInfoCacheShardDistribution guards the shard index: a poor spread
+// would funnel unrelated processes into one shard and reintroduce the
+// contention the cache exists to avoid.
+func TestProcessInfoCacheShardDistribution(t *testing.T) {
 	cache := newProcessInfoCache()
-	now := time.Unix(100, 0)
-	key := processInfoCacheKey{processID: 42, userID: 1000}
-	info := &adapter.ConnectionOwner{ProcessID: 42, UserId: 1000, ProcessPaths: []string{"/bin/client"}, PackageNames: []string{"client"}}
-	cache.store(key, info, nil, now)
-
-	loaded, err, ok := cache.load(key, now.Add(processInfoCacheLifetime/2))
-	if !ok || err != nil || loaded != info {
-		t.Fatalf("cache load = (%v, %v, %t), want stored process info", loaded, err, ok)
+	counts := make([]int, processInfoCacheShardCount)
+	for processID := uint32(1); processID <= 4096; processID++ {
+		index := cache.shardIndex(processInfoCacheKey{processID: processID, userID: 10000 + processID%5})
+		if index >= processInfoCacheShardCount {
+			t.Fatalf("shard index %d out of range for pid %d", index, processID)
+		}
+		counts[index]++
 	}
-	if _, _, ok = cache.load(key, now.Add(processInfoCacheLifetime)); ok {
-		t.Fatal("expired process info remained cached")
+	least := counts[0]
+	for _, count := range counts {
+		if count < least {
+			least = count
+		}
+	}
+	// A perfect spread is 256 per shard; require every shard to get the bulk of
+	// that so a regression toward a degenerate index is caught.
+	if least < 200 {
+		t.Fatalf("shard distribution too uneven: min=%d counts=%v", least, counts)
 	}
 }
 
-func TestProcessInfoCacheReusesFailedLookup(t *testing.T) {
+// TestProcessInfoCacheEvictsExpired verifies that a full shard reclaims entries
+// whose TTL has passed rather than dropping live ones.
+func TestProcessInfoCacheEvictsExpired(t *testing.T) {
 	cache := newProcessInfoCache()
-	key := processInfoCacheKey{processID: 42, userID: 1000}
-	info := &adapter.ConnectionOwner{ProcessID: 42, UserId: 1000}
-	wantErr := errors.New("process exited")
-	var lookupCount int
-	resolve := func() (*adapter.ConnectionOwner, error) {
-		lookupCount++
-		return info, wantErr
-	}
+	shard := &cache.shards[0]
+	now := time.Now()
 
-	firstInfo, firstErr, firstResolved := cache.loadOrResolve(key, resolve)
-	secondInfo, secondErr, secondResolved := cache.loadOrResolve(key, resolve)
-	if firstInfo != info || !errors.Is(firstErr, wantErr) || !firstResolved {
-		t.Fatalf("first lookup = (%v, %v, %t), want resolved failure", firstInfo, firstErr, firstResolved)
+	liveKey := processInfoCacheKey{processID: 4242, userID: 10123}
+	shard.entries[liveKey] = processInfoCacheEntry{
+		owner:   &adapter.ConnectionOwner{ProcessID: 4242},
+		expires: now.Add(time.Minute),
 	}
-	if secondInfo != info || !errors.Is(secondErr, wantErr) || secondResolved {
-		t.Fatalf("second lookup = (%v, %v, %t), want cached failure", secondInfo, secondErr, secondResolved)
+	for index := 0; index < processInfoCacheShardSize-1; index++ {
+		shard.entries[processInfoCacheKey{processID: uint32(9000 + index), userID: 1000}] = processInfoCacheEntry{
+			owner:   &adapter.ConnectionOwner{},
+			expires: now.Add(-time.Second),
+		}
 	}
-	if lookupCount != 1 {
-		t.Fatalf("process resolver called %d times, want 1", lookupCount)
+	shard.evictExpiredLocked(now)
+
+	if len(shard.entries) != 1 {
+		t.Fatalf("expected only the live entry to survive, got %d entries", len(shard.entries))
+	}
+	if _, loaded := shard.entries[liveKey]; !loaded {
+		t.Fatal("live entry was evicted")
 	}
 }
 
-func TestProcessInfoNegativeCacheLifetime(t *testing.T) {
+// TestProcessInfoCacheKeySeparatesUsers guards the pid-reuse defense: the same
+// pid under two uids must not collide.
+func TestProcessInfoCacheKeySeparatesUsers(t *testing.T) {
 	cache := newProcessInfoCache()
-	now := time.Unix(100, 0)
-	key := processInfoCacheKey{processID: 42, userID: 1000}
-	info := &adapter.ConnectionOwner{ProcessID: 42, UserId: 1000}
-	wantErr := errors.New("process exited")
-	cache.store(key, info, wantErr, now)
-
-	loaded, err, ok := cache.load(key, now.Add(processInfoNegativeCacheLifetime/2))
-	if !ok || !errors.Is(err, wantErr) || loaded != info {
-		t.Fatalf("negative cache load = (%v, %v, %t), want stored partial process info and error", loaded, err, ok)
+	first := processInfoCacheKey{processID: 777, userID: 10001}
+	second := processInfoCacheKey{processID: 777, userID: 10002}
+	if first == second {
+		t.Fatal("keys with different user ids compare equal")
 	}
-	if _, _, ok = cache.load(key, now.Add(processInfoNegativeCacheLifetime)); ok {
-		t.Fatal("expired negative process info remained cached")
-	}
-}
-
-func TestProcessInfoCacheIsBounded(t *testing.T) {
-	cache := newProcessInfoCache()
-	now := time.Unix(100, 0)
-	info := &adapter.ConnectionOwner{ProcessPaths: []string{"/bin/client"}}
-	for processID := uint32(0); processID < processInfoCacheCapacity+32; processID++ {
-		cache.store(processInfoCacheKey{processID: processID}, info, nil, now)
-	}
-	cache.access.Lock()
-	size := len(cache.entries)
-	cache.access.Unlock()
-	if size > processInfoCacheCapacity {
-		t.Fatalf("cache size = %d, want <= %d", size, processInfoCacheCapacity)
-	}
-}
-
-func TestProcessInfoCacheCombinesConcurrentMisses(t *testing.T) {
-	const callers = 32
-	cache := newProcessInfoCache()
-	key := processInfoCacheKey{processID: 42, userID: 1000}
-	info := &adapter.ConnectionOwner{ProcessID: 42, UserId: 1000, ProcessPaths: []string{"/bin/client"}}
-	lookupStarted := make(chan struct{})
-	releaseLookup := make(chan struct{})
-	var lookupCount atomic.Int32
-	resolve := func() (*adapter.ConnectionOwner, error) {
-		if lookupCount.Add(1) == 1 {
-			close(lookupStarted)
-		}
-		<-releaseLookup
-		return info, nil
-	}
-
-	start := make(chan struct{})
-	results := make(chan *adapter.ConnectionOwner, callers)
-	resolved := make(chan bool, callers)
-	var ready sync.WaitGroup
-	ready.Add(callers)
-	for range callers {
-		go func() {
-			ready.Done()
-			<-start
-			result, err, performed := cache.loadOrResolve(key, resolve)
-			if err != nil {
-				t.Errorf("loadOrResolve: %v", err)
-			}
-			results <- result
-			resolved <- performed
-		}()
-	}
-	ready.Wait()
-	close(start)
-	<-lookupStarted
-
-	deadline := time.Now().Add(time.Second)
-	for {
-		cache.access.Lock()
-		lookup := cache.inFlight[key]
-		allJoined := lookup != nil && lookup.waiters == callers-1
-		cache.access.Unlock()
-		if allJoined {
-			break
-		}
-		if time.Now().After(deadline) {
-			close(releaseLookup)
-			t.Fatal("concurrent process lookups did not join the in-flight lookup")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	close(releaseLookup)
-
-	performedCount := 0
-	for range callers {
-		if result := <-results; result != info {
-			t.Fatalf("resolved process info = %v, want shared result", result)
-		}
-		if <-resolved {
-			performedCount++
-		}
-	}
-	if count := lookupCount.Load(); count != 1 {
-		t.Fatalf("process resolver called %d times, want 1", count)
-	}
-	if performedCount != 1 {
-		t.Fatalf("performed result reported %d times, want 1", performedCount)
+	shard := &cache.shards[0]
+	shard.entries[first] = processInfoCacheEntry{owner: &adapter.ConnectionOwner{UserId: 10001}, expires: time.Now().Add(time.Minute)}
+	shard.entries[second] = processInfoCacheEntry{owner: &adapter.ConnectionOwner{UserId: 10002}, expires: time.Now().Add(time.Minute)}
+	if len(shard.entries) != 2 {
+		t.Fatalf("expected two distinct entries, got %d", len(shard.entries))
 	}
 }

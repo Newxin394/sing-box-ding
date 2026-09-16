@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	"github.com/sagernet/sing-box/log"
 
 	"github.com/spf13/cobra"
@@ -18,8 +18,6 @@ var (
 	commandEBPFStatusShared     string
 	commandEBPFStatusNetwork    []string
 	commandEBPFStatusInterface  string
-	commandEBPFStatusLocalIface string
-	commandEBPFStatusCgroupPath string
 	commandEBPFStatusIPv6       bool
 	commandEBPFStatusJSON       bool
 	commandEBPFStatusFakeIPICMP bool
@@ -48,8 +46,6 @@ func init() {
 	commandEBPFStatus.Flags().StringVar(&commandEBPFStatusShared, "shared-data-plane", "", "Shared data plane: socket_assign or packet_rewrite (empty uses --mode)")
 	commandEBPFStatus.Flags().StringSliceVar(&commandEBPFStatusNetwork, "network", []string{"tcp", "udp"}, "Protocols to inspect: tcp, udp, or tcp,udp")
 	commandEBPFStatus.Flags().StringVar(&commandEBPFStatusInterface, "interface", "", "Configured shared interface")
-	commandEBPFStatus.Flags().StringVar(&commandEBPFStatusLocalIface, "local-interface", "", "Interface to inspect for local TC (read-only)")
-	commandEBPFStatus.Flags().StringVar(&commandEBPFStatusCgroupPath, "cgroup-path", "", "Cgroup v2 path to inspect for local cgroup (empty uses the current process cgroup)")
 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusIPv6, "ipv6", true, "Inspect IPv6 support for the selected data path")
 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusJSON, "json", false, "Write the report as JSON")
 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusFakeIPICMP, "fakeip-icmp", false, "Also inspect fakeip_icmp=reply support")
@@ -70,19 +66,13 @@ func runEBPFStatus() error {
 		SharedDataPlane:     commonEBPF.KernelProbeDataPlane(commandEBPFStatusShared),
 		Network:             commandEBPFStatusNetwork,
 		InterfaceNames:      interfaceNames,
-		LocalInterface:      commandEBPFStatusLocalIface,
-		CgroupPath:          commandEBPFStatusCgroupPath,
 		EnableIPv6:          commandEBPFStatusIPv6,
-		ICMPEchoReply:       commandEBPFStatusFakeIPICMP,
+		FakeIPICMPReply:     commandEBPFStatusFakeIPICMP,
 		NeedProcessTracking: commandEBPFStatusProcess,
-		VerifyObjectLoad:    true,
 	})
 	if err != nil {
 		return err
 	}
-	// Occupancy is intentionally collected only for this explicit status
-	// command; no runtime worker or watchdog performs this scan.
-	report.MapOccupancy = commonEBPF.InspectMapOccupancy()
 	if commandEBPFStatusJSON {
 		err = commonEBPF.WriteKernelProbeReportJSON(os.Stdout, report)
 	} else {

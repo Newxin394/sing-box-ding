@@ -3,6 +3,8 @@
 package httpclient
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -96,4 +98,37 @@ func TestHTTP3BrokenEmptyAuthorityNoOp(t *testing.T) {
 		t.Fatal("h3Broken must return false for empty authority")
 	}
 	transport.clearH3Broken("")
+}
+
+func TestHTTP3BrokenCacheIsBounded(t *testing.T) {
+	now := time.Now()
+	transport := &http3FallbackTransport{
+		broken: map[string]http3BrokenEntry{
+			"old.example:443": {until: now.Add(5 * time.Minute), backoff: 5 * time.Minute},
+			"new.example:443": {until: now.Add(10 * time.Minute), backoff: 5 * time.Minute},
+		},
+		maxBroken: 2,
+	}
+	transport.markH3Broken("latest.example:443")
+	if len(transport.broken) != 2 {
+		t.Fatalf("broken authority cache must remain bounded, got %d entries", len(transport.broken))
+	}
+	if _, found := transport.broken["old.example:443"]; found {
+		t.Fatal("oldest broken authority must be evicted when cache is full")
+	}
+	if _, found := transport.broken["latest.example:443"]; !found {
+		t.Fatal("new broken authority must be retained")
+	}
+}
+
+func TestShouldMarkH3Broken(t *testing.T) {
+	if shouldMarkH3Broken(context.Canceled) {
+		t.Fatal("caller cancellation must not poison H3 state")
+	}
+	if shouldMarkH3Broken(context.DeadlineExceeded) {
+		t.Fatal("caller deadline must not poison H3 state")
+	}
+	if !shouldMarkH3Broken(errors.New("network failure")) {
+		t.Fatal("transport failure must mark H3 state")
+	}
 }

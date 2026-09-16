@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/netlink"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -199,13 +201,16 @@ const (
 	tcRetryMaximumDelay = time.Minute
 )
 
-// tcDriftCheckInterval is the low-frequency health-check interval used while a
-// TC or shared packet-rewrite data plane is active. Those attachments and their
-// routing state can be removed without a network event. A healthy check stays
-// read-only; detected drift falls through to full reconciliation. A pure
-// cgroup data plane has no such TC state, so it keeps event-driven updates and
-// retry timers but passes a disabled interval to the loop below.
-var tcDriftCheckInterval = 10 * time.Minute
+// tcHealthCheckInterval is the low-frequency, unconditional recheck this loop
+// also performs, independent of any outstanding recovery: a reconcile pass
+// that finds nothing has drifted is cheap, and this is what catches drift no
+// event ever fires for (an attachment health check failing on its own
+// between network changes is exactly this case). It is a plain, real ticker
+// rather than something folded into the retry timer's arm/disarm bookkeeping
+// below, so it neither participates in nor disturbs the backoff any
+// component is or is not currently in. A var, not a const, so a test can
+// substitute a short interval instead of waiting on the real one.
+var tcHealthCheckInterval = 10 * time.Minute
 
 // tcSharedRewriteOutcome is what one named component of an interface update
 // reported.
@@ -264,9 +269,9 @@ func (c tcRetryComponent) String() string {
 // already satisfied before general TC and bypass_rule_set failures were also
 // covered by this scheduler.
 //
-//   - sharedRewrite: the shared packet-rewrite attach step specifically. The
-//     adapter classifies the runtime's backend health into this scheduler's
-//     recoverable/unrecoverable states.
+//   - sharedRewrite: the shared packet-rewrite attach step specifically (see
+//     tcSharedRewriteOutcome's own history; sharedRewriteDataPlane.retryOutcome
+//     is this field's classifier).
 //   - general: every other TC step in updateTCInterfaces -- inventory,
 //     topology, infrastructure (routing/rules/delivery veth), the attachment
 //     reconcile itself, and host address policy. These are combined into one
@@ -334,21 +339,11 @@ func (t *tcRealRetryTimer) Expired() <-chan time.Time { return t.timer.C }
 var tcRetryTimerFactory = newTCRetryTimer
 
 func (i *Inbound) runTCInterfaceUpdates(ctx context.Context, updates <-chan struct{}) {
-	runTCInterfaceUpdateLoopWithHealth(ctx, updates, i.interfaceDriftCheckInterval(), i.tcInterfaceHealthCheck, func(ctx context.Context) tcUpdateOutcome {
+	runTCInterfaceUpdateLoop(ctx, updates, func(ctx context.Context) tcUpdateOutcome {
 		outcome := i.updateTCInterfaces(ctx)
 		i.recordTCUpdateOutcome(outcome)
 		return outcome
 	}, i.recordNextRetryDeadline)
-}
-
-func (i *Inbound) interfaceDriftCheckInterval() time.Duration {
-	i.tcDataPlaneAccess.RLock()
-	hasTCDataPlane := i.tcDataPlane != nil
-	i.tcDataPlaneAccess.RUnlock()
-	if hasTCDataPlane || i.sharedRewriteInstance() != nil {
-		return tcDriftCheckInterval
-	}
-	return 0
 }
 
 // tcRetryState is one component's independently-tracked backoff: delay is
@@ -364,15 +359,13 @@ type tcRetryState struct {
 }
 
 // runTCInterfaceUpdateLoop drives interface updates from netlink
-// notifications, from an optional low-frequency drift check,
-// and, while any of update's three components has a recoverable failure
-// outstanding, from that component's own backoff timer. A non-positive
-// driftCheckInterval disables only the periodic health check; events and
-// recovery timers remain active.
+// notifications, from a low-frequency unconditional health check
+// (tcHealthCheckInterval), and, while any of update's three components has a
+// recoverable failure outstanding, from that component's own backoff timer.
 //
 // Only one physical timer exists; it is armed for whichever component's
-// deadline is soonest. A netlink notification or a failed health check still
-// runs an update immediately, but neither resets any component's backoff: this
+// deadline is soonest. A netlink notification or the health check still runs
+// an update immediately, but neither resets any component's backoff: this
 // data plane generates netlink events of its own while attaching and
 // detaching, and an unrelated event on another interface arrives just as
 // often, so treating any event as progress would keep restarting the delay
@@ -387,32 +380,13 @@ type tcRetryState struct {
 func runTCInterfaceUpdateLoop(
 	ctx context.Context,
 	updates <-chan struct{},
-	driftCheckInterval time.Duration,
-	update func(context.Context) tcUpdateOutcome,
-	onScheduleChange func(deadline time.Time),
-) {
-	runTCInterfaceUpdateLoopWithHealth(ctx, updates, driftCheckInterval, nil, update, onScheduleChange)
-}
-
-func runTCInterfaceUpdateLoopWithHealth(
-	ctx context.Context,
-	updates <-chan struct{},
-	driftCheckInterval time.Duration,
-	healthCheck func(context.Context) bool,
 	update func(context.Context) tcUpdateOutcome,
 	onScheduleChange func(deadline time.Time),
 ) {
 	retryTimer := tcRetryTimerFactory()
 	defer retryTimer.Disarm()
-	var (
-		driftCheck        *time.Ticker
-		driftCheckChannel <-chan time.Time
-	)
-	if driftCheckInterval > 0 {
-		driftCheck = time.NewTicker(driftCheckInterval)
-		driftCheckChannel = driftCheck.C
-		defer driftCheck.Stop()
-	}
+	healthCheck := time.NewTicker(tcHealthCheckInterval)
+	defer healthCheck.Stop()
 	var (
 		retryChannel <-chan time.Time
 		states       [tcRetryComponentCount]tcRetryState
@@ -422,13 +396,11 @@ func runTCInterfaceUpdateLoopWithHealth(
 		// recovery outstanding, so a disarmed timer cannot deliver a signal
 		// from an earlier delay.
 		triggeredByTimer := false
-		triggeredByHealthCheck := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-updates:
-		case <-driftCheckChannel:
-			triggeredByHealthCheck = true
+		case <-healthCheck.C:
 		case <-retryChannel:
 			triggeredByTimer = true
 		}
@@ -442,9 +414,6 @@ func runTCInterfaceUpdateLoopWithHealth(
 		// schedule independently of anything below.
 		if ctx.Err() != nil {
 			return
-		}
-		if triggeredByHealthCheck && healthCheck != nil && healthCheck(ctx) {
-			continue
 		}
 		now := time.Now()
 		outcome := update(ctx)
@@ -526,54 +495,6 @@ func runTCInterfaceUpdateLoopWithHealth(
 	}
 }
 
-// tcInterfaceHealthCheck is the cheap, read-only watchdog stage. It uses the
-// monitor's cached topology and the runtimes' already-owned resource list; it
-// deliberately avoids UpdateInterfaces, map refreshes, flow purges and any
-// netlink/sysctl mutation. A false result immediately falls through to the
-// existing full reconciliation path.
-func (i *Inbound) tcInterfaceHealthCheck(ctx context.Context) bool {
-	if ctx.Err() != nil {
-		return true
-	}
-	i.lifecycleAccess.Lock()
-	defer i.lifecycleAccess.Unlock()
-	if ctx.Err() != nil {
-		return true
-	}
-	defaultInterface := i.monitoredDefaultInterfaceName()
-	localInterface, err := availableLocalTCInterface(i.localTCEnabled(), defaultInterface)
-	if err != nil {
-		return false
-	}
-	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface)
-	tcSharedInterfaces := sharedInterfaces
-	if i.sharedRewriteEnabled() {
-		tcSharedInterfaces = nil
-	}
-	hostAddresses := i.hostAddresses()
-
-	i.tcDataPlaneAccess.RLock()
-	dataPlane := i.tcDataPlane
-	if dataPlane != nil {
-		healthy, checkErr := dataPlane.HealthCheck(localInterface, tcSharedInterfaces, hostAddresses)
-		if checkErr != nil || !healthy {
-			i.tcDataPlaneAccess.RUnlock()
-			return false
-		}
-	}
-	i.tcDataPlaneAccess.RUnlock()
-
-	if shared := i.sharedRewriteInstance(); shared != nil {
-		if dataPlane := shared.dataPlaneInstance(); dataPlane != nil {
-			healthy, checkErr := dataPlane.HealthCheck(sharedInterfaces, hostAddresses)
-			if checkErr != nil || !healthy {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func nextTCRetryDelay(current time.Duration) time.Duration {
 	if current <= 0 {
 		return tcRetryInitialDelay
@@ -611,6 +532,21 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 		outcome.general = tcSharedRewriteRecoverable
 	}
 	defaultInterface := i.monitoredDefaultInterfaceName()
+	if i.preMatch {
+		controller := i.preMatchController
+		if controller == nil {
+			return
+		}
+		if err := controller.ensureRouting(); err != nil {
+			i.interfaceWarnings.infrastructure.warn(i.logger, "repair eBPF pre-match policy routing: ", err)
+		}
+		i.updatePreMatchHostAddresses()
+		sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, false)
+		if err := controller.updateShared(sharedInterfaces); err != nil {
+			i.interfaceWarnings.reconcile.warn(i.logger, "refresh eBPF pre-match shared interfaces: ", err)
+		}
+		return
+	}
 	localTCEnabled := i.localTCEnabled()
 	localInterface, err := availableLocalTCInterface(localTCEnabled, defaultInterface)
 	if err != nil {
@@ -621,43 +557,25 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 	if localTCEnabled && localInterface == "" {
 		i.interfaceWarnings.defaultInterface.warn(i.logger, "default interface unavailable; retaining previous local TC attachment")
 	}
-	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface)
+	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, i.localEnabled)
 	tcSharedInterfaces := sharedInterfaces
 	if i.sharedRewriteEnabled() {
 		tcSharedInterfaces = nil
 	}
 	hostAddresses := i.hostAddresses()
-	networkChanged := i.networkStateChanged(defaultInterface, hostAddresses, tcSharedInterfaces)
-	if networkChanged {
-		i.udpNat.Purge()
-		if err = i.udpReplySockets.reset(); err != nil {
-			i.interfaceWarnings.reconcile.warn(i.logger, "reset TC eBPF UDP reply sockets after network change: ", err)
-			outcome.general = tcSharedRewriteRecoverable
-		}
-		if backend := i.cgroupBackendInstance(); backend != nil {
-			if err = backend.ResetNetworkState(); err != nil {
-				i.interfaceWarnings.reconcile.warn(i.logger, "reset cgroup eBPF network state after network change: ", err)
-				outcome.general = tcSharedRewriteRecoverable
-			}
-		}
-	}
-	var sharedDataPlane sharedKernelRuntime
+	sharedDataPlane := (*sharedRewriteDataPlane)(nil)
 	if shared := i.sharedRewriteInstance(); shared != nil {
 		sharedDataPlane = shared.dataPlaneInstance()
 	}
 	if sharedDataPlane != nil {
-		previous := sharedDataPlane.AttachmentDescriptions()
-		if err = sharedDataPlane.Reconcile(sharedInterfaces, hostAddresses); err != nil {
+		previous := sharedDataPlane.attachmentDescriptions()
+		if err = sharedDataPlane.reconcile(sharedInterfaces, hostAddresses); err != nil {
 			i.counters.sharedReconcileFailures.Add(1)
 			i.interfaceWarnings.reconcile.warn(i.logger, "refresh shared packet-rewrite interfaces: ", err)
-			if sharedDataPlane.BackendClosed() || sharedDataPlane.RequiresRebuild() {
-				outcome.sharedRewrite = tcSharedRewriteUnrecoverable
-			} else {
-				outcome.sharedRewrite = tcSharedRewriteRecoverable
-			}
+			outcome.sharedRewrite = sharedDataPlane.retryOutcome()
 		} else {
 			outcome.sharedRewrite = tcSharedRewriteSettled
-			if attachments := sharedDataPlane.AttachmentDescriptions(); !slices.Equal(previous, attachments) {
+			if attachments := sharedDataPlane.attachmentDescriptions(); !slices.Equal(previous, attachments) {
 				i.logger.Debug("eBPF shared packet-rewrite attachments updated: attachments=[", strings.Join(attachments, ", "), "]")
 			}
 		}
@@ -694,12 +612,10 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 		return
 	}
 	previousAttachments := i.tcAttachmentDescriptions()
-	if !networkChanged {
-		i.udpNat.Purge()
-		if err = i.udpReplySockets.reset(); err != nil {
-			i.interfaceWarnings.reconcile.warn(i.logger, "reset TC eBPF UDP reply sockets: ", err)
-			outcome.general = tcSharedRewriteRecoverable
-		}
+	i.udpNat.Purge()
+	if err = i.udpReplySockets.reset(); err != nil {
+		i.interfaceWarnings.reconcile.warn(i.logger, "reset TC eBPF UDP reply sockets: ", err)
+		outcome.general = tcSharedRewriteRecoverable
 	}
 	if err = i.reconcileTCDataPlane(localInterface, tcSharedInterfaces, hostAddresses); err != nil {
 		i.interfaceWarnings.reconcile.warn(i.logger, "refresh TC eBPF interfaces: ", err)
@@ -725,18 +641,195 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 	return outcome
 }
 
-func (i *Inbound) networkStateChanged(
-	defaultInterface string,
-	hostAddresses []netip.Addr,
+func (i *Inbound) repairTCInfrastructure() (bool, error) {
+	i.tcDataPlaneAccess.RLock()
+	defer i.tcDataPlaneAccess.RUnlock()
+	if i.tcDataPlane == nil {
+		return false, nil
+	}
+	return i.tcDataPlane.repairInfrastructure()
+}
+
+func (i *Inbound) monitoredDefaultInterfaceName() string {
+	state := &i.interfaceMonitor
+	state.access.Lock()
+	defer state.access.Unlock()
+	return state.defaultInterfaceName
+}
+
+func availableLocalTCInterface(enabled bool, interfaceName string) (string, error) {
+	if !enabled || interfaceName == "" {
+		return "", nil
+	}
+	_, err := netlink.LinkByName(interfaceName)
+	if err != nil && tcLinkNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", E.Cause(err, "find local TC eBPF interface ", interfaceName)
+	}
+	return interfaceName, nil
+}
+
+func activeSharedInterfaces(configured []string, defaultInterface string, localEnabled bool) []string {
+	if !localEnabled {
+		return slices.Clone(configured)
+	}
+	return slices.DeleteFunc(slices.Clone(configured), func(interfaceName string) bool {
+		return interfaceName == defaultInterface
+	})
+}
+
+func (i *Inbound) tcAttachmentStateChanged(localInterface string, sharedInterfaces []string) (bool, error) {
+	i.tcDataPlaneAccess.RLock()
+	defer i.tcDataPlaneAccess.RUnlock()
+	if i.tcDataPlane == nil {
+		return false, nil
+	}
+	return i.tcDataPlane.attachmentStateChanged(localInterface, sharedInterfaces)
+}
+
+func (i *Inbound) tcAttachmentDescriptions() []string {
+	i.tcDataPlaneAccess.RLock()
+	defer i.tcDataPlaneAccess.RUnlock()
+	if i.tcDataPlane == nil {
+		return nil
+	}
+	return i.tcDataPlane.attachmentDescriptions()
+}
+
+func (i *Inbound) updateTCHostAddresses(hostAddresses []netip.Addr) error {
+	i.tcDataPlaneAccess.RLock()
+	defer i.tcDataPlaneAccess.RUnlock()
+	if i.tcDataPlane == nil {
+		return nil
+	}
+	return i.tcDataPlane.updateHostAddresses(hostAddresses)
+}
+
+func (i *Inbound) updateCgroupHostAddresses(hostAddresses []netip.Addr) error {
+	backend := i.cgroupBackendInstance()
+	if backend == nil {
+		return nil
+	}
+	return backend.UpdateHostAddresses(hostAddresses)
+}
+
+func (i *Inbound) hostAddresses() []netip.Addr {
+	return collectHostAddresses(i.networkManager.InterfaceFinder().Interfaces())
+}
+
+func collectHostAddresses(interfaces []control.Interface) []netip.Addr {
+	var addresses []netip.Addr
+	for _, networkInterface := range interfaces {
+		for _, prefix := range networkInterface.Addresses {
+			if !prefix.IsValid() {
+				continue
+			}
+			address := prefix.Addr().Unmap()
+			if address.IsUnspecified() || address.IsLoopback() {
+				continue
+			}
+			addresses = append(addresses, address)
+		}
+	}
+	slices.SortFunc(addresses, func(left, right netip.Addr) int {
+		return left.Compare(right)
+	})
+	addresses = slices.Compact(addresses)
+	return addresses
+}
+
+func (d *tcDataPlane) attachmentStateChanged(localInterface string, sharedInterfaces []string) (bool, error) {
+	d.access.Lock()
+	defer d.access.Unlock()
+	desired, err := d.desiredAttachmentState(localInterface, sharedInterfaces)
+	if err != nil {
+		return false, err
+	}
+	if tcAttachmentTopologyChanged(d.attachments, desired) {
+		return true, nil
+	}
+	for _, attachment := range d.attachments {
+		if localInterface == "" && attachment.role.local {
+			if _, err = netlink.LinkByName(attachment.interfaceName); tcLinkNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return false, err
+			}
+			// During a mobile-network handoff the default-interface monitor can
+			// briefly report no interface while the old link and its TC filters
+			// are still usable. Avoid treating a transient netlink observation as
+			// a filter loss and repeatedly tearing down the active attachment.
+			continue
+		}
+		attached, err := attachment.filtersAttached(d.priority, d.backend)
+		if err != nil {
+			return false, err
+		}
+		if !attached {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type tcAttachmentState struct {
+	index   int
+	framing commonEBPF.TCLinkFraming
+	role    tcInterfaceRole
+}
+
+func desiredTCAttachmentState(
+	localInterface string,
 	sharedInterfaces []string,
-) bool {
-	changed := i.networkStateInitialized &&
-		(i.networkStateDefault != defaultInterface ||
-			!slices.Equal(i.networkStateAddresses, hostAddresses) ||
-			!slices.Equal(i.networkStateInterfaces, sharedInterfaces))
-	i.networkStateInitialized = true
-	i.networkStateDefault = defaultInterface
-	i.networkStateAddresses = slices.Clone(hostAddresses)
-	i.networkStateInterfaces = slices.Clone(sharedInterfaces)
-	return changed
+	linkByName func(string) (netlink.Link, error),
+) (map[string]tcAttachmentState, error) {
+	roles := make(map[string]tcInterfaceRole, len(sharedInterfaces)+1)
+	if localInterface != "" {
+		roles[localInterface] = tcInterfaceRole{local: true}
+	}
+	for _, interfaceName := range sharedInterfaces {
+		role := roles[interfaceName]
+		role.shared = true
+		roles[interfaceName] = role
+	}
+	interfaces := make(map[string]tcAttachmentState, len(roles))
+	for interfaceName, role := range roles {
+		link, err := linkByName(interfaceName)
+		if err != nil && tcLinkNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, E.Cause(err, "find TC eBPF interface ", interfaceName)
+		}
+		if link == nil || link.Attrs() == nil {
+			return nil, E.New("invalid TC eBPF interface ", interfaceName)
+		}
+		framing, err := tcLinkFraming(link)
+		if err != nil {
+			return nil, err
+		}
+		interfaces[interfaceName] = tcAttachmentState{
+			index:   link.Attrs().Index,
+			framing: framing,
+			role:    role,
+		}
+	}
+	return interfaces, nil
+}
+
+func tcAttachmentTopologyChanged(attachments []*tcInterfaceAttachment, desired map[string]tcAttachmentState) bool {
+	if len(attachments) != len(desired) {
+		return true
+	}
+	for _, attachment := range attachments {
+		state, loaded := desired[attachment.interfaceName]
+		if !loaded || state.index != attachment.interfaceIndex ||
+			state.framing != attachment.framing || state.role != attachment.role {
+			return true
+		}
+	}
+	return false
 }

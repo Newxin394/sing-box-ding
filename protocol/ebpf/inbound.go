@@ -7,17 +7,20 @@ import (
 	"net/netip"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
+	udpnat "github.com/sagernet/sing/common/udpnat2"
 	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 )
@@ -46,13 +49,6 @@ type fakeIPRangeProvider interface {
 	FakeIPRanges() (netip.Prefix, netip.Prefix)
 }
 
-type processTrackerOwner interface {
-	LookupOwner(socketCookie uint64) (commonEBPF.ProcessSocketOwner, error)
-	ReleaseCleanup() bool
-	IsClosed() bool
-	Close() error
-}
-
 func RegisterInbound(registry *inbound.Registry) {
 	inbound.Register[option.EBPFInboundOptions](registry, C.TypeEBPF, NewInbound)
 }
@@ -67,18 +63,17 @@ type Inbound struct {
 	localDataPlane           string
 	cgroupPath               string
 	cgroupBackend            *commonEBPF.CgroupBackend
-	localRoutes              *commonEBPF.LocalRouteSet
+	localRoutes              []*localRoute
 	redirectIPv4Prefix       netip.Prefix
 	redirectIPv6Prefix       netip.Prefix
 	selfBypass               *commonEBPF.SelfBypass
 	selfBypassCgroup         bool
-	processTracker           processTrackerOwner
-	processTrackerRollback   processTrackerOwner
+	processTracker           *commonEBPF.ProcessTracker
 	processInfoCache         *processInfoCache
 	usePlatformProcessFinder bool
 	listeners                internalListenerSet
-	udpNat                   *udpNATService
-	tcDataPlane              tcRuntime
+	udpNat                   *udpnat.Service
+	tcDataPlane              *tcDataPlane
 	udpTimeout               time.Duration
 	enableTCP                bool
 	enableUDP                bool
@@ -88,6 +83,7 @@ type Inbound struct {
 	localPolicy              commonEBPF.LocalPolicy
 	compiledPolicy           commonEBPF.CompiledPolicy
 	androidUIDOptions        *androidUIDOptions
+	androidUIDResolved       bool
 	sharedOptions            option.EBPFSharedOptions
 	sharedEnabled            bool
 	sharedDataPlane          string
@@ -98,20 +94,21 @@ type Inbound struct {
 	localBypassPort          []commonEBPF.PortRange
 	sharedBypassPort         []commonEBPF.PortRange
 	tcPriority               uint16
+	preMatch                 bool
+	preMatchController       *preMatchController
+	preMatchHostAccess       sync.RWMutex
+	preMatchHostAddresses    []netip.Addr
 	fakeIPIPv4Prefix         netip.Prefix
 	fakeIPIPv6Prefix         netip.Prefix
 	fakeIPICMPReply          bool
+	flowMapCapacity          commonEBPF.FlowMapCapacities
+	cgroupMapCapacity        commonEBPF.CgroupMapCapacity
 	sharedIncludeMAC         []commonEBPF.MACAddress
 	sharedExcludeMAC         []commonEBPF.MACAddress
 	tcDataPlaneAccess        sync.RWMutex
 	cgroupBackendAccess      sync.RWMutex
-	cgroupReleaseWait        sync.WaitGroup
 	lifecycleAccess          sync.Mutex
 	interfaceMonitor         tcInterfaceMonitor
-	networkStateInitialized  bool
-	networkStateDefault      string
-	networkStateAddresses    []netip.Addr
-	networkStateInterfaces   []string
 
 	bypassRuleSetAccess       sync.Mutex
 	bypassRuleSet             []adapter.RuleSet
@@ -167,6 +164,17 @@ type Inbound struct {
 	bypassRuleSetCgroup          bypassRuleSetBackendVersion
 	bypassRuleSetShared          bypassRuleSetBackendVersion
 
+	bypassSelectorOptions    *option.EBPFBypassSelectorOptions
+	bypassSelector           *group.Selector
+	bypassSelectorGuard      *list.Element[group.SelectorUpdateGuard]
+	bypassSelectorCallback   *list.Element[group.SelectorUpdateCallback]
+	bypassSelectorEvents     chan struct{}
+	bypassSelectorGeneration atomic.Uint64
+	bypassSelectorCancel     context.CancelFunc
+	bypassSelectorDone       chan struct{}
+	bypassSelectorState      bool
+	bypassSelectorStateKnown bool
+
 	udpClientTable    udpClientTable
 	udpReplySockets   udpReplySocketPool
 	udpWarnings       udpWarningLimiters
@@ -175,23 +183,20 @@ type Inbound struct {
 	interfaceWarnings interfaceWarningLimiters
 	diagnostics       tcOutcomeHistory
 	counters          ebpfCounters
-	// diagnosticsJSONCache is request-driven only. Clash API polling can be
-	// frequent, so native per-CPU counter reads are coalesced for a short
-	// window without adding a timer or background wakeup.
-	diagnosticsJSONAccess sync.Mutex
-	diagnosticsJSONAt     time.Time
-	diagnosticsJSONValue  EBPFDiagnostics
 }
 
 func (i *Inbound) localTCEnabled() bool {
 	return i.localEnabled && i.localDataPlane == localDataPlaneTC
 }
+
 func (i *Inbound) localCgroupEnabled() bool {
 	return i.localEnabled && i.localDataPlane == localDataPlaneCgroup
 }
+
 func (i *Inbound) sharedSocketAssignEnabled() bool {
 	return i.sharedEnabled && i.sharedDataPlane == sharedDataPlaneSocketAssign
 }
+
 func (i *Inbound) sharedRewriteEnabled() bool {
 	return i.sharedEnabled && i.sharedDataPlane == sharedDataPlanePacketRewrite
 }
@@ -204,6 +209,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, err
 	}
 	localEnabled, sharedEnabled := selection.localEnabled, selection.sharedEnabled
+	bypassSelectorOptions, err := normalizeBypassSelector(options.Local.BypassSelector, selection.localDataPlane, len(options.BypassRuleSet) > 0)
+	if err != nil {
+		return nil, err
+	}
 	if err = validateLocalOptions(localEnabled, options.Local); err != nil {
 		return nil, err
 	}
@@ -217,6 +226,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	fakeIPICMPReply, err := normalizeFakeIPICMP(options.FakeIPICMP)
 	if err != nil {
 		return nil, E.Cause(err, "parse fakeip_icmp")
+	}
+	flowMapCapacity, cgroupMapCapacity, err := resolveMapCapacities(options.MapCapacity)
+	if err != nil {
+		return nil, E.Cause(err, "parse map_capacity")
 	}
 	localDNSMode, err := normalizeDNSMode(options.Local.DNSMode)
 	if err != nil {
@@ -271,7 +284,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, E.New("missing network manager")
 	}
 	var selfBypass *commonEBPF.SelfBypass
-	if localEnabled {
+	if localEnabled && !options.PreMatch {
 		provider, loaded := networkManager.(interface {
 			EBPFSelfBypass() *commonEBPF.SelfBypass
 		})
@@ -283,11 +296,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 	}
 	inbound := &Inbound{
-		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
-		ctx:            ctx,
-		router:         router,
-		logger:         logger,
-		networkManager: networkManager,
+		Adapter:          inbound.NewAdapter(C.TypeEBPF, tag),
+		ctx:              ctx,
+		router:           router,
+		logger:           logger,
+		networkManager:   networkManager,
+		processInfoCache: newProcessInfoCache(),
 		usePlatformProcessFinder: func() bool {
 			platform := service.FromContext[adapter.PlatformInterface](ctx)
 			return platform != nil && platform.UsePlatformConnectionOwnerFinder()
@@ -296,7 +310,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		localDataPlane:      localDataPlane,
 		cgroupPath:          cgroupPath,
 		selfBypass:          selfBypass,
-		processInfoCache:    newProcessInfoCache(),
 		enableTCP:           enableTCP,
 		enableUDP:           enableUDP,
 		localDNSMode:        localDNSMode,
@@ -310,6 +323,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		localBypassPort:     localBypassPort,
 		sharedBypassPort:    sharedBypassPort,
 		tcPriority:          uint16(options.TCPriority),
+		preMatch:            options.PreMatch,
 		sharedIncludeMAC:    sharedIncludeMAC,
 		sharedExcludeMAC:    sharedExcludeMAC,
 		localPolicy: commonEBPF.LocalPolicy{
@@ -320,8 +334,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			IncludeUID: includeUIDRanges,
 			ExcludeUID: excludeUIDRanges,
 		},
-		androidUIDOptions: newAndroidUIDOptions(options.Local),
-		fakeIPICMPReply:   fakeIPICMPReply,
+		androidUIDOptions:     newAndroidUIDOptions(options.Local),
+		bypassSelectorOptions: bypassSelectorOptions,
+		fakeIPICMPReply:       fakeIPICMPReply,
+		flowMapCapacity:       flowMapCapacity,
+		cgroupMapCapacity:     cgroupMapCapacity,
 	}
 	if inbound.tcPriority == 0 {
 		inbound.tcPriority = defaultTCPriority
@@ -356,7 +373,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		udpTimeout = time.Duration(options.UDPTimeout)
 	}
 	inbound.udpTimeout = udpTimeout
-	inbound.udpNat = newUDPNATService(inbound, inbound.preparePacketConnection, udpTimeout)
+	inbound.udpNat = udpnat.New(inbound, inbound.preparePacketConnection, udpTimeout, false)
 	return inbound, nil
 }
 

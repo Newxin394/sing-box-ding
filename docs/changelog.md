@@ -2,42 +2,9 @@
 icon: material/alert-decagram
 ---
 
-#### 1.15.0-alpha.5
-
-* Add Tailcat support **1**
-* Fixes and improvements
-
-**1**:
-
-[Tailcat](https://github.com/tailscale/tailcat) is Tailscale's data plane without its control plane:
-point-to-point WireGuard tunnels bootstrapped through DERP, with NAT traversal.
-
-See [Tailcat Inbound](/configuration/inbound/tailcat/) and [Tailcat Outbound](/configuration/outbound/tailcat/).
-
-The DERP service can verify Tailcat clients with the new `verify_client_inbound` and `verify_client_key` options,
-see [DERP Service](/configuration/service/derp/#verify_client_inbound).
-
-#### 1.15.0-alpha.4
+#### 1.15.0-alpha.2
 
 * Fixes and improvements
-
-#### 1.14.1
-
-* Fixes and improvements
-
-#### 1.15.0-alpha.3
-
-* Significantly improve TUN performance with a new TCP/IP stack **1**
-* Fixes and improvements
-
-**1**:
-
-Since 1.15.0, sing-tun uses its own TCP/IP stack, with substantial improvements over all previous
-implementations in peak performance, energy efficiency, and memory usage.
-Remove the `stack` option to use it.
-
-The `stack` option is deprecated and will be removed in sing-box 1.17.0.
-See [Migration](/migration/#migrate-tun-stack).
 
 #### 1.15.0-alpha.1
 

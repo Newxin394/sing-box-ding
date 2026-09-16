@@ -3,79 +3,12 @@
 package ebpf
 
 import (
-	"errors"
-	"net/netip"
 	"strings"
 	"testing"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	E "github.com/sagernet/sing/common/exceptions"
 )
-
-func TestNeedsLPMPolicyUsesCompiledEntries(t *testing.T) {
-	inbound := &Inbound{
-		localEnabled:   true,
-		localDataPlane: localDataPlaneCgroup,
-		localPolicy: commonEBPF.LocalPolicy{
-			IncludeUIDConfigured: true,
-		},
-	}
-	if inbound.needsLPMPolicy() {
-		t.Fatal("an explicitly empty UID include policy does not update an LPM trie")
-	}
-
-	inbound.localPolicy.IncludeUID = []commonEBPF.UIDRange{{Start: 1000, End: 1000}}
-	if !inbound.needsLPMPolicy() {
-		t.Fatal("a compiled UID entry requires an LPM trie update")
-	}
-
-	inbound.localEnabled = false
-	inbound.localPolicy = commonEBPF.LocalPolicy{}
-	inbound.sharedEnabled = true
-	inbound.sharedDataPlane = sharedDataPlanePacketRewrite
-	inbound.sharedOptions.IncludeSourceCIDR = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
-	if !inbound.needsLPMPolicy() {
-		t.Fatal("a shared source CIDR requires an LPM trie update")
-	}
-}
-
-type retryProcessTrackerOwner struct {
-	closed   bool
-	attempts int
-}
-
-func (t *retryProcessTrackerOwner) LookupOwner(uint64) (commonEBPF.ProcessSocketOwner, error) {
-	return commonEBPF.ProcessSocketOwner{}, nil
-}
-
-func (t *retryProcessTrackerOwner) ReleaseCleanup() bool { return false }
-func (t *retryProcessTrackerOwner) IsClosed() bool       { return t.closed }
-func (t *retryProcessTrackerOwner) Close() error {
-	t.attempts++
-	if t.attempts == 1 {
-		return errors.New("injected process tracker close failure")
-	}
-	t.closed = true
-	return nil
-}
-
-func TestCloseProcessTrackerOwnerRetainsFailedCleanup(t *testing.T) {
-	tracker := &retryProcessTrackerOwner{}
-	retained, err := closeProcessTrackerOwner(tracker)
-	if err == nil {
-		t.Fatal("expected injected process tracker close failure")
-	}
-	if retained != tracker {
-		t.Fatal("process tracker owner was discarded after a failed close")
-	}
-	retained, err = closeProcessTrackerOwner(retained)
-	if err != nil {
-		t.Fatalf("retry process tracker close: %v", err)
-	}
-	if retained != nil || !tracker.closed {
-		t.Fatal("process tracker owner remained retained after cleanup succeeded")
-	}
-}
 
 // installReclaimCgroupBackendState replaces the reclaim decision for one test
 // and records what it was asked about.

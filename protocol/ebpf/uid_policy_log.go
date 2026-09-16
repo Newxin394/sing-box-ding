@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 )
 
 func formatUIDRanges(ranges []commonEBPF.UIDRange) string {

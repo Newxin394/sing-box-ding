@@ -5,7 +5,7 @@ package ebpf
 import (
 	"testing"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 )
 
 func TestUpdateSharedRewriteFlowPressure(t *testing.T) {
@@ -70,14 +70,5 @@ func TestSharedFlowWakeContinuesIncompleteScan(t *testing.T) {
 	knownPressure, sweepRequested := updateSharedFlowWakeState(false, false, true, usage)
 	if knownPressure || !sweepRequested {
 		t.Fatalf("incomplete scan wake was not scheduled: known=%v requested=%v", knownPressure, sweepRequested)
-	}
-}
-
-func TestSharedRewriteReadyIgnoresInactiveRuntime(t *testing.T) {
-	shared := &sharedRewrite{}
-	shared.setDataPlane(newSharedKernelRuntime(sharedKernelRuntimeHooks{}, 0))
-	shared.sharedRewriteReady([]string{"wlan0(tcx)"})
-	if shared.janitorCancel != nil || shared.janitorDone != nil {
-		t.Fatal("stale ready callback started the shared flow janitor")
 	}
 }

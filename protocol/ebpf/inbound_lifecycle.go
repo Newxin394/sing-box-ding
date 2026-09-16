@@ -3,27 +3,27 @@
 package ebpf
 
 import (
-	"errors"
 	"net/netip"
-	"os"
-	"runtime"
 	"strconv"
 	"strings"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
 	"github.com/sagernet/sing-box/adapter"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
 func (i *Inbound) Start(stage adapter.StartStage) error {
 	switch stage {
 	case adapter.StartStateInitialize:
+		if i.preMatch {
+			return nil
+		}
 		if i.localCgroupEnabled() || i.sharedRewriteEnabled() {
 			if err := i.selectRedirectPrefixes(); err != nil {
 				return err
 			}
 		}
-		if i.localEnabled {
+		if i.localEnabled && !i.preMatch {
 			if err := i.startSelfBypass(); err != nil {
 				i.logger.Debug("eBPF cgroup self-bypass unavailable; using socket-cookie registration: ", err)
 			}
@@ -43,6 +43,9 @@ func (i *Inbound) startInbound() error {
 	if err := i.closeTCDataPlane(); err != nil {
 		return E.Cause(err, "reclaim previous TC data plane")
 	}
+	if i.preMatch {
+		return i.startPreMatchInbound()
+	}
 	if i.localEnabled && i.androidUIDOptions != nil {
 		if err := i.resolveAndroidUIDPolicy(); err != nil {
 			return E.Cause(err, "resolve Android UID policy")
@@ -56,8 +59,8 @@ func (i *Inbound) startInbound() error {
 		Local:               policy,
 		SharedDNSMode:       toCommonDNSMode(i.sharedDNSMode),
 		SharedBypassPrivate: i.sharedBypassPrivate,
-		ForceInterceptIPv4:  i.fakeIPIPv4Prefix,
-		ForceInterceptIPv6:  i.fakeIPIPv6Prefix,
+		FakeIPIPv4:          i.fakeIPIPv4Prefix,
+		FakeIPIPv6:          i.fakeIPIPv6Prefix,
 		IncludeSourceCIDR:   i.sharedOptions.IncludeSourceCIDR,
 		ExcludeSourceCIDR:   i.sharedOptions.ExcludeSourceCIDR,
 		IncludeSourceMAC:    i.sharedIncludeMAC,
@@ -72,9 +75,7 @@ func (i *Inbound) startInbound() error {
 	if err := i.checkKernelCapabilities(); err != nil {
 		return err
 	}
-	if err := i.startProcessTracker(); err != nil {
-		return err
-	}
+	i.startProcessTracker()
 	defaultInterface := i.currentDefaultInterfaceName()
 	hostAddresses := i.hostAddresses()
 	localInterface := ""
@@ -87,7 +88,7 @@ func (i *Inbound) startInbound() error {
 			i.logger.Warn("default interface unavailable; local TC eBPF interception is paused")
 		}
 	}
-	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface)
+	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, i.localEnabled)
 	tcSharedInterfaces := []string(nil)
 	if sharedSocketAssignEnabled {
 		tcSharedInterfaces = sharedInterfaces
@@ -124,12 +125,10 @@ func (i *Inbound) startInbound() error {
 		EnableTCP:        i.enableTCP,
 		EnableUDP:        i.enableUDP,
 		Policy:           i.compiledPolicy,
-		SelfBypass:       i.selfBypass,
+		SelfBypassMap:    i.selfBypass.Map(),
 		TrackProcess:     i.processTracker != nil,
-		ICMPEchoReply:    i.fakeIPICMPReply,
-	}
-	if runtime.GOOS == "android" {
-		backendConfig.AssignmentCapacity = commonEBPF.CompactTCAssignmentCapacity
+		FakeIPICMPReply:  i.fakeIPICMPReply,
+		MapCapacity:      i.flowMapCapacity,
 	}
 	var backend *commonEBPF.TCBackend
 	if localTCEnabled || sharedSocketAssignEnabled {
@@ -137,12 +136,8 @@ func (i *Inbound) startInbound() error {
 	}
 	if err != nil && i.processTracker != nil {
 		trackingErr := err
-		var closeErr error
-		i.processTracker, closeErr = closeProcessTrackerOwner(i.processTracker)
-		if i.processTracker != nil {
-			return E.Errors(trackingErr, E.Cause(closeErr, "cleanup eBPF process tracker"))
-		}
-		trackingErr = E.Errors(trackingErr, closeErr)
+		_ = i.processTracker.Close()
+		i.processTracker = nil
 		backendConfig.TrackProcess = false
 		backend, err = commonEBPF.PrepareTC(backendConfig)
 		if err == nil {
@@ -154,22 +149,23 @@ func (i *Inbound) startInbound() error {
 	}
 	if backend != nil {
 		if err = i.listeners.registerTCTCPListeners(backend); err != nil {
-			i.setTCDataPlane(newUnstartedTCRuntime(backend))
+			i.setTCDataPlane(&tcDataPlane{backend: backend})
 			return E.Errors(err, i.closeTCDataPlane())
 		}
 	}
-	var dataPlane tcRuntime
+	var dataPlane *tcDataPlane
 	if backend != nil {
 		tcIPv6Enabled := localTCEnabled && i.localIPv6 || sharedSocketAssignEnabled && i.sharedIPv6
-		dataPlane, err = newTCRuntime(backend, tcRuntimeConfig{
-			LocalEnabled:          localTCEnabled,
-			IPv6Enabled:           tcIPv6Enabled,
-			LocalInterface:        localInterface,
-			SharedInterfaces:      tcSharedInterfaces,
-			HostAddresses:         hostAddresses,
-			SharedSourceMACPolicy: len(i.sharedIncludeMAC)+len(i.sharedExcludeMAC) > 0,
-			Priority:              i.tcPriority,
-		})
+		dataPlane, err = startTCDataPlane(
+			backend,
+			localTCEnabled,
+			tcIPv6Enabled,
+			localInterface,
+			tcSharedInterfaces,
+			hostAddresses,
+			len(i.sharedIncludeMAC)+len(i.sharedExcludeMAC) > 0,
+			i.tcPriority,
+		)
 		i.setTCDataPlane(dataPlane)
 		if err != nil {
 			return err
@@ -178,6 +174,9 @@ func (i *Inbound) startInbound() error {
 	}
 	if err = i.startBypassRuleSets(); err != nil {
 		return E.Cause(err, "initialize TC eBPF bypass_rule_set")
+	}
+	if err = i.startBypassSelector(); err != nil {
+		return E.Cause(err, "initialize TC eBPF bypass_selector")
 	}
 	if sharedRewriteEnabled {
 		shared := newSharedRewrite(i, i.sharedOptions)
@@ -190,9 +189,13 @@ func (i *Inbound) startInbound() error {
 		if err = cgroupBackend.Attach(); err != nil {
 			return err
 		}
-		i.startCgroupUDPReleaseReader(cgroupBackend)
 	}
 	if backend != nil {
+		if i.bypassSelectorOptions != nil {
+			if _, err = backend.SetBypassCIDREnabled(false); err != nil {
+				return E.Cause(err, "prepare safe TC eBPF bypass_selector state")
+			}
+		}
 		if err = backend.Enable(); err != nil {
 			return err
 		}
@@ -218,7 +221,6 @@ func (i *Inbound) startInbound() error {
 			", udp_cleanup=", cgroupBackend.UDPCleanupMode(),
 			", udp_time=", cgroupBackend.UDPTimeMode(),
 			", udp_storage=", cgroupBackend.UDPStorageMode(),
-			", userspace_udp_cleanup=", cgroupBackend.UDPUserspaceCleanupMode(),
 			", local_uid_include=", formatUIDRanges(i.localPolicy.IncludeUID),
 			", local_uid_exclude=", formatUIDRanges(i.localPolicy.ExcludeUID),
 			", self_bypass=", i.selfBypassMode(),
@@ -226,10 +228,6 @@ func (i *Inbound) startInbound() error {
 		)
 		i.logStartupSummary()
 		return nil
-	}
-	tcNetworkInfo := commonEBPF.TCNetworkInfo{}
-	if dataPlane != nil {
-		tcNetworkInfo = dataPlane.NetworkInfo()
 	}
 	i.logger.Debug(
 		"eBPF TC active: local_data_plane=", func() string {
@@ -262,12 +260,6 @@ func (i *Inbound) startInbound() error {
 			}
 			return "disabled"
 		}(),
-		", local_cgroup_userspace_udp_cleanup=", func() string {
-			if cgroupBackend := i.cgroupBackendInstance(); cgroupBackend != nil {
-				return cgroupBackend.UDPUserspaceCleanupMode()
-			}
-			return "deadline"
-		}(),
 		", shared_data_plane=", func() string {
 			if !i.sharedEnabled {
 				return "off"
@@ -283,12 +275,10 @@ func (i *Inbound) startInbound() error {
 		", attachments=[", func() string {
 			var attachments []string
 			if dataPlane != nil {
-				attachments = append(attachments, dataPlane.AttachmentDescriptions()...)
+				attachments = append(attachments, dataPlane.attachmentDescriptions()...)
 			}
 			if shared := i.sharedRewriteInstance(); shared != nil {
-				if sharedDataPlane := shared.dataPlaneInstance(); sharedDataPlane != nil {
-					attachments = append(attachments, sharedDataPlane.AttachmentDescriptions()...)
-				}
+				attachments = append(attachments, shared.dataPlaneInstance().attachmentDescriptions()...)
 			}
 			return strings.Join(attachments, ", ")
 		}(), "]",
@@ -309,25 +299,28 @@ func (i *Inbound) startInbound() error {
 			return backend.TCPListenerLookupMode()
 		}(),
 		", delivery_interface=", func() string {
-			return tcNetworkInfo.DeliveryInterface
+			if dataPlane == nil {
+				return ""
+			}
+			return dataPlane.deliveryName()
 		}(),
 		", routing_mark=", func() string {
-			if tcNetworkInfo.RoutingMark == 0 {
+			if dataPlane == nil {
 				return ""
 			}
-			return "0x" + strconv.FormatUint(uint64(tcNetworkInfo.RoutingMark), 16)
+			return "0x" + strconv.FormatUint(uint64(dataPlane.routing.mark), 16)
 		}(),
 		", routing_table=", func() string {
-			if tcNetworkInfo.RoutingTable == 0 {
+			if dataPlane == nil {
 				return ""
 			}
-			return strconv.Itoa(tcNetworkInfo.RoutingTable)
+			return strconv.Itoa(dataPlane.routing.table)
 		}(),
 		", routing_priority=", func() string {
-			if tcNetworkInfo.RoutingPriority == 0 {
+			if dataPlane == nil {
 				return ""
 			}
-			return strconv.Itoa(tcNetworkInfo.RoutingPriority)
+			return strconv.Itoa(dataPlane.routing.priority)
 		}(),
 		", self_bypass=", i.selfBypassMode(),
 		", process_tracking=", i.processTrackingMode(),
@@ -338,28 +331,100 @@ func (i *Inbound) startInbound() error {
 	return nil
 }
 
-func (i *Inbound) startProcessTracker() error {
-	if !i.localEnabled || !i.router.NeedFindProcess() || i.usePlatformProcessFinder ||
-		i.processTracker != nil || i.processTrackerRollback != nil {
-		return nil
+func (i *Inbound) startPreMatchInbound() error {
+	if i.localEnabled && i.androidUIDOptions != nil {
+		if err := i.resolveAndroidUIDPolicy(); err != nil {
+			return E.Cause(err, "resolve Android UID policy")
+		}
+	}
+	i.updatePreMatchHostAddresses()
+	if i.localEnabled || i.sharedEnabled {
+		if err := i.startTCListeners(); err != nil {
+			return err
+		}
+	}
+	bypassMark, err := allocatePreMatchMark()
+	if err != nil {
+		return err
+	}
+	// Shared interception uses TPROXY and therefore needs the marked local
+	// routes. Local interception uses OUTPUT REDIRECT for both address
+	// families, so it does not need policy routing by itself.
+	needsRouting := i.sharedEnabled
+	var routing *tcPolicyRouting
+	var proxyMark uint32
+	if needsRouting {
+		routing, err = startTCPolicyRouting(i.sharedIPv6, bypassMark)
+		if err != nil {
+			return E.Cause(err, "configure eBPF pre-match policy routing")
+		}
+		proxyMark = routing.mark
+	} else {
+		proxyMark, err = allocatePreMatchMark(bypassMark)
+		if err != nil {
+			return err
+		}
+	}
+	controller, err := newPreMatchController(i, routing, proxyMark, bypassMark)
+	if err != nil {
+		if routing != nil {
+			_ = routing.Close()
+		}
+		return err
+	}
+	if err = i.startBypassRuleSets(); err != nil {
+		_ = controller.close()
+		return E.Cause(err, "initialize eBPF pre-match bypass_rule_set")
+	}
+	// pre-match handles local traffic in OUTPUT and shared traffic in
+	// PREROUTING, so a shared interface may safely be the current default
+	// interface as well (for example a combined Wi-Fi/hotspot interface).
+	if err = controller.start(i, i.localEnabled, activeSharedInterfaces(i.sharedOptions.Interface, i.currentDefaultInterfaceName(), false)); err != nil {
+		i.stopBypassRuleSets()
+		_ = controller.close()
+		return err
+	}
+	i.preMatchController = controller
+	if err = i.startTCInterfaceMonitor(); err != nil {
+		return err
+	}
+	i.logger.Debug(
+		"eBPF pre-match active: local=", i.localEnabled,
+		", shared=", i.sharedEnabled,
+		", local_ipv6=", i.localIPv6,
+		", shared_ipv6=", i.sharedIPv6,
+		", shared_interfaces=[", strings.Join(controller.shared, ", "), "]",
+		", listeners=[", i.listeners.String(), "]",
+		", nfqueue=", controller.queueNumber,
+		", bypass_mark=0x", strconv.FormatUint(uint64(controller.bypassMark), 16),
+		", proxy_mark=0x", strconv.FormatUint(uint64(controller.proxyMark), 16),
+		", routing_table=", func() string {
+			if controller.routing == nil {
+				return ""
+			}
+			return strconv.Itoa(controller.routing.table)
+		}(),
+	)
+	return nil
+}
+
+func (i *Inbound) startProcessTracker() {
+	if !i.localEnabled || !i.router.NeedFindProcess() || i.usePlatformProcessFinder || i.processTracker != nil {
+		return
 	}
 	tracker, err := commonEBPF.AttachProcessTracker(commonEBPF.ProcessTrackerConfig{
 		EnableTCP:   i.enableTCP,
 		EnableUDP:   i.enableUDP,
 		EnableIPv6:  i.localIPv6,
 		LocalPolicy: i.localPolicy,
-		SelfBypass:  i.selfBypass,
+		MetadataMap: i.selfBypass.Map(),
+		MapCapacity: i.flowMapCapacity,
 	})
 	if err != nil {
-		if tracker != nil {
-			i.processTrackerRollback = tracker
-			return E.Cause(err, "rollback partial eBPF process tracker")
-		}
 		i.logger.Debug("eBPF cgroup process tracking unavailable; using userspace process search: ", err)
-		return nil
+		return
 	}
 	i.processTracker = tracker
-	return nil
 }
 
 func (i *Inbound) processTrackingMode() string {
@@ -376,26 +441,6 @@ func (i *Inbound) processTrackingMode() string {
 		return "cgroup_socket_lru"
 	}
 	return "userspace"
-}
-
-func (i *Inbound) startCgroupUDPReleaseReader(backend *commonEBPF.CgroupBackend) {
-	if backend == nil || backend.UDPUserspaceCleanupMode() != "ringbuf" {
-		return
-	}
-	i.cgroupReleaseWait.Add(1)
-	go func() {
-		defer i.cgroupReleaseWait.Done()
-		for {
-			socketCookie, err := backend.ReadUDPRelease()
-			if err != nil {
-				if !errors.Is(err, os.ErrClosed) {
-					i.logger.Warn("read cgroup eBPF UDP socket-release event: ", err)
-				}
-				return
-			}
-			i.udpNat.ReleaseSocket(socketCookie)
-		}
-	}()
 }
 
 func (i *Inbound) selfBypassMode() string {
@@ -456,15 +501,17 @@ func (i *Inbound) checkKernelCapabilities() error {
 		sharedPlane = commonEBPF.KernelProbeDataPlanePacketRewrite
 	}
 	report, err := commonEBPF.ProbeKernel(commonEBPF.KernelProbeOptions{
-		Mode:                mode,
-		LocalDataPlane:      localPlane,
-		SharedDataPlane:     sharedPlane,
-		Network:             network,
-		InterfaceNames:      i.sharedOptions.Interface,
-		EnableIPv6:          (localSelected && i.localIPv6) || (sharedSelected && i.sharedIPv6),
-		NeedLPMPolicy:       i.needsLPMPolicy(),
+		Mode:            mode,
+		LocalDataPlane:  localPlane,
+		SharedDataPlane: sharedPlane,
+		Network:         network,
+		InterfaceNames:  i.sharedOptions.Interface,
+		EnableIPv6:      (localSelected && i.localIPv6) || (sharedSelected && i.sharedIPv6),
+		NeedLPMPolicy: ((localTCEnabled || localCgroupEnabled) && (i.localPolicy.IncludeUIDConfigured || len(i.localPolicy.IncludeUID) > 0 || len(i.localPolicy.ExcludeUID) > 0)) ||
+			((sharedSocketAssignEnabled || sharedRewriteEnabled) && (len(i.sharedOptions.IncludeSourceCIDR) > 0 || len(i.sharedOptions.ExcludeSourceCIDR) > 0)) ||
+			len(i.bypassRuleSet) > 0,
 		NeedProcessTracking: localSelected && i.router.NeedFindProcess() && !i.usePlatformProcessFinder,
-		ICMPEchoReply:       i.fakeIPICMPReply,
+		FakeIPICMPReply:     i.fakeIPICMPReply,
 	})
 	if err != nil {
 		return E.Cause(err, "probe eBPF kernel capabilities")
@@ -473,25 +520,6 @@ func (i *Inbound) checkKernelCapabilities() error {
 		return E.Cause(err, "probe eBPF kernel capabilities")
 	}
 	return nil
-}
-
-func (i *Inbound) needsLPMPolicy() bool {
-	if (i.localTCEnabled() || i.localCgroupEnabled()) &&
-		(len(i.localPolicy.IncludeUID) > 0 || len(i.localPolicy.ExcludeUID) > 0) {
-		return true
-	}
-	if (i.sharedSocketAssignEnabled() || i.sharedRewriteEnabled()) &&
-		(len(i.sharedOptions.IncludeSourceCIDR) > 0 || len(i.sharedOptions.ExcludeSourceCIDR) > 0) {
-		return true
-	}
-	for _, ruleSet := range i.bypassRuleSet {
-		for _, ipSet := range ruleSet.ExtractIPSet() {
-			if len(ipSet.Prefixes()) > 0 {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func combineStartError(startErr error, cleanupErr error) error {
@@ -513,21 +541,23 @@ func (i *Inbound) cleanupStartFailure() error {
 
 func (i *Inbound) closeResources() error {
 	monitorErr := i.stopTCInterfaceMonitor()
+	i.stopBypassSelector()
 	i.stopBypassRuleSets()
+	preMatchErr := error(nil)
+	if i.preMatchController != nil {
+		preMatchErr = i.preMatchController.close()
+		i.preMatchController = nil
+	}
 	sharedRewriteErr := error(nil)
 	if shared := i.takeSharedRewrite(); shared != nil {
 		sharedRewriteErr = shared.Close()
 	}
 	dataPlane := i.takeTCDataPlane()
-	disableErr := error(nil)
-	if dataPlane != nil {
-		disableErr = dataPlane.Disable()
-	}
+	disableErr := dataPlane.disable()
 	cgroupBackend := i.takeCgroupBackend()
 	cgroupErr := error(nil)
 	if cgroupBackend != nil {
 		cgroupErr = cgroupBackend.Close()
-		i.cgroupReleaseWait.Wait()
 		// Close keeps the runtime when a program could not be detached, because a
 		// legacy cgroup attachment is owned by the cgroup rather than by the
 		// program handle: dropping the handles would leave that program attached
@@ -541,7 +571,7 @@ func (i *Inbound) closeResources() error {
 		}
 	}
 	listenerErr := i.closeListeners()
-	udpNATErr := i.udpNat.Close()
+	i.udpNat.Purge()
 	i.udpReplySockets.stopSweeper()
 	udpReplySocketErr := i.udpReplySockets.close()
 	dataPlaneErr := i.closeTakenTCDataPlane(dataPlane)
@@ -554,56 +584,31 @@ func (i *Inbound) closeResources() error {
 			clearer.ClearEBPFSelfBypass(i.selfBypass)
 		}
 		selfBypassErr = i.selfBypass.Close()
-		if i.selfBypass.IsClosed() {
-			i.selfBypass = nil
-		} else if selfBypassErr == nil {
-			selfBypassErr = E.New("eBPF self-bypass remained open after close")
-		}
+		i.selfBypass = nil
 	}
 	processTrackerErr := error(nil)
 	if i.processTracker != nil {
-		i.processTracker, processTrackerErr = closeProcessTrackerOwner(i.processTracker)
+		processTrackerErr = i.processTracker.Close()
+		i.processTracker = nil
 	}
-	processTrackerRollbackErr := error(nil)
-	if i.processTrackerRollback != nil {
-		i.processTrackerRollback, processTrackerRollbackErr = closeProcessTrackerOwner(i.processTrackerRollback)
-	}
-	return E.Errors(monitorErr, sharedRewriteErr, disableErr, listenerErr, udpNATErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, processTrackerRollbackErr, selfBypassErr)
-}
-
-func closeProcessTrackerOwner(tracker processTrackerOwner) (processTrackerOwner, error) {
-	if tracker == nil {
-		return nil, nil
-	}
-	closeErr := tracker.Close()
-	if tracker.IsClosed() {
-		return nil, closeErr
-	}
-	if closeErr == nil {
-		closeErr = E.New("eBPF process tracker remained open after close")
-	}
-	return tracker, closeErr
+	return E.Errors(monitorErr, preMatchErr, sharedRewriteErr, disableErr, listenerErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, selfBypassErr)
 }
 
 func (i *Inbound) prepareCgroupBackend() error {
 	if err := i.reclaimCgroupBackend(); err != nil {
 		return err
 	}
-	mapCapacity := commonEBPF.DefaultCgroupMapCapacity()
-	if runtime.GOOS == "android" {
-		mapCapacity = commonEBPF.CompactCgroupMapCapacity()
-	}
 	backend, err := commonEBPF.PrepareCgroup(commonEBPF.CgroupConfig{
-		Path:         i.cgroupPath,
-		EnableTCP:    i.enableTCP,
-		EnableUDP:    i.enableUDP,
-		EnableIPv6:   i.cgroupIPv6Enabled(),
-		RedirectIPv4: i.redirectIPv4Prefix,
-		RedirectIPv6: i.redirectIPv6Prefix,
-		MapCapacity:  mapCapacity,
-		UDPTimeout:   i.udpTimeout,
-		Policy:       i.compiledPolicy,
-		SelfBypass:   i.selfBypass,
+		Path:          i.cgroupPath,
+		EnableTCP:     i.enableTCP,
+		EnableUDP:     i.enableUDP,
+		EnableIPv6:    i.cgroupIPv6Enabled(),
+		RedirectIPv4:  i.redirectIPv4Prefix,
+		RedirectIPv6:  i.redirectIPv6Prefix,
+		MapCapacity:   i.cgroupMapCapacity,
+		UDPTimeout:    i.udpTimeout,
+		Policy:        i.compiledPolicy,
+		SelfBypassMap: i.selfBypass.Map(),
 	})
 	if err != nil {
 		return err
@@ -618,7 +623,7 @@ func (i *Inbound) tcBackend() *commonEBPF.TCBackend {
 	if i.tcDataPlane == nil {
 		return nil
 	}
-	return i.tcDataPlane.Backend()
+	return i.tcDataPlane.backend
 }
 
 // cgroupBackendCloser is the part of a retained backend the reclaim needs, so
@@ -729,13 +734,13 @@ func (i *Inbound) takeSharedRewrite() *sharedRewrite {
 	return shared
 }
 
-func (i *Inbound) setTCDataPlane(dataPlane tcRuntime) {
+func (i *Inbound) setTCDataPlane(dataPlane *tcDataPlane) {
 	i.tcDataPlaneAccess.Lock()
 	i.tcDataPlane = dataPlane
 	i.tcDataPlaneAccess.Unlock()
 }
 
-func (i *Inbound) takeTCDataPlane() tcRuntime {
+func (i *Inbound) takeTCDataPlane() *tcDataPlane {
 	i.tcDataPlaneAccess.Lock()
 	dataPlane := i.tcDataPlane
 	i.tcDataPlane = nil
@@ -749,14 +754,11 @@ func (i *Inbound) reconcileTCDataPlane(localInterface string, sharedInterfaces [
 	if i.tcDataPlane == nil {
 		return nil
 	}
-	return i.tcDataPlane.Reconcile(localInterface, sharedInterfaces, hostAddresses)
+	return i.tcDataPlane.reconcile(localInterface, sharedInterfaces, hostAddresses)
 }
 
 // Keep the owner reachable after both normal shutdown and startup cleanup.
-func (i *Inbound) closeTakenTCDataPlane(dataPlane tcRuntime) error {
-	if dataPlane == nil {
-		return nil
-	}
+func (i *Inbound) closeTakenTCDataPlane(dataPlane *tcDataPlane) error {
 	err := dataPlane.Close()
 	if !dataPlane.IsClosed() {
 		i.setTCDataPlane(dataPlane)

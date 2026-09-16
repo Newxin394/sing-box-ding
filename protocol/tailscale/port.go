@@ -1,4 +1,4 @@
-//go:build with_tailscale
+//go:build with_gvisor
 
 package tailscale
 
@@ -20,6 +20,10 @@ import (
 
 func (t *Endpoint) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
 	return adapter.PreMatchFlow
+}
+
+func (t *Endpoint) FlowDomainResolveOptions() adapter.DNSQueryOptions {
+	return t.innerDNSQueryOptions
 }
 
 func (t *Endpoint) PortAddresses() (netip.Addr, netip.Addr) {
@@ -68,7 +72,7 @@ func (t *Endpoint) JudgeFlow(network uint8, source netip.AddrPort, destination n
 			}
 		}
 	}
-	return adapter.JudgeFlow(t.router, adapter.InboundContext{Inbound: t.Tag(), InboundType: t.Type()}, network, source, destination, firstPacket)
+	return adapter.JudgeFlow(t.router, t.Tag(), t.Type(), network, source, destination, firstPacket)
 }
 
 func (t *Endpoint) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {

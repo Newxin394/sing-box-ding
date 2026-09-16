@@ -33,13 +33,13 @@
 | `hysteria2`    | [Hysteria2](./hysteria2/)       |
 | `anytls`       | [AnyTLS](./anytls/)             |
 | `snell`        | [Snell](./snell/)               |
-| `tailcat`      | [Tailcat](./tailcat/)           |
 | `tor`          | [Tor](./tor/)                   |
 | `ssh`          | [SSH](./ssh/)                   |
 | `dns`          | [DNS](./dns/)                   |
 | `selector`     | [Selector](./selector/)         |
 | `urltest`      | [URLTest](./urltest/)           |
 | `naive`        | [NaiveProxy](./naive/)          |
+| `loadbalance`  | [LoadBalance](./loadbalance/)   |
 
 #### tag
 

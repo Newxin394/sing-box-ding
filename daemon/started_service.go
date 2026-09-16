@@ -726,9 +726,12 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	}
 	historyStorage := boxService.urlTestHistoryStorage
 	urlTest, isURLTest := outbound.(*group.URLTest)
+	loadBalance, isLoadBalance := outbound.(adapter.LoadBalanceGroup)
 	outboundGroup, isOutboundGroup := outbound.(adapter.OutboundGroup)
 	if isURLTest {
 		go urlTest.CheckOutbounds()
+	} else if isLoadBalance {
+		go loadBalance.URLTest(boxService.ctx)
 	} else if isOutboundGroup {
 		outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
 			itOutbound, _ := boxService.outboundManager.Outbound(it)
@@ -766,8 +769,8 @@ func (s *StartedService) SelectOutbound(ctx context.Context, request *SelectOutb
 	if !isSelector {
 		return nil, status.Error(codes.InvalidArgument, "outbound is not a selector: "+request.GroupTag)
 	}
-	if !selector.SelectOutbound(request.OutboundTag) {
-		return nil, status.Error(codes.NotFound, "outbound not found in selector: "+request.OutboundTag)
+	if err := selector.SelectOutboundContext(request.OutboundTag); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -1069,7 +1072,7 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 		Network:       metadata.Metadata.Network,
 		Source:        metadata.Metadata.Source.String(),
 		Destination:   metadata.Metadata.Destination.String(),
-		Domain:        metadata.Metadata.Domain,
+		Domain:        metadata.ConnectionDomain(),
 		Protocol:      metadata.Metadata.Protocol,
 		User:          metadata.Metadata.User,
 		FromOutbound:  metadata.Metadata.Outbound,

@@ -15,7 +15,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/sniff"
-	"github.com/sagernet/sing-box/common/tlsfragment"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
@@ -119,6 +119,9 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		var dialerString string
 		if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
+			if outbound.Type() == C.TypeLoadBalance {
+				dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
+			}
 		}
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -207,6 +210,9 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			var dialerString string
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
+				if outbound.Type() == C.TypeLoadBalance {
+					dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
+				}
 			}
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -230,8 +236,11 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			var dialerString string
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
+				if outbound.Type() == C.TypeLoadBalance {
+					dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
+				}
 			}
-			err = E.Cause(err, "listen packet connection using ", dialerString)
+			err = E.Cause(err, "listen packet connection", dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
@@ -418,7 +427,9 @@ type socketOwner struct {
 	closed   bool
 }
 
-func (o *socketOwner) Attach(closer io.Closer) (io.Closer, bool) {
+// attach stores closer as the current owner and returns the original socket so
+// the caller can migrate it. ok reports whether the attach succeeded.
+func (o *socketOwner) attach(closer io.Closer) (io.Closer, bool) {
 	o.access.Lock()
 	defer o.access.Unlock()
 	if o.closed || o.owner != nil {
@@ -426,6 +437,13 @@ func (o *socketOwner) Attach(closer io.Closer) (io.Closer, bool) {
 	}
 	o.owner = closer
 	return o.original, true
+}
+
+// Attach satisfies tun.SpliceSocket. The original socket is handed back so the
+// splice path can take ownership of it, which is what the current sing-tun
+// declares; the owner is stored so it can be closed or detached later.
+func (o *socketOwner) Attach(closer io.Closer) (io.Closer, bool) {
+	return o.attach(closer)
 }
 
 func (o *socketOwner) detach() bool {
@@ -495,6 +513,35 @@ type trackedPacketConn struct {
 	socketOwner
 	manager *ConnectionManager
 	element *list.Element[io.Closer]
+}
+
+func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	if packetReader, ok := c.NetPacketConn.(N.PacketReader); ok {
+		return packetReader.ReadPacket(buffer)
+	}
+	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
+	if !isPacketConn {
+		return M.Socksaddr{}, os.ErrInvalid
+	}
+	_, addr, err := buffer.ReadPacketFrom(packetConn)
+	if err != nil {
+		return M.Socksaddr{}, err
+	}
+	return M.SocksaddrFromNet(addr).Unwrap(), err
+}
+
+func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	if packetWriter, ok := c.NetPacketConn.(N.PacketWriter); ok {
+		return packetWriter.WritePacket(buffer, destination)
+	}
+	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
+	if !isPacketConn {
+		buffer.Release()
+		return os.ErrInvalid
+	}
+	defer buffer.Release()
+	_, err := packetConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
+	return err
 }
 
 func (c *trackedPacketConn) SyscallConn() (syscall.RawConn, error) {

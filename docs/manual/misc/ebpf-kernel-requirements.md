@@ -143,6 +143,24 @@ policy; they commonly require `CAP_NET_ADMIN`, `CAP_BPF`, and on older kernels
 No `bpftool`, `tc`, or `ip` executable is required at runtime. sing-box uses BPF
 syscalls and netlink directly.
 
+## Pre-match mode
+
+The optional `pre_match` mode is a separate firewall-based data path. It does
+not use the eBPF TC or cgroup programs. The selected iptables implementation
+must provide the `NFQUEUE` and `CONNMARK` targets/modules. Local pre-match
+additionally needs the `cgroup` match and `REDIRECT`, while shared pre-match
+additionally needs `TPROXY` and policy routing. Local interception also needs
+a non-root cgroup v2 subtree to exclude the sing-box process. The process must
+be able to open the configured NFQUEUE and set packet marks.
+
+The first TCP SYN or UDP datagram is queued to userspace and evaluated by the
+normal `Router.PreMatch` path. The result is stored in the conntrack mark so
+later packets avoid NFQUEUE. Local IPv4 and IPv6 use `REDIRECT`; shared IPv4 and
+IPv6 use `TPROXY`. Unparseable packets and
+fragments are accepted without pre-match. This mode requires conntrack and
+appropriate IPv4/IPv6 netfilter hooks; `--queue-bypass` intentionally permits
+traffic to continue if the userspace queue is unavailable.
+
 ## Interface requirements
 
 Local TC mode attaches to the network manager's current default interface.
@@ -155,8 +173,7 @@ Loopback and unrecognized link encapsulations are not supported.
 Local attachments follow default-interface changes. Configured shared
 interfaces are attached when present, except while an interface is acting as the
 current default upstream. Link and route events trigger validation and repair of
-managed attachments and network state. A low-frequency drift check also repairs
-kernel state changed without a matching netlink notification.
+managed attachments and network state; no periodic polling is used.
 
 One sing-box eBPF inbound may manage an interface at a time. Existing unrelated
 `clsact` filters are preserved, but a conflicting sing-box filter handle or
@@ -194,17 +211,6 @@ The `--mode local|shared|all` form selects the default local `cgroup`, shared
 `packet_rewrite`, or both. Use the explicit data-plane flags for the optional
 TC or `socket_assign` paths.
 
-For local TC, `--local-interface <name>` performs a read-only check of the
-interface and any existing clsact qdisc. For local cgroup, `--cgroup-path
-<path>` checks a selected cgroup v2 path; when omitted, the current process's
-cgroup is checked. These checks do not create qdiscs, attach hooks, or modify
-system state.
-
-The command also prints a one-shot occupancy diagnostic for visible `sb_` maps.
-Map types that cannot be safely iterated are marked `UNKNOWN`. This diagnostic
-never runs periodically while sing-box is active and does not modify maps or
-data paths.
-
 The probe uses the selected protocols, address families, data planes, and shared interface.
 For local TC mode it reports the required TC socket-cookie helper and the optional
 cgroup socket-cookie hooks. Add `--process-tracking` to inspect the optional
@@ -212,16 +218,12 @@ socket-address process tracker and socket-release cleanup capabilities. A real
 startup determines whether the process cgroup is
 exclusive and uses cgroup registration when possible, otherwise enabling the
 userspace cookie registration path.
-The command also loads and immediately closes the generated eBPF objects selected
-by these options. This validates their real map ABI and verifier-visible program
-variants without attaching them.
 It reports `FAIL` for a conclusive missing facility and `UNKNOWN` when the
 process cannot determine a facility, such as when a security policy denies the
 probe. Both statuses make the command exit non-zero for required checks.
 Repeat it with the same privileges used to run sing-box. A real startup remains
-necessary because the non-mutating probe does not attach TC filters or cgroup
-hooks, create a veth, install routes, or change sysctls; those operations are
-checked and fail during startup.
+necessary because the non-mutating probe does not attach TC filters, create a
+veth, or change sysctls; those operations are checked and fail during startup.
 Use `--ipv6=false` when the intended configuration disables IPv6.
 
 ## Packet limitations

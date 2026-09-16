@@ -8,17 +8,14 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"sync"
 	"testing"
-	"time"
 	"unsafe"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
-	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/common/json/badoption"
 
@@ -76,122 +73,6 @@ func TestInternalListenerSetsSelectIndependentPorts(t *testing.T) {
 	}
 }
 
-func TestInternalListenerSetSynchronizesCloseAndUDPWrite(t *testing.T) {
-	newListener := func(network string, _ bool, port uint16) *listener.Listener {
-		return listener.New(listener.Options{
-			Context: context.Background(),
-			Logger:  log.NewNOPFactory().Logger(),
-			Network: []string{network},
-			Listen: option.ListenOptions{
-				Listen:     common.Ptr(badoption.Addr(netip.IPv4Unspecified())),
-				ListenPort: port,
-			},
-			DisablePacketOutput: true,
-			DisableLog:          true,
-		})
-	}
-	var listeners internalListenerSet
-	if err := listeners.start(false, true, true, false, newListener); err != nil {
-		t.Fatal(err)
-	}
-
-	client := netip.MustParseAddrPort("127.0.0.1:9")
-	source := netip.MustParseAddr("127.0.0.1")
-	var writers sync.WaitGroup
-	for range 8 {
-		writers.Add(1)
-		go func() {
-			defer writers.Done()
-			for range 256 {
-				_ = listeners.selectedPort()
-				_ = listeners.String()
-				_ = listeners.writeUDP([]byte{0}, nil, client, source)
-			}
-		}()
-	}
-	if err := listeners.close(); err != nil {
-		t.Fatal(err)
-	}
-	writers.Wait()
-	if !listeners.isClosed() || listeners.selectedPort() != 0 {
-		t.Fatal("listener set did not publish its closed state")
-	}
-
-	listeners.access.RLock()
-	closed := make(chan error, 1)
-	go func() { closed <- listeners.close() }()
-	select {
-	case <-closed:
-		listeners.access.RUnlock()
-		t.Fatal("close did not wait for an active listener reader")
-	case <-time.After(20 * time.Millisecond):
-	}
-	listeners.access.RUnlock()
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("close remained blocked after listener reader exited")
-	}
-}
-
-func TestInternalListenerSetWritesOOBBatch(t *testing.T) {
-	newListener := func(network string, _ bool, port uint16) *listener.Listener {
-		return listener.New(listener.Options{
-			Context: context.Background(),
-			Logger:  log.NewNOPFactory().Logger(),
-			Network: []string{network},
-			Listen: option.ListenOptions{
-				Listen:     common.Ptr(badoption.Addr(netip.IPv4Unspecified())),
-				ListenPort: port,
-			},
-			DisablePacketOutput: true,
-			DisableLog:          true,
-		})
-	}
-	var listeners internalListenerSet
-	if err := listeners.start(false, true, true, false, newListener); err != nil {
-		t.Fatal(err)
-	}
-	defer listeners.close()
-	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer receiver.Close()
-	if err = receiver.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	client := receiver.LocalAddr().(*net.UDPAddr).AddrPort()
-	sources := []netip.Addr{
-		netip.MustParseAddr("127.0.0.2"),
-		netip.MustParseAddr("127.0.0.3"),
-	}
-	buffers := []*buf.Buffer{
-		buf.As([]byte("first")).ToOwned(),
-		buf.As([]byte("second")).ToOwned(),
-	}
-	defer buf.ReleaseMulti(buffers)
-	packetInfos := [][]byte{sourcePacketInfo(sources[0]), sourcePacketInfo(sources[1])}
-	if err = listeners.writeUDPBatch(buffers, packetInfos, client, sources); err != nil {
-		t.Fatal(err)
-	}
-	received := make(map[string]netip.Addr)
-	packet := make([]byte, 64)
-	for range 2 {
-		n, source, readErr := receiver.ReadFromUDPAddrPort(packet)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		received[string(packet[:n])] = source.Addr()
-	}
-	if received["first"] != sources[0] || received["second"] != sources[1] {
-		t.Fatalf("unexpected OOB batch sources: %v", received)
-	}
-}
-
 func TestValidateScopedOptions(t *testing.T) {
 	if err := validateLocalOptions(false, option.EBPFLocalOptions{}); err != nil {
 		t.Fatal(err)
@@ -214,19 +95,24 @@ func TestValidateScopedOptions(t *testing.T) {
 		}
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{Interface: []string{"ap0"}}); err == nil {
-		t.Fatal("expected shared-only options to be rejected")
+		t.Fatal("expected shared-only options to be rejected without explicit enablement")
 	}
 	if err := validateLocalOptions(false, option.EBPFLocalOptions{DataPlane: localDataPlaneCgroup}); err == nil {
 		t.Fatal("expected a local data plane to be rejected when local interception is disabled")
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{DataPlane: sharedDataPlanePacketRewrite}); err == nil {
-		t.Fatal("expected a shared data plane to be rejected when shared interception is disabled")
+		t.Fatal("expected a shared data plane to be rejected without explicit enablement")
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{IPv6: common.Ptr(false)}); err == nil {
-		t.Fatal("expected shared IPv6 option to be rejected without shared mode")
+		t.Fatal("expected shared IPv6 option to be rejected without explicit enablement")
 	}
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{BypassPrivateAddress: common.Ptr(false)}); err == nil {
-		t.Fatal("expected shared private-address policy to be rejected without shared mode")
+		t.Fatal("expected shared private-address policy to be rejected without explicit enablement")
+	}
+	// Explicit "enabled": false keeps the block as a paused configuration:
+	// fields may stay, it must not be an error.
+	if err := validateSharedOptions(false, option.EBPFSharedOptions{Enabled: common.Ptr(false), Interface: []string{"ap0"}, DataPlane: sharedDataPlanePacketRewrite}); err != nil {
+		t.Fatal("expected explicitly disabled shared options to be accepted: ", err)
 	}
 }
 
@@ -260,6 +146,18 @@ func TestNormalizeLocalDataPlane(t *testing.T) {
 	} {
 		if _, _, err := normalizeLocalDataPlane(options); err == nil {
 			t.Fatalf("expected invalid local data plane options to fail: %+v", options)
+		}
+	}
+}
+
+func TestPreMatchRejectsOverriddenDataPlanes(t *testing.T) {
+	for _, options := range []option.EBPFInboundOptions{
+		{PreMatch: true, Local: option.EBPFLocalOptions{DataPlane: localDataPlaneTC}},
+		{PreMatch: true, Local: option.EBPFLocalOptions{CgroupPath: "/sys/fs/cgroup/sing-box"}},
+		{PreMatch: true, Shared: option.EBPFSharedOptions{DataPlane: sharedDataPlaneSocketAssign}},
+	} {
+		if _, err := normalizeDataPlanes(options); err == nil {
+			t.Fatalf("expected pre_match data plane override to fail: %+v", options)
 		}
 	}
 }

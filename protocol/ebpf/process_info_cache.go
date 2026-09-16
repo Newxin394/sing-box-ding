@@ -7,135 +7,111 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/process"
+	"github.com/sagernet/sing-tun"
 )
 
-// eBPF process tracking gives us a stable process identity for a socket. The
-// identity is still resolved to user-visible metadata through procfs and the
-// platform package manager, though. Cache that relatively expensive lookup
-// briefly: a process commonly opens many sockets in a short burst, while the
-// short lifetime limits stale data if the kernel reuses a PID.
 const (
-	processInfoCacheCapacity         = 256
-	processInfoCacheLifetime         = time.Second
-	processInfoNegativeCacheLifetime = 200 * time.Millisecond
+	// processInfoCacheShardCount spreads the cache so one slow miss does not
+	// stall lookups for unrelated processes.
+	processInfoCacheShardCount = 16
+	// processInfoCacheShardSize bounds each shard. A phone keeps on the order of
+	// a few hundred live app processes, so the whole cache stays in that range.
+	processInfoCacheShardSize = 64
+	// processInfoCacheTTL is deliberately short: a recycled pid inside this
+	// window is vanishingly unlikely, while the hot case -- one app opening
+	// many connections in a burst -- is fully covered by it. 1s matches the
+	// conservative bound CHIZI-0618 adopted for the same optimization, trading a
+	// slightly lower hit rate for the smallest pid-reuse window.
+	processInfoCacheTTL = 1 * time.Second
 )
 
+// processInfoCacheKey identifies a process by the pair the kernel reports for
+// its socket. The pid alone is not enough: Android shares one pid space across
+// users, so the same number can name a different app under a different uid.
 type processInfoCacheKey struct {
 	processID uint32
 	userID    uint32
 }
 
 type processInfoCacheEntry struct {
-	info      *adapter.ConnectionOwner
-	err       error
-	expiresAt time.Time
+	owner   *adapter.ConnectionOwner
+	expires time.Time
 }
 
-type processInfoLookup struct {
-	done    chan struct{}
-	waiters int
-}
-
+// processInfoCache memoizes the expensive half of Inbound.lookupProcessInfo.
+//
+// The eBPF process tracker already turns a socket cookie into (pid, uid) with a
+// single map lookup, which is cheap and stays uncached because a cookie is
+// unique per socket. Turning that pair into a process path and package name is
+// what costs: a /proc/<pid>/exe readlink plus a package manager lookup, and
+// every new connection from the same app repeats it with an identical answer.
+// Caching on (pid, uid) removes that repetition for the whole burst.
 type processInfoCache struct {
-	access   sync.Mutex
-	entries  map[processInfoCacheKey]processInfoCacheEntry
-	inFlight map[processInfoCacheKey]*processInfoLookup
+	shards [processInfoCacheShardCount]processInfoCacheShard
+}
+
+type processInfoCacheShard struct {
+	access  sync.RWMutex
+	entries map[processInfoCacheKey]processInfoCacheEntry
 }
 
 func newProcessInfoCache() *processInfoCache {
-	return &processInfoCache{
-		entries:  make(map[processInfoCacheKey]processInfoCacheEntry),
-		inFlight: make(map[processInfoCacheKey]*processInfoLookup),
+	p := &processInfoCache{}
+	for index := range p.shards {
+		p.shards[index].entries = make(map[processInfoCacheKey]processInfoCacheEntry, processInfoCacheShardSize)
 	}
+	return p
 }
 
-func (c *processInfoCache) load(key processInfoCacheKey, now time.Time) (*adapter.ConnectionOwner, error, bool) {
-	if c == nil {
-		return nil, nil, false
-	}
-	c.access.Lock()
-	defer c.access.Unlock()
-	return c.loadLocked(key, now)
+func (p *processInfoCache) shardIndex(key processInfoCacheKey) uint32 {
+	return (key.processID ^ key.userID) % processInfoCacheShardCount
 }
 
-func (c *processInfoCache) loadLocked(key processInfoCacheKey, now time.Time) (*adapter.ConnectionOwner, error, bool) {
-	entry, loaded := c.entries[key]
-	if !loaded {
-		return nil, nil, false
-	}
-	if !now.Before(entry.expiresAt) {
-		delete(c.entries, key)
-		return nil, nil, false
-	}
-	return entry.info, entry.err, true
+func (p *processInfoCache) shardFor(key processInfoCacheKey) *processInfoCacheShard {
+	return &p.shards[p.shardIndex(key)]
 }
 
-func (c *processInfoCache) store(key processInfoCacheKey, info *adapter.ConnectionOwner, err error, now time.Time) {
-	if c == nil {
-		return
+// load resolves the key to a process owner, reusing a recent resolution when
+// one is available. Resolution runs outside the shard lock so a slow /proc read
+// never blocks lookups for other keys.
+//
+// The returned owner is shared between callers and must be treated as
+// read-only, which matches how InboundContext.ProcessInfo is consumed.
+func (p *processInfoCache) load(key processInfoCacheKey, packageManager tun.PackageManager) *adapter.ConnectionOwner {
+	shard := p.shardFor(key)
+	now := time.Now()
+	shard.access.RLock()
+	entry, loaded := shard.entries[key]
+	shard.access.RUnlock()
+	if loaded && now.Before(entry.expires) {
+		return entry.owner
 	}
-	c.access.Lock()
-	defer c.access.Unlock()
-	c.storeLocked(key, info, err, now)
-}
-
-func (c *processInfoCache) storeLocked(key processInfoCacheKey, info *adapter.ConnectionOwner, err error, now time.Time) {
-	for cachedKey, entry := range c.entries {
-		if !now.Before(entry.expiresAt) {
-			delete(c.entries, cachedKey)
+	processInfo, _ := process.FindProcessInfoByPID(key.processID, key.userID, packageManager)
+	shard.access.Lock()
+	if len(shard.entries) >= processInfoCacheShardSize {
+		shard.evictExpiredLocked(now)
+		if len(shard.entries) >= processInfoCacheShardSize {
+			// Still full, so nothing here is stale: drop an arbitrary entry so a
+			// burst of distinct processes cannot grow the shard without bound.
+			// Map iteration order is randomized, so this is a cheap random evict.
+			for evictKey := range shard.entries {
+				delete(shard.entries, evictKey)
+				break
+			}
 		}
 	}
-	if _, loaded := c.entries[key]; !loaded && len(c.entries) >= processInfoCacheCapacity {
-		// Entries are deliberately short-lived. If the cache is full before an
-		// expiry pass can reclaim one, evict an arbitrary entry rather than
-		// allowing process churn to grow memory without bound.
-		for cachedKey := range c.entries {
-			delete(c.entries, cachedKey)
-			break
-		}
-	}
-	lifetime := processInfoCacheLifetime
-	if err != nil {
-		lifetime = processInfoNegativeCacheLifetime
-	}
-	c.entries[key] = processInfoCacheEntry{info: info, err: err, expiresAt: now.Add(lifetime)}
+	shard.entries[key] = processInfoCacheEntry{owner: processInfo, expires: now.Add(processInfoCacheTTL)}
+	shard.access.Unlock()
+	return processInfo
 }
 
-// loadOrResolve combines concurrent misses for one process. The bool result is
-// true only for the caller that performed resolve, allowing it to report an
-// error once while cache hits and joined callers stay quiet.
-func (c *processInfoCache) loadOrResolve(
-	key processInfoCacheKey,
-	resolve func() (*adapter.ConnectionOwner, error),
-) (*adapter.ConnectionOwner, error, bool) {
-	if c == nil {
-		info, err := resolve()
-		return info, err, true
-	}
-	for {
-		now := time.Now()
-		c.access.Lock()
-		if info, err, loaded := c.loadLocked(key, now); loaded {
-			c.access.Unlock()
-			return info, err, false
+// evictExpiredLocked drops entries whose TTL has passed. The caller must hold
+// the shard write lock.
+func (s *processInfoCacheShard) evictExpiredLocked(now time.Time) {
+	for key, entry := range s.entries {
+		if now.After(entry.expires) {
+			delete(s.entries, key)
 		}
-		if lookup, loaded := c.inFlight[key]; loaded {
-			lookup.waiters++
-			done := lookup.done
-			c.access.Unlock()
-			<-done
-			continue
-		}
-		lookup := &processInfoLookup{done: make(chan struct{})}
-		c.inFlight[key] = lookup
-		c.access.Unlock()
-
-		info, err := resolve()
-		c.access.Lock()
-		c.storeLocked(key, info, err, time.Now())
-		delete(c.inFlight, key)
-		close(lookup.done)
-		c.access.Unlock()
-		return info, err, true
 	}
 }

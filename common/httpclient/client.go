@@ -99,7 +99,10 @@ func newTransport(rawDialer N.Dialer, baseTLSConfig tls.Config, options option.H
 	var err error
 	switch version {
 	case 1:
-		transport = newHTTP1Transport(rawDialer, baseTLSConfig)
+		// HTTP/1 clients share the same idle_timeout option as HTTP/2. Apply it
+		// to their connection pool so dormant subscription/DNS connections do not
+		// outlive the caller's configured resource budget.
+		transport = newHTTP1Transport(rawDialer, baseTLSConfig, time.Duration(options.HTTP2Options.IdleTimeout))
 	case 2:
 		if options.DisableVersionFallback {
 			transport, err = newHTTP2Transport(rawDialer, baseTLSConfig, options.HTTP2Options)

@@ -4,7 +4,7 @@ icon: material/lan-connect
 
 # eBPF
 
-!!! quote "sing-box 1.15.0 中的更改"
+!!! quote "sing-box 1.14.0 中的更改"
 
     eBPF 入站仍为实验功能，仅在带有 `with_ebpf` 编译标签的 Linux 和 Android
     构建中可用。
@@ -23,6 +23,7 @@ eBPF 入站不使用[监听字段](/zh/configuration/shared/listen/)。
   "network": ["tcp", "udp"],
   "udp_timeout": "5m",
   "tc_priority": 1,
+  "pre_match": false,
   "fakeip_icmp": "off",
   "bypass_rule_set": [],
   "local": {
@@ -31,6 +32,15 @@ eBPF 入站不使用[监听字段](/zh/configuration/shared/listen/)。
     "dns_mode": "respect_policy",
     "ipv6": true,
     "bypass_private_address": true,
+    "bypass_selector": {
+      "tag": "国内出口",
+      "bypass_when": ["直连"],
+      "settle_delay": "3s",
+      "final_check_delay": "5s",
+      "rapid_switch_window": "5s",
+      "rapid_switch_threshold": 3,
+      "interrupt_existing_connections": true
+    },
     "include_uid": [],
     "include_uid_range": [],
     "exclude_uid": [],
@@ -78,9 +88,17 @@ filter 协调顺序时修改。
 #### bypass_rule_set
 
 匹配这些规则集中目标 IP CIDR 的流量绕过此入站，非 IP 规则会被忽略。运行时更新只会
-在所有已启用数据面均接受新策略后生效；此前继续保留上一份已确认策略。若更新和补偿
-回滚均失败，`GET /ebpf` 会报告 `needs_attention`；此时应重启入站，使所有数据面按同一
-策略重新构建。
+在所有已启用数据面均接受新策略后生效；此前继续保留上一份已确认策略。
+
+#### pre_match
+
+使用内核防火墙队列，在重定向首个 TCP 或 UDP 数据包前同步执行 sing-box
+路由规则。此模式需要 root 权限和支持 NFQUEUE 的 iptables；shared 接管另外需要
+策略路由，local 接管使用本机防火墙重定向。启用后，入站不再使用配置的 TC 或
+cgroup 数据面。无法解析的报文（包括分片报文）会绕过。
+local 路径要求 sing-box 运行在非根 cgroup v2 子树中，以便只排除自身流量而不捕获
+其他根 cgroup 进程。启用 `pre_match` 时必须省略 `local.data_plane`、
+`local.cgroup_path` 和 `shared.data_plane`。
 
 #### fakeip_icmp
 
@@ -132,16 +150,75 @@ FakeIP 地址能够响应 `ping`，部分客户端以此判断目标是否可达
 默认路由。IPv6 是否继续可用取决于设备和新的上游网络，不能仅凭连接了 Wi-Fi 就
 判断 IPv6 必然失效。
 
+撤销后，客户端仍可能保留 link-local IPv6 通信。在一组 Android 热点连接 Windows
+的实测中，显式指定 link-local 源地址并添加经过热点的诊断路由后，FakeIP IPv6
+请求获得了 4/4 个回复。改用旧的全局源地址时，Android 侧能抓到请求和已生成的回复，
+但回复未送达 Windows。这区分了 responder 的工作状态与所测设备热点路径的交付能力，
+link-local 测试成功并不代表普通客户端的 shared IPv6 流量仍然可用。
+
+排查 RA 变化时，应分别检查 Router Lifetime，以及前缀信息选项中的 Preferred
+Lifetime 和 Valid Lifetime。Router Lifetime 为 0 仅撤销默认路由器角色，不会
+单独使客户端地址失效。标记为 deprecated（弃用）的地址仍是有效地址，仍须正常接收
+报文，不能仅凭该状态解释丢包。应结合地址、路由、RA 字段和热点两端的抓包定位。
+参见 [RFC 4861 第 4.2 节](https://www.rfc-editor.org/rfc/rfc4861.html#section-4.2)
+和 [RFC 4862 第 5.5.4 节](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.5.4)。
+
+Echo Reply 应返回请求的原始源地址。将回复目的地址改成客户端的另一个地址不能修复
+已撤销的前缀，还可能使客户端无法将回复关联到原请求。
+
 `local.data_plane: tc` 在另一个方向上有对应的前提：`local_reply` 只能看到系统
-路由已经将 FakeIP IPv6 前缀内的目标发送到本机 TC 接口。匹配该前缀的路由或经过
-该接口的默认路由均可；没有可用路由时 sing-box 会记录警告。
+路由已经正常发送到本机 TC 接口上的请求，所以本机 ping FakeIP 网段需要本机自己
+在该接口上有某条 IPv6 路由——哪怕只是一条默认路由就够了，跟 IPv4 场景一样，不
+需要专门匹配 FakeIP 前缀的路由。当 `local.ipv6` 和 `fakeip_icmp: reply` 都启用、
+但没有这样一条路由时，sing-box 会在启动时、以及之后每次本机接口发生变化时，打
+一条指明具体接口名的警告日志，而不是让本机 IPv6 ping 静默超时、日志里什么线索
+都没有。这是警告而不是启动报错，因为路由缺失属于普通的、会自行变化的网络状态
+（不同于 `local.data_plane: cgroup`——那种情况下无论什么网络都不可能支持
+`fakeip_icmp`），一旦本机获得真正的 IPv6 连通性就会自动恢复。
 
-### 策略优先级
+#### map_capacity
 
-程序首先处理协议选择、分片、DHCP/服务流量、自身绕过和强制安全地址绕过。随后，
-FakeIP 目标会在 DNS、UID/来源、端口、主机地址、私网地址和规则集绕过策略之前被强制
-接管。对于其他目标，DNS `off` 先绕过，DNS `hijack` 在 UID 或 shared 来源策略之前
-接管；DNS `respect_policy` 先应用 UID/来源策略，再在端口和目标地址绕过策略之前接管。
+```json
+{
+  "type": "ebpf",
+  "map_capacity": {
+    "assignment": 65536,
+    "self_bypass": 65536,
+    "process_owner": 65536,
+    "cgroup": {
+      "tcp_redirect": 32768,
+      "udp_redirect": 32768,
+      "udp_peer": 16384,
+      "udp_flow": 16384,
+      "socket_bypass": 32768
+    }
+  }
+}
+```
+
+这些值是**预分配大小，不是用量上限**。上面每一张 map 都是 LRU 哈希，而内核对
+LRU map 会在创建时把全部表项一次性分配好——因为 LRU 链表需要地址稳定的元素。
+所以这个容量是这个 inbound 只要在运行就占着的内存，与实际有没有流量无关，并且
+要从本 inbound 本来就会抬高的 locked-memory 限额里扣。
+
+按上面这些默认值，大约是 4.5 MB（`assignment`，44 字节键 + 24 字节值）加上
+1.0 MB（`self_bypass`，8 + 4）再加 1.0 MB（`process_owner`，8 + 8），此外还有
+cgroup 路径自己预分配的部分。`BPF_F_NO_PREALLOC` 在这里用不上——策略表
+（比如 `bypass_rule_set` 和主机地址表）可以用它，于是那些表的容量只在真正写入时
+才占内存——LRU map 不行。**下调这些值是降低这部分开销的唯一办法。**
+
+内存紧张的设备应该调小。只拦截本机流量的手机上，活着的流同时只有寥寥几条，
+65536 条赋值记录远远超出需要，4096 是个合理的起点。反过来，通过 `shared` 服务
+整个局域网、65536 条并发流确实可能用满的网关，就应该调大。`assignment` 与
+`self_bypass` 在 local TC 拦截启用时生效；`process_owner` 只在用到 cgroup 进程
+追踪时生效。
+
+每个字段取值必须在 1 到 1048576 之间。越界值会在配置阶段被拒绝并指出字段名，
+而不是等到创建 map 时抛出一个没有上下文的 `bpf(2)` `EINVAL`。省略某个字段、
+或者整个 `map_capacity` 块，该字段就保持默认值——所以为了改一个字段而加上这个
+块，不会顺带改动别的。`assignment` 必须与交给 TC 分类器的本机流表容量一致，
+`self_bypass` 必须与 dialer 共享给它的 socket cookie 表容量一致；两者都由这一个
+块下发，因此不可能不一致。
 
 ### local
 
@@ -165,11 +242,6 @@ FakeIP 目标会在 DNS、UID/来源、端口、主机地址、私网地址和�
 当前可见的 cgroup v2 根层级及其所有子 cgroup。它不是 sing-box 服务自身 cgroup
 的配置项，除非用户确实只希望接管该服务子树。
 
-在 Android 上，netd 可能在根 cgroup 使用独占 socket hook。sing-box 会优先使用多程序
-挂载；但厂商内核以兼容性错误拒绝 multi 时，会重试旧式独占挂载。这个回退可能替换
-已有的单程序 hook，且 sing-box 挂载后，netd 随后重新执行独占挂载仍可能被内核拒绝。
-受影响的设备可改用 `local.data_plane: tc`。
-
 #### local.dns_mode
 
 | 值 | 行为 |
@@ -188,6 +260,14 @@ DoT 流量。
 #### local.bypass_private_address
 
 绕过私有和特殊用途目标地址，默认 `true`。
+
+#### local.bypass_selector
+
+根据 selector 动态启用 local TC 数据面的 `bypass_rule_set`。该功能要求 `local.data_plane: "tc"`；`bypass_when` 中每个成员都必须是被引用 selector 直接包含的 direct 出站。
+
+selector 离开 `bypass_when` 时，内核绕过会在 selector 切换前关闭；进入 `bypass_when` 后，只有连续稳定达到 `settle_delay` 才开启绕过。`final_check_delay` 会再次读取 selector 和真实内核状态并纠正不一致。`rapid_switch_window` 与 `rapid_switch_threshold` 用于检测频繁切换，命中时将安全等待延长到 `final_check_delay`。四项默认值依次为 `3s`、`5s`、`5s` 和 `3`。
+
+切换期间保留 CIDR map，正常切换只更新一个 TC control 条目，不重写规则集。状态未知或更新失败时保持关闭绕过。`interrupt_existing_connections` 会在内核状态变化时关闭 selector 管理的连接并清理 UDP 状态。
 
 #### local.include_uid
 
@@ -220,8 +300,8 @@ DoT 流量。
 #### local.bypass_port
 
 绕过本机接管的目标端口。local `tc` 和 `cgroup` 两种数据面均支持；启用的
-`network` 协议（TCP 和/或 UDP）分别适用。该选项只匹配目标端口。在强制安全门槛
-之后，FakeIP 始终强制接管。DNS 处理也优先于此设置：`hijack` 始终接管 53 端口，`respect_policy` 先应用
+`network` 协议（TCP 和/或 UDP）分别适用。该选项只匹配目标端口。FakeIP 始终强制
+接管。DNS 处理也优先于此设置：`hijack` 始终接管 53 端口，`respect_policy` 先应用
 UID 策略再处理 DNS，`off` 已经绕过 DNS。配置 53 端口时 sing-box 会在启动时告警。
 
 #### local.bypass_port_range
@@ -314,17 +394,133 @@ FakeIP 和 DNS 的优先级与 `local.bypass_port` 相同，配置 53 端口时�
     请在 Android、Linux 或路由器系统中配置这些功能。可以同时配置 Wi-Fi、USB
     网络共享等多个下游接口。
 
+### 示例
+
+以下三种配置均通过了 `sing-box check` 验证；它们所选用的接管路径
+（`local.data_plane: tc`/`cgroup`、`shared.data_plane: socket_assign`/
+`packet_rewrite`）均由本项目自身的真实内核网络命名空间测试覆盖。`check` 只验证
+配置结构与对象构造是否正确，并不会附加到真实网络接口上。
+
+##### 仅本机代理
+
+接管本机自身产生的流量。`local.data_plane` 默认是 `cgroup`；若本机流量需要
+`fakeip_icmp: reply`，请显式设置为 `tc`。
+
+```json
+{
+  "type": "ebpf",
+  "tag": "ebpf-in",
+  "local": {
+    "enabled": true
+  }
+}
+```
+
+##### 仅热点/网络共享
+
+接管从 `wlan1`（请替换为实际的热点/网络共享接口名）下游客户端到达的流量，不启用
+本机接管。`shared.data_plane` 默认是 `packet_rewrite`，要求以太网帧；对于
+PPP/PPPoE、raw-IP 或隧道接口，请改用 `socket_assign`。两种 shared 数据面都
+支持为这些客户端启用 `fakeip_icmp: reply`（参见上文支持矩阵）——按下方组合
+示例的方式加上它和 FakeIP DNS 传输方式即可，无需其他改动。
+
+```json
+{
+  "type": "ebpf",
+  "tag": "ebpf-in",
+  "shared": {
+    "enabled": true,
+    "interface": ["wlan1"]
+  }
+}
+```
+
+##### 本机与热点组合
+
+两条路径同时启用，各自使用默认值。`local: tc` 加任一 shared 数据面即可让
+`fakeip_icmp: reply` 同时覆盖两条路径——参见上文的支持矩阵；只有 `local: cgroup`
+会让本机流量得不到响应。`fakeip_icmp: reply` 要求 `dns.servers` 中配置了
+FakeIP DNS 传输方式，因此以下示例给出了完整配置，因为缺少该项 `sing-box check`
+会拒绝 `reply`。
+
+```json
+{
+  "inbounds": [
+    {
+      "type": "ebpf",
+      "tag": "ebpf-in",
+      "fakeip_icmp": "reply",
+      "local": {
+        "enabled": true,
+        "data_plane": "tc"
+      },
+      "shared": {
+        "enabled": true,
+        "data_plane": "socket_assign",
+        "interface": ["wlan1"]
+      }
+    }
+  ],
+  "dns": {
+    "servers": [
+      { "type": "udp", "tag": "remote", "server": "8.8.8.8" },
+      { "type": "fakeip", "tag": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18" }
+    ],
+    "rules": [
+      { "query_type": ["A", "AAAA"], "server": "fakeip" }
+    ],
+    "final": "remote"
+  },
+  "outbounds": [
+    { "type": "direct" }
+  ]
+}
+```
+
+### 资源限制
+
+- **UDP 应答 socket**：客户端通过 TC/shared 数据面（不包括
+  `local.data_plane: cgroup`，它从不打开这类 socket）到达的每个不同目的地会
+  占用一个透明 UDP 应答 socket，按内部分片限制为每片 256 个（共 16 片，合计
+  4096 个）。达到容量上限时优先回收一个空闲 socket；若没有可回收的，新目的地
+  的应答会被拒绝而不是继续扩容。此外，一个空闲达 5 分钟的 socket 会被后台每
+  分钟一次的清扫任务独立回收，无需等待容量压力触发。以上均不可配置；默认值
+  是按常规客户端规模设定的，并未针对具体部署调优。
+- **绕行 CIDR / 主机地址策略**：各后端编译后的绕行 CIDR 与主机地址策略表都有
+  容量上限（数万条目级别）；超出上限会在启动或更新时报错，而不是被静默截断。
+- 上述限制的目的是在持续负载和会引发状态漂移的事件（网络变化、反复失败）下
+  保持内存与内核表使用量有界；运行时对应的压力指标见下方"诊断"一节的计数器。
+
 ### 诊断
 
-- `sing-box tools ebpf status` 探测当前内核所需的 eBPF 能力，并在命令执行期间一次性
-  枚举可见的 `sb_` eBPF map，报告当前条目数与容量。该枚举只在用户主动执行命令时发生，
-  不会增加运行时 watchdog、定时器或后台扫描。
-- 启用 Clash API 且至少存在一个 eBPF 入站后，`GET /ebpf` 可查看运行中的
-  eBPF 入站、attachment、恢复状态、资源使用量与失败计数：
+以下两种工具回答的是两个不同的问题：
+
+- **`sing-box tools ebpf status`** 探测的是*运行该命令的内核*支持什么——程序
+  类型、helper、map 类型——不需要一个正在运行的 sing-box 实例。它无法判断一个
+  *正在运行*的 eBPF 入站是否真的在接管流量，因为它从来没有一个运行中的实例可
+  供读取。
+- **Clash API 的 `GET /ebpf`** 端点（当配置了 Clash API 服务器时）从运行中的
+  进程内部报告每个 eBPF 入站的实时状态：启用了哪些路径、每条路径实际挂载的
+  接口与机制（`tcx` 或 `clsact`）、是否有路径仍在等待接口或正在从故障中恢复、
+  最近一次警告及故障最近一次自行恢复的时间、各后端间 bypass_rule_set 的一致
+  性、UDP 会话数与应答 socket 池状态，以及下文所述的分类计数器。例如：
 
   ```
   curl -H "Authorization: Bearer $SECRET" http://127.0.0.1:9090/ebpf
   ```
+
+  同样这几项事实的简要版本（启用的路径、实际挂载方式、仍在等待接口的路径、
+  `fakeip_icmp` 实际覆盖的范围）也会在启动时以默认可见的日志级别记录一次。
+
+上报的计数器包括：TC assignment 查找失败次数、shared packet-rewrite 令牌
+（token）分配失败次数与改写（rewrite）失败次数、shared packet-rewrite
+reconcile 失败次数、恢复尝试/成功/失败次数，以及（启用 `fakeip_icmp: reply`
+时）FakeIP ICMP 已发送的回复数、已检查但未回答而放行的 Echo Request 数、
+改写失败数。这些计数从进程启动起累计，不会自行重置；要计算速率，取两次读数
+相减即可。它们刻意不按客户端或目的地拆分（那样会随客户端来去无限增长），
+也不会记录单个数据包。FakeIP ICMP 的放行计数只统计本对象检查过但未回答的
+ICMP/ICMPv6 Echo Request（分片、带选项、类型/代码不符，或目的地不在 FakeIP
+范围内）——绝不统计同一接口上的普通非 ICMP 流量。
 
 ### 限制
 
@@ -333,6 +529,13 @@ FakeIP 和 DNS 的优先级与 `local.bypass_port` 相同，配置 53 端口时�
 - 已分片的 IPv4 和 IPv6 数据报绕过接管；IPv6 atomic fragment 作为普通 IPv6
   报文处理。
 - 网络变化后会自动恢复接管状态。
+- 每一个原地改写报文的 TC 程序（bypass_rule_set CIDR 匹配、
+  `shared.data_plane: packet_rewrite`、`fakeip_icmp: reply`）都已针对
+  network namespace 和 veth pair 测试验证过，但这两种环境都不会触发真实网卡
+  的校验和或分段卸载（veth 完全没有硬件卸载路径，软件回环无论网卡特性如何
+  声明，都会如实计算校验和）。在依赖此入站运行于尚未验证过硬件卸载与 eBPF
+  改写报文交互行为的实体机之前，请阅读
+  [eBPF 校验和/卸载验证](/zh/manual/misc/ebpf-checksum-offload-verification/)。
 
 在供应商内核或 Android 内核上启用前，请阅读
 [eBPF 内核要求](/zh/manual/misc/ebpf-kernel-requirements/)。

@@ -18,6 +18,7 @@ icon: material/alert-decagram
   
   "override_address": "1.0.0.1",
   "override_port": 53,
+  "proxy_protocol": 0,
   
   ... // Dial Fields
 }
@@ -41,8 +42,15 @@ Override the connection destination address.
 
 Override the connection destination port.
 
+#### proxy_protocol
+
+Write [Proxy Protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) in the connection header.
+
 Protocol value can be `1` or `2`.
 
 ### Dial Fields
+
+The `domain_resolver` field is also used to resolve unresolved domain destinations
+when Direct is selected for L3 ICMP forwarding.
 
 See [Dial Fields](/configuration/shared/dial/) for details.

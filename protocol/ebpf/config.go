@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json/badoption"
 )
@@ -37,6 +39,9 @@ type normalizedDataPlanes struct {
 }
 
 func normalizeDataPlanes(options option.EBPFInboundOptions) (normalizedDataPlanes, error) {
+	if options.PreMatch && (options.Local.DataPlane != "" || options.Local.CgroupPath != "" || options.Shared.DataPlane != "") {
+		return normalizedDataPlanes{}, E.New("local.data_plane, local.cgroup_path, and shared.data_plane are not supported with pre_match")
+	}
 	localEnabled, sharedEnabled, err := normalizeEnablement(options.Local.Enabled, options.Shared.Enabled)
 	if err != nil {
 		return normalizedDataPlanes{}, err
@@ -88,6 +93,58 @@ func normalizeLocalDataPlane(options option.EBPFLocalOptions) (string, string, e
 	return dataPlane, filepath.Clean(options.CgroupPath), nil
 }
 
+func normalizeBypassSelector(options *option.EBPFBypassSelectorOptions, localDataPlane string, hasBypassRuleSet bool) (*option.EBPFBypassSelectorOptions, error) {
+	if options == nil {
+		return nil, nil
+	}
+	if localDataPlane != localDataPlaneTC {
+		return nil, E.New("local.bypass_selector requires local.data_plane=tc")
+	}
+	if !hasBypassRuleSet {
+		return nil, E.New("local.bypass_selector requires bypass_rule_set")
+	}
+	if options.Tag == "" {
+		return nil, E.New("local.bypass_selector.tag is required")
+	}
+	if len(options.BypassWhen) == 0 {
+		return nil, E.New("local.bypass_selector.bypass_when is required")
+	}
+	settleDelay := time.Duration(options.SettleDelay)
+	finalCheckDelay := time.Duration(options.FinalCheckDelay)
+	rapidSwitchWindow := time.Duration(options.RapidSwitchWindow)
+	if settleDelay < 0 || finalCheckDelay < 0 || rapidSwitchWindow < 0 {
+		return nil, E.New("local.bypass_selector delays must not be negative")
+	}
+	if settleDelay == 0 {
+		settleDelay = 3 * time.Second
+	}
+	if finalCheckDelay == 0 {
+		finalCheckDelay = 5 * time.Second
+	}
+	if rapidSwitchWindow == 0 {
+		rapidSwitchWindow = 5 * time.Second
+	}
+	if options.RapidSwitchThreshold == 0 {
+		options.RapidSwitchThreshold = 3
+	}
+	if options.RapidSwitchThreshold < 2 {
+		return nil, E.New("local.bypass_selector.rapid_switch_threshold must be at least 2")
+	}
+	if settleDelay > time.Minute || finalCheckDelay > time.Minute || rapidSwitchWindow > time.Minute {
+		return nil, E.New("local.bypass_selector delays must not exceed 1m")
+	}
+	if finalCheckDelay < settleDelay {
+		return nil, E.New("local.bypass_selector.final_check_delay must be greater than or equal to settle_delay")
+	}
+	normalized := *options
+	normalized.SettleDelay = badoption.Duration(settleDelay)
+	normalized.FinalCheckDelay = badoption.Duration(finalCheckDelay)
+	normalized.RapidSwitchWindow = badoption.Duration(rapidSwitchWindow)
+	normalized.RapidSwitchThreshold = options.RapidSwitchThreshold
+	normalized.BypassWhen = common.Uniq(normalized.BypassWhen)
+	return &normalized, nil
+}
+
 func validateLocalOptions(enabled bool, options option.EBPFLocalOptions) error {
 	if enabled {
 		return nil
@@ -106,6 +163,9 @@ func validateLocalOptions(enabled bool, options option.EBPFLocalOptions) error {
 	}
 	if options.BypassPrivateAddress != nil {
 		return E.New("local.bypass_private_address requires local interception")
+	}
+	if options.BypassSelector != nil {
+		return E.New("local.bypass_selector requires local interception")
 	}
 	if len(options.IncludeUID) > 0 || len(options.IncludeUIDRange) > 0 ||
 		len(options.ExcludeUID) > 0 || len(options.ExcludeUIDRange) > 0 ||
@@ -143,9 +203,8 @@ const (
 
 // normalizeFakeIPICMP parses the fakeip_icmp option. It does not know yet
 // whether a FakeIP prefix exists or which data planes are active — that
-// depends on state (the DNS transport manager's FakeIP store), which
-// normalizeFakeIPICMP is not given, so those checks run later in
-// validateFakeIPICMP.
+// depends on state (the DNS transport manager's FakeIP store) normalizeFakeIPICMP
+// is not given, so those checks run later, in validateFakeIPICMP.
 func normalizeFakeIPICMP(mode string) (bool, error) {
 	switch mode {
 	case "", fakeIPICMPOff:
@@ -157,6 +216,60 @@ func normalizeFakeIPICMP(mode string) (bool, error) {
 	}
 }
 
+// resolveMapCapacities merges the map_capacity overrides over the data planes'
+// defaults. An absent block leaves every capacity at the value the data planes
+// used before the option existed, so adding map_capacity to a config is a pure
+// opt-in. Out-of-range values are rejected here rather than at map creation,
+// where the only signal would be a bare EINVAL from bpf(2).
+func resolveMapCapacities(overrides *option.EBPFMapCapacityOptions) (commonEBPF.FlowMapCapacities, commonEBPF.CgroupMapCapacity, error) {
+	flow := commonEBPF.DefaultFlowMapCapacities()
+	cgroup := commonEBPF.DefaultCgroupMapCapacity()
+	if overrides != nil {
+		if overrides.Assignment != 0 {
+			flow.Assignment = overrides.Assignment
+		}
+		if overrides.SelfBypass != 0 {
+			flow.SelfBypass = overrides.SelfBypass
+		}
+		if overrides.ProcessOwner != 0 {
+			flow.ProcessOwner = overrides.ProcessOwner
+		}
+		if cgroupOverrides := overrides.Cgroup; cgroupOverrides != nil {
+			if cgroupOverrides.TCPRedirect != 0 {
+				cgroup.TCPRedirect = cgroupOverrides.TCPRedirect
+			}
+			if cgroupOverrides.UDPRedirect != 0 {
+				cgroup.UDPRedirect = cgroupOverrides.UDPRedirect
+			}
+			if cgroupOverrides.UDPPeer != 0 {
+				cgroup.UDPPeer = cgroupOverrides.UDPPeer
+			}
+			if cgroupOverrides.UDPFlow != 0 {
+				cgroup.UDPFlow = cgroupOverrides.UDPFlow
+			}
+			if cgroupOverrides.SocketBypass != 0 {
+				cgroup.SocketBypass = cgroupOverrides.SocketBypass
+			}
+		}
+	}
+	for name, value := range map[string]uint32{
+		"assignment":    flow.Assignment,
+		"self_bypass":   flow.SelfBypass,
+		"process_owner": flow.ProcessOwner,
+		"tcp_redirect":  cgroup.TCPRedirect,
+		"udp_redirect":  cgroup.UDPRedirect,
+		"udp_peer":      cgroup.UDPPeer,
+		"udp_flow":      cgroup.UDPFlow,
+		"socket_bypass": cgroup.SocketBypass,
+	} {
+		if value == 0 || value > commonEBPF.MaxConfigurableMapCapacity {
+			return flow, cgroup, E.New("invalid eBPF map_capacity.", name, ": ", value,
+				" (must be between 1 and ", commonEBPF.MaxConfigurableMapCapacity, ")")
+		}
+	}
+	return flow, cgroup, nil
+}
+
 // validateFakeIPICMP is the second half of fakeip_icmp validation, run once
 // the FakeIP prefixes are resolved and normalized and the local/shared data
 // planes are known. fakeip_icmp=reply needs something to match against and
@@ -165,11 +278,11 @@ func normalizeFakeIPICMP(mode string) (bool, error) {
 // 应在显式开启时返回配置或能力错误" asks for.
 //
 // Every path with a TC attachment can host the responder: local.data_plane=tc
-// and shared.data_plane=socket_assign both attach through commonEBPF.TCBackend,
-// while shared.data_plane=packet_rewrite attaches through
-// commonEBPF.SharedPacketRewriteBackend. Both library backends receive the
-// resolved FakeIP ranges only as generic force-intercept prefixes and attach
-// their own ICMP Echo Reply object to the corresponding interfaces.
+// and shared.data_plane=socket_assign both attach through commonEBPF.TCBackend
+// (see tc_fakeip_icmp.go and tc_dataplane.go), and shared.data_plane=packet_rewrite
+// attaches its own copy through commonEBPF.SharedNetworkBackend
+// (shared_rewrite_dataplane.go) -- both load the same underlying
+// FakeIPICMPBackend (fakeip_icmp_backend.go), just on their own interfaces.
 // Only local.data_plane=cgroup has no attachment at all to answer from: its
 // connect()/sendmsg() hooks rewrite a destination before a packet is ever
 // built, so there is nothing there that could see or answer an ICMP request.
@@ -250,13 +363,26 @@ func validateSharedOptions(enabled bool, options option.EBPFSharedOptions) error
 	if enabled {
 		return nil
 	}
-	if options.DataPlane != "" || options.DNSMode != "" || len(options.Interface) > 0 || options.IPv6 != nil || options.BypassPrivateAddress != nil ||
-		len(options.IncludeSourceCIDR) > 0 || len(options.ExcludeSourceCIDR) > 0 ||
-		len(options.IncludeMACAddress) > 0 || len(options.ExcludeMACAddress) > 0 ||
-		len(options.BypassPort) > 0 || len(options.BypassPortRange) > 0 {
+	// A shared block with explicit "enabled": false is a paused data plane:
+	// the leftover fields (data_plane, interface, ipv6, ...) are kept for
+	// the next time the switch flips back on, which must not be an error.
+	// Only a stray shared block with NO explicit enablement (so the default
+	// path disabled it) is a misconfiguration worth rejecting.
+	if options.Enabled != nil {
+		return nil
+	}
+	if hasAnySharedOption(options) {
 		return E.New("shared options require shared interception")
 	}
 	return nil
+}
+
+func hasAnySharedOption(options option.EBPFSharedOptions) bool {
+	return options.DataPlane != "" || options.DNSMode != "" || len(options.Interface) > 0 ||
+		options.IPv6 != nil || options.BypassPrivateAddress != nil ||
+		len(options.IncludeSourceCIDR) > 0 || len(options.ExcludeSourceCIDR) > 0 ||
+		len(options.IncludeMACAddress) > 0 || len(options.ExcludeMACAddress) > 0 ||
+		len(options.BypassPort) > 0 || len(options.BypassPortRange) > 0
 }
 
 func parsePortRanges(name string, ports []uint16, ranges []string) ([]commonEBPF.PortRange, error) {

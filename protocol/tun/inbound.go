@@ -16,7 +16,6 @@ import (
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	C "github.com/sagernet/sing-box/constant"
-	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/service/oomkiller"
@@ -81,9 +80,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if options.InboundOptions != (option.InboundOptions{}) {
 		return nil, E.New("legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, checkout migration: https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions")
 	}
-	if options.Stack != "" {
-		deprecated.Report(ctx, deprecated.OptionTunStack)
-	}
 
 	address := options.Address
 	inet4Address := common.Filter(address, func(it netip.Prefix) bool {
@@ -110,9 +106,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	})
 
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
-	usePlatformInterface := platformInterface != nil && platformInterface.UsePlatformInterface()
 	if options.NetNs != "" && !C.IsLinux {
 		return nil, E.New("`netns` is only supported on Linux")
+	}
+	if C.IsAndroid && options.AutoRedirectDisableMarkMode {
+		return nil, E.New("`auto_redirect_disable_mark_mode` is not supported on Android")
 	}
 	tunMTU := options.MTU
 	if tunMTU == 0 {
@@ -127,14 +125,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 	}
 	var enableGSO bool
-	if C.IsLinux && !usePlatformInterface {
+	if C.IsLinux && platformInterface == nil {
 		switch options.Stack {
 		case "", "go", "gvisor":
 			enableGSO = tunMTU < 49152
 		}
 	}
 	if options.MultiQueue {
-		if !C.IsLinux || usePlatformInterface {
+		if !C.IsLinux || platformInterface != nil {
 			return nil, E.New("`multi_queue` is only supported on Linux")
 		}
 		switch options.Stack {
@@ -270,7 +268,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		if !options.AutoRoute {
 			return nil, E.New("`auto_route` is required by `auto_redirect`")
 		}
-		inbound.tunOptions.AutoRedirectMarkMode = true
+		disableMarkMode := C.IsLinux && !C.IsAndroid && options.AutoRedirectDisableMarkMode
+		if disableMarkMode && (len(inbound.routeRuleSet) > 0 || len(inbound.routeExcludeRuleSet) > 0) {
+			return nil, E.New("`auto_redirect` mark mode cannot be disabled with `route_address_set` or `route_exclude_address_set`")
+		}
+		inbound.tunOptions.AutoRedirectMarkMode = !disableMarkMode
 		usePlatformAutoRedirect := platformInterface != nil && platformInterface.UsePlatformAutoRedirect()
 		if usePlatformAutoRedirect {
 			inbound.autoRedirect, err = newPlatformAutoRedirect(inbound)
@@ -291,7 +293,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			return nil, E.Cause(err, "initialize auto-redirect")
 		}
 		inbound.dnsHijackByPort = inbound.tunOptions.DNSModeOrDefault() == tun.DNSModeHijack
-		if !usePlatformAutoRedirect && options.NetNs == "" {
+		if !usePlatformAutoRedirect && !disableMarkMode && options.NetNs == "" {
 			err = networkManager.RegisterAutoRedirectOutputMark(inbound.tunOptions.AutoRedirectOutputMark)
 			if err != nil {
 				return nil, err
@@ -590,7 +592,7 @@ func (t *Inbound) JudgeFlow(network uint8, source netip.AddrPort, destination ne
 		}
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	return adapter.JudgeFlow(t.router, adapter.InboundContext{Inbound: t.tag, InboundType: C.TypeTun}, network, source, destination, firstPacket)
+	return adapter.JudgeFlow(t.router, t.tag, C.TypeTun, network, source, destination, firstPacket)
 }
 
 func (t *Inbound) isDNSHijackDestination(destination M.Socksaddr) bool {
@@ -658,7 +660,7 @@ func (t *autoRedirectHandler) NewConnectionEx(ctx context.Context, conn net.Conn
 	ctx = log.ContextWithNewID(ctx)
 	var metadata adapter.InboundContext
 	metadata.Inbound = t.tag
-	metadata.InboundType = C.TypeTun
+	metadata.InboundType = C.TypeRedirect
 	metadata.Source = source
 	metadata.Destination = destination
 	if (*Inbound)(t).isDNSHijackDestination(destination) {

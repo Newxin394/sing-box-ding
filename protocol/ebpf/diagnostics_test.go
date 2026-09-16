@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -20,9 +19,6 @@ import (
 func TestDiagnosticsReportsWaitingForInterfaceWhenNothingIsAttachedYet(t *testing.T) {
 	inbound := &Inbound{localEnabled: true, localDataPlane: localDataPlaneTC}
 	diagnostics := inbound.Diagnostics()
-	if diagnostics.SchemaVersion != 1 || diagnostics.ObservedAt.IsZero() {
-		t.Fatalf("diagnostics metadata = version %d at %v, want schema version 1 and timestamp", diagnostics.SchemaVersion, diagnostics.ObservedAt)
-	}
 	if diagnostics.State != EBPFDiagnosticsStateWaitingForInterface {
 		t.Fatalf("state = %s, want %s", diagnostics.State, EBPFDiagnosticsStateWaitingForInterface)
 	}
@@ -31,33 +27,20 @@ func TestDiagnosticsReportsWaitingForInterfaceWhenNothingIsAttachedYet(t *testin
 	}
 }
 
-func TestDiagnosticsJSONUsesShortRequestDrivenCache(t *testing.T) {
-	inbound := &Inbound{localEnabled: true, localDataPlane: localDataPlaneTC}
-	first, ok := inbound.DiagnosticsJSON().(EBPFDiagnostics)
-	if !ok {
-		t.Fatal("DiagnosticsJSON did not return EBPFDiagnostics")
-	}
-	second, ok := inbound.DiagnosticsJSON().(EBPFDiagnostics)
-	if !ok {
-		t.Fatal("second DiagnosticsJSON did not return EBPFDiagnostics")
-	}
-	if !first.ObservedAt.Equal(second.ObservedAt) {
-		t.Fatalf("cache miss inside TTL: first=%v second=%v", first.ObservedAt, second.ObservedAt)
-	}
-}
-
 // TestDiagnosticsReportsNormalWithAHealthyAttachment covers the ordinary
 // case: local TC configured and actually attached to an interface, nothing
 // failing, no rollback anomaly.
 func TestDiagnosticsReportsNormalWithAHealthyAttachment(t *testing.T) {
 	inbound := &Inbound{localEnabled: true, localDataPlane: localDataPlaneTC}
-	inbound.tcDataPlane = &testTCRuntime{
-		attachments: []commonEBPF.AttachmentInfo{{
-			InterfaceName:  "eth0",
-			InterfaceIndex: 2,
-			Role:           "local",
-			Mechanism:      "tcx",
-		}},
+	inbound.tcDataPlane = &tcDataPlane{
+		attachments: []*tcInterfaceAttachment{
+			{
+				interfaceName:  "eth0",
+				interfaceIndex: 2,
+				role:           tcInterfaceRole{local: true},
+				attachmentType: "tcx",
+			},
+		},
 	}
 	diagnostics := inbound.Diagnostics()
 	if diagnostics.State != EBPFDiagnosticsStateNormal {
@@ -140,13 +123,10 @@ func TestDiagnosticsRecordsRecoveryTimeOnTransitionToSettled(t *testing.T) {
 func TestDiagnosticsReportsNeedsAttentionWhenUnrecoverable(t *testing.T) {
 	inbound := &Inbound{sharedEnabled: true, sharedDataPlane: sharedDataPlanePacketRewrite, udpTimeout: time.Minute}
 	shared := newSharedRewrite(inbound, option.EBPFSharedOptions{})
-	shared.setDataPlane(&testSharedKernelRuntime{
-		attachments: []commonEBPF.AttachmentInfo{{
-			InterfaceName:  "eth0",
-			InterfaceIndex: 2,
-			Role:           "shared",
-			Mechanism:      "tcx",
-		}},
+	shared.setDataPlane(&sharedRewriteDataPlane{
+		attachments: map[string]*sharedRewriteAttachment{
+			"eth0": {interfaceName: "eth0", interfaceIndex: 2, attachmentType: "tcx"},
+		},
 	})
 	inbound.setSharedRewrite(shared)
 	inbound.recordTCUpdateOutcome(tcUpdateOutcome{
@@ -184,8 +164,15 @@ func TestDiagnosticsIncludesBypassRuleSetRecovery(t *testing.T) {
 	}
 }
 
-// TestDiagnosticsUnrecoverableSurvivesAnUnknownRound ensures an unevaluated
-// component cannot erase a previously reported unrecoverable state.
+// TestDiagnosticsUnrecoverableSurvivesAnUnknownRound proves the companion
+// gap the same review flagged: updateTCInterfaces can return before
+// re-evaluating every component this round (see its own doc comment,
+// e.g. an early return after a local-interface-topology failure leaves
+// sharedRewrite at its zero value, tcSharedRewriteUnknown, without having
+// touched it at all) -- and recordTCUpdateOutcome's plain overwrite of
+// lastOutcome would otherwise silently replace a genuinely still-broken
+// Unrecoverable component with "nothing is known", reporting normal/
+// recovering instead of needs_attention for a fault nothing has resolved.
 func TestDiagnosticsUnrecoverableSurvivesAnUnknownRound(t *testing.T) {
 	inbound := &Inbound{}
 	inbound.recordTCUpdateOutcome(tcUpdateOutcome{
@@ -211,16 +198,18 @@ func TestDiagnosticsUnrecoverableSurvivesAnUnknownRound(t *testing.T) {
 	}
 }
 
-// TestDiagnosticsUDPSessionCountIncludesSharedPacketRewriteClients covers a
-// packet-rewrite-only inbound with no local UDP client table.
+// TestDiagnosticsUDPSessionCountIncludesSharedPacketRewriteClients is an
+// independent review's finding: UDPSessionCount only ever read
+// i.udpClientTable (the local/TC path's own client table), never
+// sharedRewrite.sharedUDPClientTable -- a shared.data_plane: packet_rewrite
+// inbound with no local role at all keeps its live UDP clients exclusively
+// in the latter table, so this metric read 0 for it no matter how many
+// clients were actually active.
 func TestDiagnosticsUDPSessionCountIncludesSharedPacketRewriteClients(t *testing.T) {
 	inbound := &Inbound{udpTimeout: time.Minute}
 	shared := newSharedRewrite(inbound, option.EBPFSharedOptions{})
 	inbound.setSharedRewrite(shared)
-	shared.sharedUDPClientTable.loadOrCreate(udpSessionKey{
-		Source: netip.MustParseAddrPort("192.0.2.1:12345"),
-		Scope:  udpSessionScopeSharedRewrite,
-	})
+	shared.sharedUDPClientTable.loadOrCreate(netip.MustParseAddrPort("192.0.2.1:12345"))
 
 	diagnostics := inbound.Diagnostics()
 	if diagnostics.UDPSessionCount != 1 {
@@ -275,7 +264,9 @@ func TestDiagnosticsWriteJSONRoundTrips(t *testing.T) {
 	}
 }
 
-// TestDiagnosticsWriteTextIncludesTheKeyFields covers the text-only fields.
+// TestDiagnosticsWriteTextIncludesTheKeyFields is a light sanity check that
+// the text writer actually names item 7's required fields rather than
+// silently dropping one while json.Marshal would still succeed.
 func TestDiagnosticsWriteTextIncludesTheKeyFields(t *testing.T) {
 	inbound := &Inbound{localEnabled: true, localDataPlane: localDataPlaneTC}
 	diagnostics := inbound.Diagnostics()
@@ -284,10 +275,7 @@ func TestDiagnosticsWriteTextIncludesTheKeyFields(t *testing.T) {
 		t.Fatalf("WriteText: %v", err)
 	}
 	text := buffer.String()
-	for _, want := range []string{
-		"Tag:", "State:", "Attachments:", "Recovery pending:", "UDP sessions:", "UDP reply sockets:",
-		"tc_socket_lookup_failures=", "tc_sk_assign_failures=", "tc_assignment_update_failures=",
-	} {
+	for _, want := range []string{"Tag:", "State:", "Attachments:", "Recovery pending:", "UDP sessions:", "UDP reply sockets:"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("text output missing %q; got:\n%s", want, text)
 		}

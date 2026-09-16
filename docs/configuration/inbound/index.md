@@ -31,12 +31,11 @@
 | `hysteria2`   | [Hysteria2](./hysteria2/)     | :material-close: |
 | `vless`       | [VLESS](./vless/)             | TCP              |
 | `anytls`      | [AnyTLS](./anytls/)           | TCP              |
-| `snell`       | [Snell](./snell/)             | TCP              |
+| `snell`       | [Snell](./snell/)             | TCP / UDP (v5)   |
 | `tun`         | [Tun](./tun/)                 | :material-close: |
 | `redirect`    | [Redirect](./redirect/)       | :material-close: |
 | `tproxy`      | [TProxy](./tproxy/)           | :material-close: |
 | `cloudflared` | [Cloudflared](./cloudflared/) | :material-close: |
-| `tailcat`     | [Tailcat](./tailcat/)         | :material-close: |
 
 #### tag
 

@@ -75,20 +75,22 @@ log that stops before the fault.
 
 ## Logs and runtime state
 
-A successful startup emits a brief `eBPF inbound started` summary at Debug
-level: enabled paths, each attachment's actual interface and mechanism, any
-path still waiting for an interface, and what `fakeip_icmp` actually covers.
-Debug logging also includes an `eBPF cgroup active` or `eBPF TC active` summary containing the
+A successful startup always emits a brief `eBPF inbound started` summary at
+the log level normally shown by default: enabled paths, each attachment's
+actual interface and mechanism, any path still waiting for an interface, and
+what `fakeip_icmp` actually covers. At Debug log level, startup additionally
+emits an `eBPF cgroup active` or `eBPF TC active` summary containing the
 selected data planes and their effective runtime paths. TC summaries also include the default interface, attachments,
 internal listeners, routing state, and delivery interface when applicable. Each
 attachment includes its local/shared role and framing. A network event emits a
 Debug entry only when attachments or managed network state are changed; repair
 failures produce rate-limited warnings. Userspace handoff failures produce
 rate-limited Warn or Error entries. BPF packet return paths do not emit
-per-packet logs. Interface lifecycle handling is event-driven with a
-low-frequency drift check for silent kernel-state changes. Shared
-`packet_rewrite` runs bounded maintenance when flow events, release deadlines,
-or map pressure require it. These tasks do not emit periodic status records.
+per-packet logs, and interface lifecycle handling does not use periodic polling.
+Shared `packet_rewrite` runs a bounded adaptive sweep to reclaim orphaned flow
+state. Normal pressure scans are requested by flow-state events; a low-frequency
+watchdog also checks for kernel-only orphans that userspace cannot observe. This
+maintenance does not emit periodic status records.
 
 If the log reports an assignment or UDP original-destination failure, retain
 the complete log around the first error and collect the TC attachment state

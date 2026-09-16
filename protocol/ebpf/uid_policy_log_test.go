@@ -5,7 +5,7 @@ package ebpf
 import (
 	"testing"
 
-	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 )
 
 func TestFormatUIDRanges(t *testing.T) {

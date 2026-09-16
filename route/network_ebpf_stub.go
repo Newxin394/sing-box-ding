@@ -2,4 +2,4 @@
 
 package route
 
-type ebpfSelfBypassState struct{}
+type ebpfSelfBypassState struct{} //nolint:unused // mirrors network_ebpf.go for non-eBPF builds

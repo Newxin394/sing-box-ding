@@ -77,6 +77,10 @@ type DialerOptionsWrapper interface {
 	ReplaceDialerOptions(options DialerOptions)
 }
 
+type InnerDomainResolverOptionsWrapper interface {
+	TakeInnerDomainResolverOptions() *DomainResolveOptions
+}
+
 type DialerOptions struct {
 	Detour string `json:"detour,omitempty" reference:"outbound"`
 	AbstractDialerOptions
@@ -97,6 +101,7 @@ type AbstractDialerOptions struct {
 	DisableTCPKeepAlive        bool                              `json:"disable_tcp_keep_alive,omitempty"`
 	TCPKeepAlive               badoption.Duration                `json:"tcp_keep_alive,omitempty"`
 	TCPKeepAliveInterval       badoption.Duration                `json:"tcp_keep_alive_interval,omitempty"`
+	TCPKeepAliveCount          int                               `json:"tcp_keep_alive_count,omitempty"`
 	TCPKeepAliveSystemDefaults bool                              `json:"-"`
 	UDPBindPort                uint16                            `json:"-"`
 	UDPFragment                *bool                             `json:"udp_fragment,omitempty"`
@@ -181,11 +186,18 @@ type ServerOptionsWrapper interface {
 }
 
 type ServerOptions struct {
-	Server     string `json:"server"`
-	ServerPort uint16 `json:"server_port"`
+	Server          string                     `json:"server"`
+	ServerPort      uint16                     `json:"server_port"`
+	ServerAddresses badoption.Listable[string] `json:"server_addresses,omitempty"`
 }
 
 func (o ServerOptions) Build() M.Socksaddr {
+	// 兼容 server_addresses（部分订阅/app 会写入该字段，作为 server 的备用地址列表）。
+	// 仅在 server 缺失时使用它 —— 因为 TLS 的 SNI 也从此地址推导，
+	// 若有域名却返回 IP 会导致 SNI 变成 IP 而握手失败。
+	if o.Server == "" && len(o.ServerAddresses) > 0 {
+		return M.ParseSocksaddrHostPort(o.ServerAddresses[0], o.ServerPort)
+	}
 	return M.ParseSocksaddrHostPort(o.Server, o.ServerPort)
 }
 

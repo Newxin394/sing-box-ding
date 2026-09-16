@@ -89,7 +89,6 @@ type udpWarningLimiters struct {
 	packetInfo          warningLimiter
 	originalDestination warningLimiter
 	cleanup             warningLimiter
-	replySocketCapacity warningLimiter
 }
 
 type interfaceWarningLimiters struct {

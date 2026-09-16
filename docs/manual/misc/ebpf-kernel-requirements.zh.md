@@ -118,6 +118,21 @@ BTF 中确认存在修复后的 `bpf_lpm_trie_key_u8` 布局。若内核处于�
 运行时不依赖 `bpftool`、`tc` 或 `ip` 命令，sing-box 直接使用 BPF syscall 和
 netlink。
 
+## Pre-match 模式
+
+可选的 `pre_match` 是独立的防火墙数据面，不使用 eBPF TC 或 cgroup 程序。
+所用 iptables 必须提供 `NFQUEUE` 和 `CONNMARK` target 或模块。本机 pre-match
+还需要 `cgroup` match 和 `REDIRECT`；shared pre-match 还需要 `TPROXY` 和策略
+路由。本机接管还必须通过非根 cgroup v2 子树排除 sing-box 自身。进程还必须能够
+打开 NFQUEUE 并设置数据包 mark。
+
+首个 TCP SYN 或 UDP 数据报会进入用户态队列，并通过普通的
+`Router.PreMatch` 路径判定。结果保存到 conntrack mark，后续数据包无需再次进入
+NFQUEUE。本机 IPv4 和 IPv6 使用 `REDIRECT`；shared IPv4 和 IPv6 使用 `TPROXY`。
+无法解析的报文和分片报文直接放行。该模式需要 conntrack
+以及相应的 IPv4/IPv6 netfilter hook；`--queue-bypass` 会在用户态队列不可用时
+有意放行流量。
+
 ## 接口要求
 
 local TC 模式挂载到网络管理器当前的默认接口；shared 模式挂载到配置的下游接口。
@@ -127,7 +142,7 @@ loopback 和无法识别的链路封装。
 
 local attachment 会跟随默认接口变化。配置的 shared 接口存在时会自动挂载，但该接口
 作为当前默认上游期间会停止 shared 接管。链路和路由事件会触发受管 attachment 与网络
-状态的检查和修复；低频漂移检查还会修复未产生相应 netlink 通知的内核状态漂移。
+状态的检查和修复，不使用周期轮询。
 
 同一时间一个接口只能由一个 sing-box eBPF 入站管理。已有的无关 `clsact` filter
 会保留，但 sing-box filter handle 或接口锁冲突会阻止启动。
@@ -160,13 +175,6 @@ sing-box tools ebpf status --local-data-plane tc --shared-data-plane socket_assi
 `packet_rewrite` 以及两者同时启用；可使用显式 data-plane 参数探测可选的 TC 或
 `socket_assign` 路径。
 
-local TC 可使用 `--local-interface <name>` 只读检查接口状态和现有 clsact qdisc；local
-cgroup 可使用 `--cgroup-path <path>` 检查指定 cgroup v2 路径，省略时检查当前进程所在的路径。
-这些检查不会创建 qdisc、挂载 hook 或修改系统状态。
-
-命令末尾会显示 `sb_` map 的一次性 occupancy 诊断；不支持安全遍历的 map 会标为
-`UNKNOWN`。该诊断不会在 sing-box 运行期间周期执行，也不会改变 map 或数据面。
-
 探测会针对所选协议、地址族、数据面和 shared 接口。local TC 模式会报告必需的 TC socket-cookie
 helper 以及可选的 cgroup socket-cookie hook。添加 `--process-tracking` 可检查可选的
 socket-address 进程追踪和 socket-release 清理能力。启动时会判断进程 cgroup 是否独占，能挂载时使用内核登记，否则启用用户态
@@ -174,8 +182,8 @@ cookie 登记路径。命令还会加载并立即关闭这些选项实际选择�
 前提下验证真实 map ABI 和 verifier 可见的程序变体。明确缺少
 能力会报告 `FAIL`，安全策略
 拒绝探测等无法判断的情况会报告 `UNKNOWN`；必需检查出现任一状态时命令都会以非零
-状态退出。请用实际运行 sing-box 的权限重新探测。非变更型探测不会挂载 TC filter 或
-cgroup hook、创建 veth、安装路由或修改 sysctl；这些操作会在启动时实际检查，失败则启动退出。
+状态退出。请用实际运行 sing-box 的权限重新探测。非变更型探测不会挂载 TC filter、
+创建 veth 或修改 sysctl；这些操作会在启动时实际检查，失败则启动退出。
 如果目标配置禁用了 IPv6，请使用 `--ipv6=false`。
 
 ## 报文限制

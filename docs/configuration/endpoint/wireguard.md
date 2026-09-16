@@ -19,6 +19,7 @@
   
   "system": false,
   "name": "",
+  "gso": false,
   "mtu": 1408,
   "address": [],
   "private_key": "",
@@ -39,6 +40,7 @@
 
   "workers": 0,
   "on_demand": false,
+  "inner_domain_resolver": "", // or {}
  
   ... // Dial Fields
 }
@@ -59,6 +61,16 @@ Requires privilege and cannot conflict with exists system interfaces.
 #### name
 
 Custom interface name for system interface.
+
+#### gso
+
+!!! quote ""
+
+    Only supported on Linux.
+
+Try to enable generic segmentation offload.
+
+Enabled by default when `system` is true.
 
 #### mtu
 
@@ -136,6 +148,16 @@ CPU count is used by default.
 !!! question "Since sing-box 1.15.0"
 
 Allow the endpoint to be disconnected when necessary.
+
+#### inner_domain_resolver
+
+Set domain resolver for resolving domain names of connections passing through the WireGuard tunnel.
+
+It is also used to resolve unresolved domain destinations when this endpoint is selected for L3 forwarding.
+
+This option uses the same format as [domain_resolver](/configuration/shared/dial/#domain_resolver).
+
+When not set, the default DNS is used.
 
 ### UDP NAT Fields
 

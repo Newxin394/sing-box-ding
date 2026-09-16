@@ -62,13 +62,16 @@ type InboundContext struct {
 	// sniffer
 
 	Protocol     string
-	Domain       string
+	SniffHost    string
 	Client       string
 	SniffContext any
 	SnifferNames []string
 	SniffError   error
 
 	// cache
+
+	CacheIPs []netip.Addr
+	Domain   string
 
 	// Deprecated: implement in rule action
 	InboundDetour             string
@@ -103,6 +106,7 @@ type InboundContext struct {
 	QueryDNSSEC                         bool
 	FakeIP                              bool
 	PreMatch                            bool
+	DestOverride                        bool
 
 	// rule cache
 
@@ -115,6 +119,32 @@ type InboundContext struct {
 	DestinationPortMatch         bool
 	DeferredIPCIDRMatchGroups    uint8
 	IgnoreDestinationIPCIDRMatch bool
+
+	// extended metadata
+	Extended *InboundContextExtended
+}
+
+type InboundContextExtended struct {
+	RealOutboundChain []string
+}
+
+func (c *InboundContext) InitExtended() {
+	if c.Extended == nil {
+		c.Extended = new(InboundContextExtended)
+	}
+}
+
+func (c *InboundContext) AppendRealOutbound(tag string) {
+	if c.Extended != nil {
+		c.Extended.RealOutboundChain = append(c.Extended.RealOutboundChain, tag)
+	}
+}
+
+func (c *InboundContext) GetRealOutboundChain() []string {
+	if c.Extended != nil {
+		return c.Extended.RealOutboundChain
+	}
+	return nil
 }
 
 func (c *InboundContext) ResetRuleCache() {
@@ -200,6 +230,7 @@ func ContextForMultiplexSession(ctx context.Context) context.Context {
 }
 
 func WithContext(ctx context.Context, inboundContext *InboundContext) context.Context {
+	inboundContext.InitExtended()
 	return context.WithValue(ctx, (*inboundContextKey)(nil), inboundContext)
 }
 
