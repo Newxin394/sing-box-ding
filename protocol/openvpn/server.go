@@ -208,7 +208,6 @@ func (s *ServerEndpoint) Start(stage adapter.StartStage) error {
 					Control:          listenConfig.Control,
 					InterfaceFinder:  networkManager.InterfaceFinder(),
 					InterfaceMonitor: networkManager.InterfaceMonitor(),
-					ExcludeInterface: s.options.Name,
 					IsExempt: func() bool {
 						return networkManager.AutoRedirectOutputMark() != 0
 					},
