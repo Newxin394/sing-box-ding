@@ -188,6 +188,8 @@ nav:
           - Redirect: configuration/inbound/redirect.md
           - TProxy: configuration/inbound/tproxy.md
           - Cloudflared: configuration/inbound/cloudflared.md
+          - Tailcat: configuration/inbound/tailcat.md
+          - Tailcat: configuration/outbound/tailcat.md
       - Outbound:
           - configuration/outbound/index.md
           - Direct: configuration/outbound/direct.md
