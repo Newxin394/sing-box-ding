@@ -193,11 +193,7 @@ func (i *TailcatInbound) JudgeFlow(network uint8, source netip.AddrPort, destina
 	if i.rewriteDestination(destination.Addr()) != destination.Addr() {
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	return adapter.JudgeFlow(i.router, adapter.InboundContext{
-		Inbound:     i.Tag(),
-		InboundType: i.Type(),
-		User:        i.node.userName(source.Addr()),
-	}, network, source, destination, firstPacket)
+	return adapter.JudgeFlowWithUser(i.router, i.Tag(), i.Type(), i.node.userName(source.Addr()), network, source, destination, firstPacket)
 }
 
 func (i *TailcatInbound) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {
