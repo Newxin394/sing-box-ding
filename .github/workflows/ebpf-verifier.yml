@@ -43,7 +43,7 @@ jobs:
         run: |
           go test -tags with_ebpf \
             ./adapter ./common/dialer ./common/listener ./protocol/ebpf .
-          go test -run '^$' -tags with_ebpf,with_gvisor ./protocol/tailscale
+          go test -run '^$' -tags with_ebpf,with_tailscale ./protocol/tailscale
 
       # sing-ebpf owns verifier, program-run, attachment and packet-path tests.
       # This repository owns the sing-box integration around that library.
