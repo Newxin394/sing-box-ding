@@ -77,6 +77,7 @@ func InboundRegistry() *inbound.Registry {
 
 	registerQUICInbounds(registry)
 	registerCloudflaredInbound(registry)
+	registerTailcatInbound(registry)
 	registerStubForRemovedInbounds(registry)
 
 	return registry
@@ -119,6 +120,7 @@ func OutboundRegistry() *outbound.Registry {
 	anytls.RegisterOutbound(registry)
 
 	registerQUICOutbounds(registry)
+	registerTailcatOutbound(registry)
 	registerStubForRemovedOutbounds(registry)
 
 	return registry
