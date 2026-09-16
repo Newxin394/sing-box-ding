@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,7 +26,6 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/winpowrprof"
-	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/pause"
 
@@ -35,40 +35,40 @@ import (
 var _ adapter.NetworkManager = (*NetworkManager)(nil)
 
 type NetworkManager struct {
-	ctx                     context.Context
-	logger                  logger.ContextLogger
-	router                  adapter.Router
-	interfaceFinder         *control.DefaultInterfaceFinder
-	networkInterfaces       common.TypedValue[[]adapter.NetworkInterface]
-	autoDetectInterface     bool
-	defaultOptions          adapter.NetworkOptions
-	autoRedirectOutputMark  uint32
-	ebpfSelfBypass          ebpfSelfBypassState
-	networkMonitor          tun.NetworkUpdateMonitor
-	interfaceMonitor        tun.DefaultInterfaceMonitor
-	packageManager          tun.PackageManager
-	powerListener           winpowrprof.EventListener
-	pauseManager            pause.Manager
-	platformInterface       adapter.PlatformInterface
-	connectionManager       adapter.ConnectionManager
-	endpoint                adapter.EndpointManager
-	inbound                 adapter.InboundManager
-	outbound                adapter.OutboundManager
-	needWIFIState           bool
-	wifiMonitor             settings.WIFIMonitor
-	wifiState               adapter.WIFIState
-	networkEnvironment      uint64
-	stateAccess             sync.RWMutex
-	environmentUpdateAccess sync.Mutex
-	environmentUpdateTimer  *time.Timer
-	startedCtx              context.Context
-	startedCancel           context.CancelFunc
-	interfaceUpdateElement  *list.Element[tun.DefaultInterfaceUpdateCallback]
-	interfaceUpdateAccess   sync.Mutex
-	interfaceUpdateCancel   context.CancelFunc
-	resetRunAccess          sync.Mutex
-	powerUpdateAccess       sync.Mutex
-	powerUpdateCancel       context.CancelFunc
+	ctx                      context.Context
+	logger                   logger.ContextLogger
+	router                   adapter.Router
+	interfaceFinder          *control.DefaultInterfaceFinder
+	networkInterfaces        common.TypedValue[[]adapter.NetworkInterface]
+	autoDetectInterface      bool
+	defaultOptions           adapter.NetworkOptions
+	autoRedirectOutputMark   uint32
+	ebpfSelfBypass           ebpfSelfBypassState //nolint:unused // only accessed from network_ebpf.go (with_ebpf + linux/android builds)
+	networkMonitor           tun.NetworkUpdateMonitor
+	interfaceMonitor         tun.DefaultInterfaceMonitor
+	interfaceRecheckAccess   sync.Mutex
+	interfaceRecheckTimer    *time.Timer
+	packageManager           tun.PackageManager
+	powerListener            winpowrprof.EventListener
+	pauseManager             pause.Manager
+	platformInterface        adapter.PlatformInterface
+	connectionManager        adapter.ConnectionManager
+	endpoint                 adapter.EndpointManager
+	inbound                  adapter.InboundManager
+	outbound                 adapter.OutboundManager
+	needWIFIState            bool
+	wifiMonitor              settings.WIFIMonitor
+	wifiState                adapter.WIFIState
+	networkEnvironment       uint64
+	stateAccess              sync.RWMutex
+	environmentUpdateAccess  sync.Mutex
+	environmentUpdateTimer   *time.Timer
+	interfaceUpdateAccess    sync.Mutex
+	interfaceUpdateCancel    context.CancelFunc
+	interfaceUpdateRunAccess sync.Mutex
+	powerUpdateAccess        sync.Mutex
+	powerUpdateCancel        context.CancelFunc
+	started                  atomic.Bool
 }
 
 func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options option.RouteOptions, dnsOptions option.DNSOptions) (*NetworkManager, error) {
@@ -138,10 +138,13 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
 			if err != nil {
 				return nil, E.New("auto_detect_interface unsupported on current platform")
 			}
+			interfaceMonitor.RegisterCallback(nm.notifyInterfaceUpdate)
 			nm.interfaceMonitor = interfaceMonitor
 		}
 	} else {
-		nm.interfaceMonitor = nm.platformInterface.CreateDefaultInterfaceMonitor(logger)
+		interfaceMonitor := nm.platformInterface.CreateDefaultInterfaceMonitor(logger)
+		interfaceMonitor.RegisterCallback(nm.notifyInterfaceUpdate)
+		nm.interfaceMonitor = interfaceMonitor
 	}
 	return nm, nil
 }
@@ -168,6 +171,22 @@ func (r *NetworkManager) Start(stage adapter.StartStage) error {
 			}
 		}
 	case adapter.StartStateStart:
+		if runtime.GOOS == "windows" {
+			powerListener, err := winpowrprof.NewEventListener(r.notifyWindowsPowerEvent)
+			if err == nil {
+				r.powerListener = powerListener
+			} else {
+				r.logger.Warn("initialize power listener: ", err)
+			}
+		}
+		if r.powerListener != nil {
+			monitor.Start("start power listener")
+			err := r.powerListener.Start()
+			monitor.Finish()
+			if err != nil {
+				return E.Cause(err, "start power listener")
+			}
+		}
 		if C.IsAndroid && r.platformInterface == nil {
 			monitor.Start("initialize package manager")
 			packageManager, err := tun.NewPackageManager(tun.PackageManagerOptions{
@@ -202,30 +221,7 @@ func (r *NetworkManager) Start(stage adapter.StartStage) error {
 				}
 			}
 		}
-		r.startedCtx, r.startedCancel = context.WithCancel(r.ctx)
-		if runtime.GOOS == "windows" {
-			powerListener, err := winpowrprof.NewEventListener(r.notifyWindowsPowerEvent)
-			if err == nil {
-				r.powerListener = powerListener
-			} else {
-				r.logger.Warn("initialize power listener: ", err)
-			}
-		}
-		if r.powerListener != nil {
-			monitor.Start("start power listener")
-			err := r.powerListener.Start()
-			monitor.Finish()
-			if err != nil {
-				return E.Cause(err, "start power listener")
-			}
-		}
-		if r.interfaceMonitor != nil {
-			r.interfaceUpdateElement = r.interfaceMonitor.RegisterCallback(r.notifyInterfaceUpdate)
-			// Every monitor implementation has already delivered the initial state when Start returned:
-			// sing-tun checks routes synchronously, the Apple client blocks on the first NWPathMonitor update,
-			// and the Android client resolves the active network before setListener returns.
-			r.notifyInterfaceUpdate(r.interfaceMonitor.DefaultInterface(), 0)
-		}
+		r.started.Store(true)
 	}
 	return nil
 }
@@ -243,28 +239,17 @@ func (r *NetworkManager) Initialize(ruleSets []adapter.RuleSet) {
 func (r *NetworkManager) Close() error {
 	monitor := taskmonitor.New(r.logger, C.StopTimeout)
 	var err error
-	if r.interfaceUpdateElement != nil {
-		r.interfaceMonitor.UnregisterCallback(r.interfaceUpdateElement)
-		r.interfaceUpdateElement = nil
+	if r.packageManager != nil {
+		monitor.Start("close package manager")
+		err = E.Append(err, r.packageManager.Close(), func(err error) error {
+			return E.Cause(err, "close package manager")
+		})
+		monitor.Finish()
 	}
 	if r.powerListener != nil {
 		monitor.Start("close power listener")
 		err = E.Append(err, r.powerListener.Close(), func(err error) error {
 			return E.Cause(err, "close power listener")
-		})
-		monitor.Finish()
-	}
-	if r.startedCancel != nil {
-		r.startedCancel()
-		monitor.Start("wait network reset")
-		r.resetRunAccess.Lock()
-		monitor.Finish()
-		defer r.resetRunAccess.Unlock()
-	}
-	if r.packageManager != nil {
-		monitor.Start("close package manager")
-		err = E.Append(err, r.packageManager.Close(), func(err error) error {
-			return E.Cause(err, "close package manager")
 		})
 		monitor.Finish()
 	}
@@ -275,6 +260,14 @@ func (r *NetworkManager) Close() error {
 		})
 		monitor.Finish()
 	}
+	r.interfaceUpdateAccess.Lock()
+	interfaceUpdateCancel := r.interfaceUpdateCancel
+	r.interfaceUpdateCancel = nil
+	r.interfaceUpdateAccess.Unlock()
+	if interfaceUpdateCancel != nil {
+		interfaceUpdateCancel()
+	}
+	r.cancelPowerUpdate()
 	if r.networkMonitor != nil {
 		monitor.Start("close network monitor")
 		err = E.Append(err, r.networkMonitor.Close(), func(err error) error {
@@ -531,13 +524,24 @@ func (r *NetworkManager) ReleaseMemory(ctx context.Context) {
 }
 
 func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interface, flags int) {
+	// Initialization notifications must not reset connections even if processing
+	// is delayed until after startup completes.
+	resetNetwork := r.started.Load()
 	if defaultInterface == nil {
 		r.pauseManager.NetworkPause()
 		r.logger.Error("missing default interface")
+		// The default interface can disappear without any link change: Android
+		// withdraws a Wi-Fi network's default route when its connectivity check
+		// fails, and re-adds it when the check later succeeds, leaving the
+		// interface itself untouched the whole time. The monitor only re-runs on
+		// a network update, so without re-arming it here every outbound bound to
+		// the default interface keeps failing until the process is restarted.
+		r.scheduleInterfaceMonitorRecheck()
 		return
 	}
+	r.cancelInterfaceMonitorRecheck()
 	r.pauseManager.NetworkWake()
-	updateContext, updateCancel := context.WithCancel(r.startedCtx)
+	updateContext, updateCancel := context.WithCancel(r.ctx)
 	r.interfaceUpdateAccess.Lock()
 	previousCancel := r.interfaceUpdateCancel
 	r.interfaceUpdateCancel = updateCancel
@@ -547,13 +551,63 @@ func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interfa
 	}
 	go func() {
 		defer updateCancel()
-		r.updateInterface(updateContext, defaultInterface)
+		r.updateInterface(updateContext, defaultInterface, resetNetwork)
 	}()
 }
 
-func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *control.Interface) {
-	r.resetRunAccess.Lock()
-	defer r.resetRunAccess.Unlock()
+// defaultInterfaceRecheckInterval is how long to wait before asking the default
+// interface monitor again after it reported no default interface. The check is
+// a rule and route listing, so retrying this often stays inexpensive.
+const defaultInterfaceRecheckInterval = 5 * time.Second
+
+// scheduleInterfaceMonitorRecheck arms a retry for a monitor that reported no
+// default interface. Only one retry is ever pending.
+func (r *NetworkManager) scheduleInterfaceMonitorRecheck() {
+	r.interfaceRecheckAccess.Lock()
+	defer r.interfaceRecheckAccess.Unlock()
+	if r.interfaceMonitor == nil || r.interfaceRecheckTimer != nil {
+		return
+	}
+	r.interfaceRecheckTimer = time.AfterFunc(defaultInterfaceRecheckInterval, r.recheckInterfaceMonitor)
+}
+
+// cancelInterfaceMonitorRecheck drops a pending retry once an interface is back.
+func (r *NetworkManager) cancelInterfaceMonitorRecheck() {
+	r.interfaceRecheckAccess.Lock()
+	defer r.interfaceRecheckAccess.Unlock()
+	if r.interfaceRecheckTimer != nil {
+		r.interfaceRecheckTimer.Stop()
+		r.interfaceRecheckTimer = nil
+	}
+}
+
+// recheckInterfaceMonitor re-arms the default interface monitor and keeps
+// retrying while it still reports nothing. Start() re-registers the network
+// update callback and runs one check synchronously, so Close() runs first to
+// keep repeated re-arms from stacking callbacks on the update monitor.
+func (r *NetworkManager) recheckInterfaceMonitor() {
+	r.interfaceRecheckAccess.Lock()
+	r.interfaceRecheckTimer = nil
+	monitor := r.interfaceMonitor
+	r.interfaceRecheckAccess.Unlock()
+	if monitor == nil {
+		return
+	}
+	_ = monitor.Close()
+	if err := monitor.Start(); err != nil {
+		r.logger.Error("re-arm default interface monitor: ", err)
+	}
+	// A recovered interface is delivered through notifyInterfaceUpdate, which
+	// cancels this loop. While nothing is delivered, keep asking.
+	if monitor.DefaultInterface() == nil {
+		r.scheduleInterfaceMonitorRecheck()
+	}
+}
+
+
+func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *control.Interface, resetNetwork bool) {
+	r.interfaceUpdateRunAccess.Lock()
+	defer r.interfaceUpdateRunAccess.Unlock()
 	if ctx.Err() != nil {
 		return
 	}
@@ -592,6 +646,9 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 	if ctx.Err() != nil {
 		return
 	}
+	if !resetNetwork {
+		return
+	}
 	r.ResetNetwork(ctx)
 }
 
@@ -600,7 +657,7 @@ func (r *NetworkManager) notifyWindowsPowerEvent(event int) {
 	case winpowrprof.EVENT_SUSPEND:
 		r.pauseManager.DevicePause()
 		r.cancelPowerUpdate()
-		r.ResetNetwork(r.startedCtx)
+		r.ResetNetwork(r.ctx)
 	case winpowrprof.EVENT_RESUME:
 		if !r.pauseManager.IsDevicePaused() {
 			return
@@ -608,7 +665,7 @@ func (r *NetworkManager) notifyWindowsPowerEvent(event int) {
 		fallthrough
 	case winpowrprof.EVENT_RESUME_AUTOMATIC:
 		r.pauseManager.DeviceWake()
-		updateContext, updateCancel := context.WithCancel(r.startedCtx)
+		updateContext, updateCancel := context.WithCancel(r.ctx)
 		r.powerUpdateAccess.Lock()
 		previousCancel := r.powerUpdateCancel
 		r.powerUpdateCancel = updateCancel
@@ -618,11 +675,6 @@ func (r *NetworkManager) notifyWindowsPowerEvent(event int) {
 		}
 		go func() {
 			defer updateCancel()
-			r.resetRunAccess.Lock()
-			defer r.resetRunAccess.Unlock()
-			if updateContext.Err() != nil {
-				return
-			}
 			r.ResetNetwork(updateContext)
 		}()
 	}
