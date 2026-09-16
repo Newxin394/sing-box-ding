@@ -1,0 +1,84 @@
+name: Upstream sync
+
+# Two fork-maintenance checks that nothing else in this repository performs:
+#
+# 1. ding-sync    -- protocol/http/ding.go is a vendored copy of sagernet/sing's
+#                    protocol/http/client.go. Bumping the sing dependency does
+#                    NOT make it fail to compile when upstream changes the
+#                    handshake, so the copy can silently lose an upstream fix.
+#                    scripts/check-ding-sync.sh performs the comparison.
+# 2. upstream-drift -- reports how far this fork has moved away from
+#                    CHIZI-0618/sing-box's testing-ebpf-tc-rewrite. Report only:
+#                    the point is to make the drift a number instead of a
+#                    feeling, not to block anything.
+on:
+  push:
+    branches:
+      - testing-ebpf-tc-rewrite
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'protocol/http/ding.go'
+      - 'scripts/check-ding-sync.sh'
+      - '.github/workflows/upstream-sync.yml'
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'protocol/http/ding.go'
+      - 'scripts/check-ding-sync.sh'
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ding-sync:
+    name: Vendored ding.go is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.26
+      - name: Download the pinned sing module
+        run: go mod download github.com/sagernet/sing
+      - name: Compare ding.go against upstream client.go
+        run: sh scripts/check-ding-sync.sh --check
+
+  upstream-drift:
+    name: Report drift from upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+      - name: Compare with CHIZI-0618/sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/CHIZI-0618/sing-box.git
+          git fetch --quiet upstream testing-ebpf-tc-rewrite
+          BASE=$(git merge-base HEAD upstream/testing-ebpf-tc-rewrite) || {
+            echo "::warning::no common ancestor found; the upstream branch may have been rewritten"
+            exit 0
+          }
+          {
+            echo "### Upstream drift (CHIZI-0618/sing-box testing-ebpf-tc-rewrite)"
+            echo
+            echo "- ahead of upstream: $(git rev-list --count "$BASE"..HEAD)"
+            echo "- behind upstream:  $(git rev-list --count "$BASE"..upstream/testing-ebpf-tc-rewrite)"
+            echo
+            echo '```'
+            git diff --shortstat "$BASE" upstream/testing-ebpf-tc-rewrite || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

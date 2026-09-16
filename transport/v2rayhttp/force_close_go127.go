@@ -24,7 +24,7 @@ type internalTransport struct {
 
 // net/http/internal/http2.clientConnPool
 type clientConnPool struct {
-	t     *internalTransport
+	_     *internalTransport // layout anchor: net/http/internal/http2.clientConnPool.t (never read here)
 	mu    sync.Mutex
 	conns map[string][]unsafe.Pointer // key is host:port, value is []*ClientConn
 }

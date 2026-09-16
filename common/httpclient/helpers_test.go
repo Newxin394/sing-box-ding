@@ -3,6 +3,7 @@ package httpclient
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -32,7 +33,6 @@ func TestRequestAuthority(t *testing.T) {
 			}
 		})
 	}
-
 	t.Run("nil request", func(t *testing.T) {
 		if got := requestAuthority(nil); got != "" {
 			t.Fatalf("got %q, want empty", got)
@@ -48,4 +48,38 @@ func TestRequestAuthority(t *testing.T) {
 			t.Fatalf("got %q, want empty", got)
 		}
 	})
+}
+
+func TestRequestReplayable(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		key    string
+		want   bool
+	}{
+		{name: "get", method: http.MethodGet, want: true},
+		{name: "head", method: http.MethodHead, want: true},
+		{name: "post without idempotency key", method: http.MethodPost, want: false},
+		{name: "put without idempotency key", method: http.MethodPut, want: false},
+		{name: "post with idempotency key", method: http.MethodPost, key: "request-1", want: true},
+		{name: "patch with alternate idempotency key", method: http.MethodPatch, key: "alternate-request-1", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequest(test.method, "https://example.com/", strings.NewReader("payload"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.key != "" {
+				if test.method == http.MethodPatch {
+					request.Header.Set("X-Idempotency-Key", test.key)
+				} else {
+					request.Header.Set("Idempotency-Key", test.key)
+				}
+			}
+			if got := requestReplayable(request); got != test.want {
+				t.Fatalf("requestReplayable() = %v, want %v", got, test.want)
+			}
+		})
+	}
 }

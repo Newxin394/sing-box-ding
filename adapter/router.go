@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"time"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	M "github.com/sagernet/sing/common/metadata"
@@ -21,13 +22,18 @@ type Router interface {
 	PreMatch(metadata InboundContext, firstPacket []byte) PreMatchResult
 	HijackDNSPacket(ctx context.Context, payload []byte, writer N.PacketWriter, metadata InboundContext)
 	ConnectionRouterEx
+	RuleSets() []RuleSet
 	RuleSet(tag string) (RuleSet, bool)
 	Rules() []Rule
 	NeedFindProcess() bool
 	NeedFindNeighbor() bool
 	NeighborResolver() NeighborResolver
+	Rule(uuid string) (Rule, bool)
 	AppendTracker(tracker ConnectionTracker)
 	ResetNetwork()
+	DefaultDomainMatchStrategy() C.DomainMatchStrategy
+
+	Reload()
 }
 
 type PreMatchAction uint8
@@ -49,7 +55,7 @@ type PreMatchResult struct {
 	NewTracker  func() tun.FlowTracker
 }
 
-func JudgeFlow(router Router, metadata InboundContext, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
 	var networkName string
 	switch network {
 	case uint8(header.TCPProtocolNumber):
@@ -61,9 +67,13 @@ func JudgeFlow(router Router, metadata InboundContext, network uint8, source net
 	default:
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	metadata.Network = networkName
-	metadata.Source = M.SocksaddrFromNetIP(source)
-	metadata.Destination = M.SocksaddrFromNetIP(destination)
+	metadata := InboundContext{
+		Inbound:     inbound,
+		InboundType: inboundType,
+		Network:     networkName,
+		Source:      M.SocksaddrFromNetIP(source),
+		Destination: M.SocksaddrFromNetIP(destination),
+	}
 	if networkName == N.NetworkICMP {
 		metadata.Source.Port = 0
 		metadata.Destination.Port = 0
@@ -121,6 +131,10 @@ type ConnectionRouterEx interface {
 
 type RuleSet interface {
 	Name() string
+	Type() string
+	Format() string
+	UpdatedTime() time.Time
+	Update(ctx context.Context) error
 	StartContext(ctx context.Context, startContext *HTTPStartContext) error
 	Metadata() RuleSetMetadata
 	ExtractIPSet() []*netipx.IPSet

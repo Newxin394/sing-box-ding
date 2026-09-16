@@ -12,10 +12,16 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
 
+	"github.com/gofrs/uuid/v5"
 	"github.com/miekg/dns"
 )
 
 func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DNSRule, checkServer bool, legacyDNSMode bool) (adapter.DNSRule, error) {
+	router := service.FromContext[adapter.Router](ctx)
+	fallbackRules, err := NewDNSFallbackRules(ctx, router, options.FallbackRules)
+	if err != nil {
+		return nil, err
+	}
 	switch options.Type {
 	case "", C.RuleTypeDefault:
 		if !options.DefaultOptions.IsValid() {
@@ -41,7 +47,7 @@ func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DN
 				return nil, E.New("missing server field")
 			}
 		}
-		return NewDefaultDNSRule(ctx, logger, options.DefaultOptions, legacyDNSMode)
+		return NewDefaultDNSRule(ctx, logger, options.DefaultOptions, fallbackRules, legacyDNSMode)
 	case C.RuleTypeLogical:
 		if !options.LogicalOptions.IsValid() {
 			return nil, E.New("missing conditions")
@@ -70,7 +76,7 @@ func NewDNSRule(ctx context.Context, logger log.ContextLogger, options option.DN
 }
 
 func validateDNSRuleAction(action option.DNSRuleAction) error {
-	if action.Action == C.RuleActionTypeReject && action.RejectOptions.Method == C.RuleActionRejectMethodReply {
+	if action.Action == C.RuleActionTypeReject && action.DNSRejectOptions.Method == C.RuleActionRejectMethodReply {
 		return E.New("reject method `reply` is not supported for DNS rules")
 	}
 	var routeOptions option.AbstractDNSRouteActionOptions
@@ -102,17 +108,25 @@ var _ adapter.DNSRule = (*DefaultDNSRule)(nil)
 
 type DefaultDNSRule struct {
 	abstractDefaultRule
+	fallbackRules    []adapter.DNSFallbackRule
+	allowFallthrough bool
 	matchResponse    bool
 	matchResponseTag string
 	race             bool
 }
 
-func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options option.DefaultDNSRule, legacyDNSMode bool) (*DefaultDNSRule, error) {
+func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options option.DefaultDNSRule, fallbackRules []adapter.DNSFallbackRule, legacyDNSMode bool) (*DefaultDNSRule, error) {
+	id, _ := uuid.NewV4()
 	rule := &DefaultDNSRule{
 		abstractDefaultRule: abstractDefaultRule{
+			abstractRule: abstractRule{
+				uuid: id.String(),
+			},
 			invert: options.Invert,
 			action: NewDNSRuleAction(logger, options.DNSRuleAction),
 		},
+		fallbackRules:    fallbackRules,
+		allowFallthrough: options.AllowFallthrough,
 		matchResponse:    options.MatchResponse.IsEnabled(),
 		matchResponseTag: options.MatchResponse.ResponseTag(),
 		race:             options.Race,
@@ -165,7 +179,7 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.Domain) > 0 || len(options.DomainSuffix) > 0 {
-		item, err := NewDomainItem(options.Domain, options.DomainSuffix)
+		item, err := NewDomainItem(options.Domain, options.DomainSuffix, C.DomainMatchStrategyAsIS)
 		if err != nil {
 			return nil, err
 		}
@@ -173,12 +187,12 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.DomainKeyword) > 0 {
-		item := NewDomainKeywordItem(options.DomainKeyword)
+		item := NewDomainKeywordItem(options.DomainKeyword, C.DomainMatchStrategyAsIS)
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.DomainRegex) > 0 {
-		item, err := NewDomainRegexItem(options.DomainRegex)
+		item, err := NewDomainRegexItem(options.DomainRegex, C.DomainMatchStrategyAsIS)
 		if err != nil {
 			return nil, E.Cause(err, "domain_regex")
 		}
@@ -317,7 +331,7 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
 		rule.items = append(rule.items, item)
 		rule.allItems = append(rule.allItems, item)
 	}
-	if options.ClashMode != "" {
+	if len(options.ClashMode) > 0 {
 		item := NewClashModeItem(ctx, options.ClashMode)
 		rule.items = append(rule.items, item)
 		rule.allItems = append(rule.allItems, item)
@@ -402,6 +416,43 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
 
 func (r *DefaultDNSRule) Action() adapter.RuleAction {
 	return r.action
+}
+
+func (r *DefaultDNSRule) Start() error {
+	if err := r.abstractDefaultRule.Start(); err != nil {
+		return err
+	}
+	startedFallbackRules := 0
+	for _, fallbackRule := range r.fallbackRules {
+		if err := fallbackRule.Start(); err != nil {
+			// Rule-set based fallback items acquire references during Start. Roll
+			// back all earlier starts before returning so a partial startup cannot
+			// retain stale rule-set references.
+			for index := startedFallbackRules - 1; index >= 0; index-- {
+				_ = r.fallbackRules[index].Close()
+			}
+			_ = r.abstractDefaultRule.Close()
+			return err
+		}
+		startedFallbackRules++
+	}
+	return nil
+}
+
+func (r *DefaultDNSRule) Close() error {
+	var closeErr error
+	for _, fallbackRule := range r.fallbackRules {
+		closeErr = E.Errors(closeErr, fallbackRule.Close())
+	}
+	return E.Errors(closeErr, r.abstractDefaultRule.Close())
+}
+
+func (r *DefaultDNSRule) AllowFallthrough() bool {
+	return r.allowFallthrough
+}
+
+func (r *DefaultDNSRule) FallbackRules() []adapter.DNSFallbackRule {
+	return r.fallbackRules
 }
 
 func (r *DefaultDNSRule) WithAddressLimit() bool {
@@ -493,9 +544,21 @@ func (r *LogicalDNSRule) Race() bool {
 	return r.race
 }
 
+func (r *LogicalDNSRule) AllowFallthrough() bool {
+	return false
+}
+
+func (r *LogicalDNSRule) FallbackRules() []adapter.DNSFallbackRule {
+	return nil
+}
+
 func NewLogicalDNSRule(ctx context.Context, logger log.ContextLogger, options option.LogicalDNSRule, legacyDNSMode bool) (*LogicalDNSRule, error) {
+	id, _ := uuid.NewV4()
 	r := &LogicalDNSRule{
 		abstractLogicalRule: abstractLogicalRule{
+			abstractRule: abstractRule{
+				uuid: id.String(),
+			},
 			rules:  make([]adapter.HeadlessRule, len(options.Rules)),
 			invert: options.Invert,
 			action: NewDNSRuleAction(logger, options.DNSRuleAction),

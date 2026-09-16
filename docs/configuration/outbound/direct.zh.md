@@ -18,6 +18,7 @@ icon: material/alert-decagram
   
   "override_address": "1.0.0.1",
   "override_port": 53,
+  "proxy_protocol": 0,
 
   ... // 拨号字段
 }
@@ -41,6 +42,14 @@ icon: material/alert-decagram
 
 覆盖连接目标端口。
 
+#### proxy_protocol
+
+写出 [代理协议](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) 到连接头。
+
+可用协议版本值：`1` 或 `2`。
+
 ### 拨号字段
+
+当 direct 被选中用于 L3 ICMP 转发时，`domain_resolver` 字段也用于解析尚未解析的域名目标。
 
 参阅 [拨号字段](/zh/configuration/shared/dial/)。

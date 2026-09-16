@@ -6,6 +6,7 @@ import (
 	"context"
 	stdTLS "crypto/tls"
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type http3FallbackTransport struct {
 	fallbackDelay time.Duration
 	brokenAccess  sync.Mutex
 	broken        map[string]http3BrokenEntry
+	maxBroken     int
 }
 
 func newHTTP3RoundTripper(
@@ -122,6 +124,7 @@ func newHTTP3FallbackTransport(
 		h2Fallback:    h2Fallback,
 		fallbackDelay: fallbackDelay,
 		broken:        make(map[string]http3BrokenEntry),
+		maxBroken:     256,
 	}, nil
 }
 
@@ -156,7 +159,15 @@ func (t *http3FallbackTransport) roundTripHTTP3(request *http.Request) (*http.Re
 		return response, nil
 	}
 	if !errors.Is(err, http3.ErrNoCachedConn) {
-		t.markH3Broken(authority)
+		if shouldMarkH3Broken(err) {
+			t.markH3Broken(authority)
+		}
+		// The cached-connection attempt did not consume a request body, but H2
+		// fallback still creates a second delivery path. Never replay a mutation
+		// unless the caller made its idempotency explicit.
+		if !requestReplayable(request) {
+			return nil, err
+		}
 		return t.h2FallbackRoundTrip(cloneRequestForRetry(request))
 	}
 	if !requestReplayable(request) {
@@ -165,22 +176,24 @@ func (t *http3FallbackTransport) roundTripHTTP3(request *http.Request) (*http.Re
 			t.clearH3Broken(authority)
 			return response, nil
 		}
-		t.markH3Broken(authority)
+		if shouldMarkH3Broken(err) {
+			t.markH3Broken(authority)
+		}
 		return nil, err
 	}
 	return t.roundTripHTTP3Race(request, authority)
 }
 
 func (t *http3FallbackTransport) roundTripHTTP3Race(request *http.Request, authority string) (*http.Response, error) {
-	ctx, cancel := context.WithCancel(request.Context())
-	defer cancel()
 	type result struct {
 		response *http.Response
 		err      error
 		h3       bool
+		cancel   context.CancelFunc
 	}
 	results := make(chan result, 2)
 	startRoundTrip := func(request *http.Request, useH3 bool) {
+		ctx, cancel := context.WithCancel(request.Context())
 		request = request.WithContext(ctx)
 		var (
 			response *http.Response
@@ -191,15 +204,15 @@ func (t *http3FallbackTransport) roundTripHTTP3Race(request *http.Request, autho
 		} else {
 			response, err = t.h2FallbackRoundTrip(request)
 		}
-		results <- result{response: response, err: err, h3: useH3}
+		results <- result{response: response, err: err, h3: useH3, cancel: cancel}
 	}
 	goroutines := 1
 	received := 0
 	drainRemaining := func() {
-		cancel()
 		for range goroutines - received {
 			go func() {
 				loser := <-results
+				loser.cancel()
 				if loser.response != nil && loser.response.Body != nil {
 					loser.response.Body.Close()
 				}
@@ -227,10 +240,14 @@ func (t *http3FallbackTransport) roundTripHTTP3Race(request *http.Request, autho
 					t.clearH3Broken(authority)
 				}
 				drainRemaining()
+				raceResult.response.Body = &bodyWithCancelOnClose{raceResult.response.Body, raceResult.cancel}
 				return raceResult.response, nil
 			}
+			raceResult.cancel()
 			if raceResult.h3 {
-				t.markH3Broken(authority)
+				if shouldMarkH3Broken(raceResult.err) {
+					t.markH3Broken(authority)
+				}
 				h3Err = raceResult.err
 				if goroutines == 1 {
 					goroutines++
@@ -261,6 +278,16 @@ func (t *http3FallbackTransport) roundTripHTTP3Race(request *http.Request, autho
 	}
 }
 
+type bodyWithCancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *bodyWithCancelOnClose) Close() error {
+	defer b.cancel()
+	return b.ReadCloser.Close()
+}
+
 func (t *http3FallbackTransport) h2FallbackRoundTrip(request *http.Request) (*http.Response, error) {
 	if fallback, isFallback := t.h2Fallback.(*http2FallbackTransport); isFallback {
 		return fallback.roundTrip(request, true)
@@ -276,6 +303,12 @@ func (t *http3FallbackTransport) CloseIdleConnections() {
 func (t *http3FallbackTransport) Close() error {
 	t.CloseIdleConnections()
 	return t.h3Transport.Close()
+}
+
+func shouldMarkH3Broken(err error) bool {
+	// Do not suppress H3 because this particular caller gave up. A canceled
+	// request or local deadline says nothing about the authority's H3 support.
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 func (t *http3FallbackTransport) h3Broken(authority string) bool {
@@ -310,7 +343,18 @@ func (t *http3FallbackTransport) markH3Broken(authority string) {
 	}
 	t.brokenAccess.Lock()
 	defer t.brokenAccess.Unlock()
-	entry := t.broken[authority]
+	entry, found := t.broken[authority]
+	if !found && t.maxBroken > 0 && len(t.broken) >= t.maxBroken {
+		oldestAuthority := ""
+		var oldestUntil time.Time
+		for cachedAuthority, cachedEntry := range t.broken {
+			if oldestAuthority == "" || cachedEntry.until.Before(oldestUntil) {
+				oldestAuthority = cachedAuthority
+				oldestUntil = cachedEntry.until
+			}
+		}
+		delete(t.broken, oldestAuthority)
+	}
 	if entry.backoff == 0 {
 		entry.backoff = 5 * time.Minute
 	} else {

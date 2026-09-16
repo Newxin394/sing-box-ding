@@ -4,9 +4,10 @@ icon: material/new-box
 
 !!! quote "sing-box 1.15.0 中的更改"
 
+    :material-plus: [auto_redirect_disable_mark_mode](#auto_redirect_disable_mark_mode)
     :material-plus: [auto_redirect_tproxy_mark](#auto_redirect_tproxy_mark)  
     :material-plus: [multi_queue](#multi_queue)  
-    :material-delete-clock: [stack](#stack)
+    :material-alert-decagram: [stack](#stack)
 
 !!! quote "sing-box 1.14.0 中的更改"
 
@@ -94,6 +95,7 @@ icon: material/new-box
   "iproute2_table_index": 2022,
   "iproute2_rule_index": 9000,
   "auto_redirect": true,
+  "auto_redirect_disable_mark_mode": false,
   "auto_redirect_input_mark": "0x2023",
   "auto_redirect_output_mark": "0x2024",
   "auto_redirect_reset_mark": "0x2025",
@@ -126,6 +128,7 @@ icon: material/new-box
 
   ... // UDP NAT 字段
 
+  "stack": "system",
   "multi_queue": false,
   "include_interface": [
     "lan0"
@@ -172,7 +175,6 @@ icon: material/new-box
   },
 
   // 已弃用
-  "stack": "system",
   "gso": false,
   "inet4_address": [
     "172.19.0.1/30"
@@ -362,6 +364,18 @@ sing-box DNS 模块，等价于一条
 `auto_redirect` 还会自动将兼容性规则插入 OpenWrt 的 fw4 表中，即无需额外配置即可在路由器上工作。
 
 与 `route.default_mark` 和 `[dialOptions].routing_mark` 冲突。
+
+#### auto_redirect_disable_mark_mode
+
+!!! question "自 sing-box 1.15.0 起"
+
+!!! quote ""
+
+    仅支持 Linux，且需要启用 `auto_route` 和 `auto_redirect`。
+
+为 `auto_redirect` 禁用基于连接标记的路由。
+
+与 `route_address_set` 和 `route_exclude_address_set` 冲突。
 
 #### auto_redirect_input_mark
 
@@ -557,15 +571,9 @@ sing-box DNS 模块，等价于一条
 
 #### stack
 
-!!! failure "已在 sing-box 1.15.0 废弃"
-
-    `stack` 已废弃，并将在 sing-box 1.17.0 中被移除。
-    移除 `stack` 参数以使用 sing-tun 自有的 TCP/IP stack。
-    参阅[迁移指南](/zh/migration/#迁移-tun-stack)。
-
 !!! quote "sing-box 1.15.0 中的更改"
 
-    自 1.15.0 起，sing-tun 使用自有 TCP/IP stack，极限性能、能效以及内存占用均大幅领先于所有旧实现。
+    :material-plus: 新增 `go` 栈，且它现在是默认值。
 
 !!! quote "sing-box 1.8.0 中的更改"
 
@@ -573,19 +581,22 @@ sing-box DNS 模块，等价于一条
 
 TCP/IP 栈。
 
-以下旧实现在废弃过渡期内仍可选择。
-
 | 栈       | 描述                                                                                                  | 
 |----------|-------------------------------------------------------------------------------------------------------|
+| `go`     | 基于内置的用户态网络栈执行 L3 到 L4 转换                                                                |
 | `system` | 基于系统网络栈执行 L3 到 L4 转换                                                                        |
 | `gvisor` | 基于 [gVisor](https://github.com/google/gvisor) 虚拟网络栈执行 L3 到 L4 转换                            |
 | `mixed`  | 混合 `system` TCP 栈与 `gvisor` UDP 栈                                                                 |
+
+`go` 栈为 sing-box 编写，不依赖 gVisor，且内存占用显著低于 `gvisor` 与 `mixed` 栈。
+
+默认使用 `go` 栈。
 
 #### multi_queue
 
 !!! quote ""
 
-    仅在 Linux 下被支持，且需要使用 sing-tun 自有的 TCP/IP stack。
+    仅在 Linux 下被支持，且需要 `go` 栈。
 
 启用基于 `IFF_MULTI_QUEUE` 的多队列支持，使吞吐量能够随 CPU 核心数量扩展。
 

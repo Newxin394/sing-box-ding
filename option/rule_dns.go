@@ -13,10 +13,30 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
+type DNSFallbackRule struct {
+	AcceptResult bool                       `json:"accept_result,omitempty"`
+	MatchAll     bool                       `json:"match_all,omitempty"`
+	ClashMode    badoption.Listable[string] `json:"clash_mode,omitempty"`
+	IPCIDR       badoption.Listable[string] `json:"ip_cidr,omitempty"`
+	RuleSet      badoption.Listable[string] `json:"rule_set,omitempty" reference:"rule_set"`
+	IPIsPrivate  bool                       `json:"ip_is_private,omitempty"`
+	Invert       bool                       `json:"invert,omitempty"`
+	Server       string                     `json:"server,omitempty" reference:"dns_server"`
+	DisableCache bool                       `json:"disable_cache,omitempty"`
+	RewriteTTL   *uint32                    `json:"rewrite_ttl,omitempty"`
+	ClientSubnet *badoption.Prefixable      `json:"client_subnet,omitempty"`
+}
+
+func (r DNSFallbackRule) IsValid() bool {
+	hasCondition := r.MatchAll || len(r.ClashMode) > 0 || len(r.IPCIDR) > 0 || len(r.RuleSet) > 0 || r.IPIsPrivate
+	return hasCondition && (r.AcceptResult || r.Server != "")
+}
+
 type _DNSRule struct {
-	Type           string         `json:"type,omitempty" enum:"default,logical"`
-	DefaultOptions DefaultDNSRule `json:"-"`
-	LogicalOptions LogicalDNSRule `json:"-"`
+	Type           string            `json:"type,omitempty" enum:"default,logical"`
+	FallbackRules  []DNSFallbackRule `json:"fallback_rules,omitempty"`
+	DefaultOptions DefaultDNSRule    `json:"-"`
+	LogicalOptions LogicalDNSRule    `json:"-"`
 }
 
 type DNSRule _DNSRule
@@ -58,11 +78,17 @@ func (r *DNSRule) UnmarshalJSONContext(ctx context.Context, bytes []byte) error 
 }
 
 func (r DNSRule) IsValid() bool {
+	if !common.All(r.FallbackRules, DNSFallbackRule.IsValid) {
+		return false
+	}
 	switch r.Type {
 	case C.RuleTypeDefault:
+		// Fallback rules refine a primary DNS result; they cannot form a
+		// standalone DNS rule. Keep schema validation aligned with runtime
+		// construction, which requires a valid default rule.
 		return r.DefaultOptions.IsValid()
 	case C.RuleTypeLogical:
-		return r.LogicalOptions.IsValid()
+		return r.LogicalOptions.IsValid() && len(r.FallbackRules) == 0
 	default:
 		panic("unknown DNS rule type: " + r.Type)
 	}
@@ -77,13 +103,34 @@ func (r DNSRule) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
 			return nil, err
 		}
 		nestedRef, err := builder.Define("NestedDNSRule", func() (*schema.Node, error) {
-			return nestedRuleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), "NestedDNSRule")
+			return nestedRuleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), "NestedDNSRule", false)
 		})
 		if err != nil {
 			return nil, err
 		}
-		return ruleUnion(builder, reflect.TypeFor[RawDefaultDNSRule](), nestedRef, actionRef)
+		return dnsRuleUnion(builder, nestedRef, actionRef)
 	})
+}
+
+func dnsRuleUnion(builder schema.Builder, nestedRef *schema.Node, actionRef *schema.Node) (*schema.Node, error) {
+	defaultMatch := schema.LooseObject()
+	defaultMatch.Properties.Put("type", schema.StringEnum(C.RuleTypeDefault, ""))
+	if err := builder.FlattenStruct(defaultMatch, reflect.TypeFor[RawDefaultDNSRule]()); err != nil {
+		return nil, err
+	}
+	if err := builder.FlattenStruct(defaultMatch, reflect.TypeFor[struct {
+		FallbackRules []DNSFallbackRule `json:"fallback_rules,omitempty"`
+	}]()); err != nil {
+		return nil, err
+	}
+	defaultVariant := &schema.Node{Type: "object", AllOf: []*schema.Node{defaultMatch, actionRef}, UnevaluatedProperties: false}
+
+	logicalMatch := schema.LooseObject()
+	logicalMatch.Properties.Put("type", schema.StringConst(C.RuleTypeLogical))
+	logicalProperties(logicalMatch, nestedRef, false)
+	logicalMatch.Required = []string{"type", "mode", "rules"}
+	logicalVariant := &schema.Node{Type: "object", AllOf: []*schema.Node{logicalMatch, actionRef}, UnevaluatedProperties: false}
+	return schema.OneOf(defaultVariant, logicalVariant), nil
 }
 
 type DNSRuleMatchResponse struct {
@@ -161,7 +208,7 @@ type RawDefaultDNSRule struct {
 	User                     badoption.Listable[string]                                                  `json:"user,omitempty"`
 	UserID                   badoption.Listable[int32]                                                   `json:"user_id,omitempty"`
 	Outbound                 badoption.Listable[string]                                                  `json:"outbound,omitempty" reference:"outbound" schema:"omit"`
-	ClashMode                string                                                                      `json:"clash_mode,omitempty"`
+	ClashMode                badoption.Listable[string]                                                  `json:"clash_mode,omitempty"`
 	NetworkType              badoption.Listable[InterfaceType]                                           `json:"network_type,omitempty"`
 	NetworkIsExpensive       bool                                                                        `json:"network_is_expensive,omitempty"`
 	NetworkIsConstrained     bool                                                                        `json:"network_is_constrained,omitempty"`
@@ -183,6 +230,7 @@ type RawDefaultDNSRule struct {
 	ResponseAnswer           badoption.Listable[DNSRecordOptions]                                        `json:"response_answer,omitempty"`
 	ResponseNs               badoption.Listable[DNSRecordOptions]                                        `json:"response_ns,omitempty"`
 	ResponseExtra            badoption.Listable[DNSRecordOptions]                                        `json:"response_extra,omitempty"`
+	AllowFallthrough         bool                                                                        `json:"allow_fallthrough,omitempty"`
 	Invert                   bool                                                                        `json:"invert,omitempty"`
 
 	// Deprecated: removed in sing-box 1.12.0

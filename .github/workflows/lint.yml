@@ -6,6 +6,7 @@ on:
       - oldstable
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
     paths-ignore:
       - '**.md'
@@ -16,13 +17,51 @@ on:
       - oldstable
       - stable
       - testing
+      - testing-ebpf-tc-rewrite
       - unstable
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build }}
   cancel-in-progress: true
 
 jobs:
+  vet:
+    name: Vet baseline ${{ matrix.goos }}/amd64
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos:
+          - linux
+          - windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ^1.26
+      - name: go vet against baseline
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)
+          go vet -tags "$TAGS" ./... 2>&1 \
+            | grep -E '^[^ #][^ ]*\.go:[0-9]+:[0-9]+:' \
+            | sort -u > /tmp/vet-current.txt || true
+          BASELINE="scripts/vet-baseline/${{ matrix.goos }}.txt"
+          sort "$BASELINE" > /tmp/vet-baseline.txt
+          cat /tmp/vet-current.txt
+          if ! diff -u /tmp/vet-baseline.txt /tmp/vet-current.txt; then
+            echo "::error::go vet output drifted from $BASELINE - either fix the new finding or record it with a reason"
+            exit 1
+          fi
   build:
     name: Lint ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -54,7 +93,7 @@ jobs:
         #    goarch: amd64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           fetch-depth: 0
       - name: Setup Go
@@ -67,13 +106,31 @@ jobs:
           path: |
             ~/go/pkg/mod
           key: go-${{ hashFiles('**/go.sum') }}
+      - name: Lint config must not lag go.mod
+        run: |
+          MOD_GO=$(awk '/^go /{print $2}' go.mod | cut -d. -f1,2)
+          CFG_GO=$(awk '/^run:/{flag=1} flag && /^  go:/{gsub(/"/,"",$2); print $2; exit}' .golangci.yml)
+          echo "go.mod=$MOD_GO .golangci.yml=$CFG_GO"
+          if [ "$MOD_GO" != "$CFG_GO" ]; then
+            echo "::error::.golangci.yml run.go ($CFG_GO) does not match go.mod ($MOD_GO); bump it together with go.mod"
+            exit 1
+          fi
+      - name: Replace ledger must match go.mod
+        run: |
+          n_replace=$(grep -c '^replace ' go.mod)
+          n_rows=$(grep -cF '| `github.com/sagernet/' docs/dev/REPLACE_LEDGER.md)
+          echo "go.mod replaces=$n_replace ledger rows=$n_rows"
+          if [ "$n_replace" -ne "$n_rows" ]; then
+            echo "::error::go.mod declares $n_replace replace directives but docs/dev/REPLACE_LEDGER.md documents $n_rows; update the ledger"
+            exit 1
+          fi
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         with:
-          version: latest
+          version: v2.13.2
           args: --timeout=30m
           install-mode: binary
           verify: false

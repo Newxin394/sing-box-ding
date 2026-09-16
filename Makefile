@@ -14,11 +14,17 @@ PREFIX ?= $(shell go env GOPATH)
 SING_FFI ?= sing-ffi
 LIBBOX_FFI_CONFIG ?= ./experimental/libbox/ffi.json
 
-.PHONY: test release docs build schema
+.PHONY: test release docs build schema ebpf_generate ebpf_check
 
 build:
 	export GOTOOLCHAIN=local && \
 	go build $(MAIN_PARAMS) $(MAIN)
+
+ebpf_generate:
+	$(MAKE) -C common/ebpf generate
+
+ebpf_check:
+	$(MAKE) -C common/ebpf check
 
 race:
 	export GOTOOLCHAIN=local && \
@@ -224,7 +230,7 @@ update_apple_version:
 	go run ./cmd/internal/update_apple_version
 
 update_macos_version:
-	MACOS_PROJECT_VERSION=$(shell go run ./cmd/internal/app_store_connect next_project_version macos) go run ./cmd/internal/update_apple_version
+	MACOS_PROJECT_VERSION=$(shell go run -v ./cmd/internal/app_store_connect next_macos_project_version) go run ./cmd/internal/update_apple_version
 
 release_apple: lib_apple update_apple_version release_ios release_macos release_tvos release_macos_standalone
 
@@ -233,13 +239,11 @@ release_apple_beta: update_apple_version release_ios release_macos release_tvos
 publish_testflight:
 	go run -v ./cmd/internal/app_store_connect publish_testflight $(filter-out $@,$(MAKECMDGOALS))
 
-submit_app_store:
-	go run -v ./cmd/internal/app_store_connect submit_app_store $(filter-out $@,$(MAKECMDGOALS))
-
-release_app_store: release_ios release_tvos submit_app_store
+prepare_app_store:
+	go run -v ./cmd/internal/app_store_connect prepare_app_store
 
 publish_app_store:
-	go run -v ./cmd/internal/app_store_connect publish_app_store $(filter-out $@,$(MAKECMDGOALS))
+	go run -v ./cmd/internal/app_store_connect publish_app_store
 
 test:
 	@go test -v ./... && \
