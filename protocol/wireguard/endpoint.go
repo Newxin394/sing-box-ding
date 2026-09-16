@@ -103,7 +103,6 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			Logger:           logger,
 			InterfaceFinder:  networkManager.InterfaceFinder(),
 			InterfaceMonitor: networkManager.InterfaceMonitor(),
-			ExcludeInterface: options.Name,
 			IsExempt: func() bool {
 				return networkManager.AutoRedirectOutputMark() != 0
 			},
