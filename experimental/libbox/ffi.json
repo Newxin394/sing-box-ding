@@ -23,7 +23,6 @@
       "packages": ["libbox"],
       "default": {
         "tags": [
-          "with_gvisor",
           "with_quic",
           "with_wireguard",
           "with_utls",
@@ -53,7 +52,6 @@
       "packages": ["libbox"],
       "default": {
         "tags": [
-          "with_gvisor",
           "with_quic",
           "with_wireguard",
           "with_utls",
@@ -82,7 +80,6 @@
       "packages": ["libbox"],
       "default": {
         "tags": [
-          "with_gvisor",
           "with_quic",
           "with_wireguard",
           "with_utls",
@@ -124,7 +121,6 @@
       "packages": ["libbox"],
       "default": {
         "tags": [
-          "with_gvisor",
           "with_quic",
           "with_wireguard",
           "with_utls",

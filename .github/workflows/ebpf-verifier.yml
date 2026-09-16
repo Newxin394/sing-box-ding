@@ -54,7 +54,7 @@ jobs:
         run: |
           go test -tags with_ebpf \
             ./adapter ./common/dialer ./common/listener ./common/ebpf ./protocol/ebpf .
-          go test -run '^$' -tags with_ebpf,with_gvisor ./protocol/tailscale
+          go test -run '^$' -tags with_ebpf,with_tailscale ./protocol/tailscale
 
       # This used to run only four tests named explicitly by an anchored -run
       # regex. That list was never widened as more ebpf_integration tests
