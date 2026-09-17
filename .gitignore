@@ -22,3 +22,8 @@
 CLAUDE.md
 AGENTS.md
 /.claude/
+# local build artifacts (never commit; large binaries and build logs)
+/build2.log
+/sb-ding-final
+/sb-ding-stripped
+/sing-box-ding-android-arm64
