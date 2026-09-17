@@ -177,6 +177,14 @@ func (s *linuxSearcher) resolveSocketByNetlink(network string, source netip.Addr
 // that table answers, which is the case whenever the socket belongs to the
 // process that created it.
 func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, error) {
+	// Consult the caller's uid snapshot first, then the all-users snapshot.
+	// The uid snapshot holds the owning process, and the all-users snapshot
+	// additionally holds processes sharing the same socket.
+	if cached, ok := s.processPathCache.Get(uid); ok {
+		if processPaths, found := cached.lookup(targetInode); found {
+			return processPaths, nil
+		}
+	}
 	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
 		if processPaths, found := cached.lookup(targetInode); found {
 			return processPaths, nil
@@ -184,20 +192,34 @@ func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, err
 	}
 	s.rebuildAccess.Lock()
 	defer s.rebuildAccess.Unlock()
-	// Another caller may have completed the walk while we waited.
-	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
-		if now := time.Now(); now.Sub(cached.builtAt) < processPathRescanInterval {
-			if processPaths, found := cached.lookup(targetInode); found {
-				return processPaths, nil
+	// Another caller may have completed the walk while we waited. A fresh
+	// snapshot under either key throttles the rebuild: every new socket
+	// carries an inode no snapshot can contain, and rebuilding per miss
+	// degenerates into a continuous procfs walk on short-lived traffic.
+	throttled := false
+	for _, key := range []uint32{uid, processPathsAllUsers} {
+		if cached, ok := s.processPathCache.Get(key); ok {
+			if now := time.Now(); now.Sub(cached.builtAt) < processPathRescanInterval {
+				throttled = true
+				if processPaths, found := cached.lookup(targetInode); found {
+					return processPaths, nil
+				}
 			}
-			return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
 		}
+	}
+	if throttled {
+		return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
 	}
 	uidPaths, allPaths, err := buildProcessPaths(targetInode, uid)
 	if err != nil {
 		return nil, err
 	}
 	if processPaths, found := uidPaths[targetInode]; found {
+		// Cache the uid table so the next socket owned by this uid hits the
+		// snapshot instead of walking /proc again. The table is complete for
+		// this uid: non-owning processes are skipped for allPaths, not for
+		// uidPaths.
+		s.processPathCache.Add(uid, &uidProcessPaths{entries: uidPaths, builtAt: time.Now()})
 		return processPaths, nil
 	}
 	cached := &uidProcessPaths{entries: allPaths, builtAt: time.Now()}

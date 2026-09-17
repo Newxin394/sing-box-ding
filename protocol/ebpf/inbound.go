@@ -301,7 +301,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		router:           router,
 		logger:           logger,
 		networkManager:   networkManager,
-		processInfoCache: newProcessInfoCache(),
+		processInfoCache: newProcessInfoCache(logger),
 		usePlatformProcessFinder: func() bool {
 			platform := service.FromContext[adapter.PlatformInterface](ctx)
 			return platform != nil && platform.UsePlatformConnectionOwnerFinder()

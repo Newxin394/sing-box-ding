@@ -13,7 +13,7 @@ import (
 // would funnel unrelated processes into one shard and reintroduce the
 // contention the cache exists to avoid.
 func TestProcessInfoCacheShardDistribution(t *testing.T) {
-	cache := newProcessInfoCache()
+	cache := newProcessInfoCache(nil)
 	counts := make([]int, processInfoCacheShardCount)
 	for processID := uint32(1); processID <= 4096; processID++ {
 		index := cache.shardIndex(processInfoCacheKey{processID: processID, userID: 10000 + processID%5})
@@ -38,7 +38,7 @@ func TestProcessInfoCacheShardDistribution(t *testing.T) {
 // TestProcessInfoCacheEvictsExpired verifies that a full shard reclaims entries
 // whose TTL has passed rather than dropping live ones.
 func TestProcessInfoCacheEvictsExpired(t *testing.T) {
-	cache := newProcessInfoCache()
+	cache := newProcessInfoCache(nil)
 	shard := &cache.shards[0]
 	now := time.Now()
 
@@ -66,7 +66,7 @@ func TestProcessInfoCacheEvictsExpired(t *testing.T) {
 // TestProcessInfoCacheKeySeparatesUsers guards the pid-reuse defense: the same
 // pid under two uids must not collide.
 func TestProcessInfoCacheKeySeparatesUsers(t *testing.T) {
-	cache := newProcessInfoCache()
+	cache := newProcessInfoCache(nil)
 	first := processInfoCacheKey{processID: 777, userID: 10001}
 	second := processInfoCacheKey{processID: 777, userID: 10002}
 	if first == second {

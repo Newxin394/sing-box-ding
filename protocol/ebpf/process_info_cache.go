@@ -8,6 +8,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/process"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-tun"
 )
 
@@ -48,6 +49,7 @@ type processInfoCacheEntry struct {
 // every new connection from the same app repeats it with an identical answer.
 // Caching on (pid, uid) removes that repetition for the whole burst.
 type processInfoCache struct {
+	logger log.ContextLogger
 	shards [processInfoCacheShardCount]processInfoCacheShard
 }
 
@@ -56,8 +58,8 @@ type processInfoCacheShard struct {
 	entries map[processInfoCacheKey]processInfoCacheEntry
 }
 
-func newProcessInfoCache() *processInfoCache {
-	p := &processInfoCache{}
+func newProcessInfoCache(logger log.ContextLogger) *processInfoCache {
+	p := &processInfoCache{logger: logger}
 	for index := range p.shards {
 		p.shards[index].entries = make(map[processInfoCacheKey]processInfoCacheEntry, processInfoCacheShardSize)
 	}
@@ -87,7 +89,20 @@ func (p *processInfoCache) load(key processInfoCacheKey, packageManager tun.Pack
 	if loaded && now.Before(entry.expires) {
 		return entry.owner
 	}
-	processInfo, _ := process.FindProcessInfoByPID(key.processID, key.userID, packageManager)
+	// Double-check under the write lock before resolving. A burst of
+	// concurrent misses on the same key must not each run the /proc readlink:
+	// whoever completes the resolution first fills the entry for the rest.
+	shard.access.Lock()
+	entry, loaded = shard.entries[key]
+	if loaded && now.Before(entry.expires) {
+		shard.access.Unlock()
+		return entry.owner
+	}
+	shard.access.Unlock()
+	processInfo, pathErr := process.FindProcessInfoByPID(key.processID, key.userID, packageManager)
+	if pathErr != nil {
+		p.logger.Trace("resolve cached eBPF socket process path: ", pathErr)
+	}
 	shard.access.Lock()
 	if len(shard.entries) >= processInfoCacheShardSize {
 		shard.evictExpiredLocked(now)
