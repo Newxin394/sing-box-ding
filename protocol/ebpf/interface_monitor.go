@@ -168,10 +168,14 @@ func (i *Inbound) currentDefaultInterfaceName() string {
 func (i *Inbound) setDefaultInterfaceName(interfaceName string) {
 	state := &i.interfaceMonitor
 	state.access.Lock()
+	changed := state.defaultInterfaceName != interfaceName
 	state.defaultInterfaceName = interfaceName
 	updates := state.updates
 	active := state.network != nil && updates != nil
 	state.access.Unlock()
+	if changed && i.udpNat != nil {
+		i.udpNat.Purge()
+	}
 	if active {
 		notifyTCInterfaceUpdate(updates)
 	}
