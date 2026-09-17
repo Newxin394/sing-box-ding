@@ -103,6 +103,7 @@ func (t *udpClientTable) cachedCgroupOriginal(client netip.AddrPort, redirectAdd
 func (t *udpClientTable) setCgroupBinding(client netip.AddrPort, original commonEBPF.OriginalDestination, redirectAddress netip.Addr) {
 	state := t.loadOrCreate(client)
 	state.access.Lock()
+	current, loaded := state.bindings[original.Destination]
 	state.cgroupOriginals[redirectAddress] = original
 	state.socketCookie = original.SocketCookie
 	state.cgroupDataPlane = true
@@ -110,6 +111,9 @@ func (t *udpClientTable) setCgroupBinding(client netip.AddrPort, original common
 		redirectAddress: redirectAddress,
 		packetInfo:      sourcePacketInfo(redirectAddress),
 		connected:       original.ConnectedUDP,
+	}
+	if loaded && current.replyAlias {
+		state.replyAliasCount--
 	}
 	state.access.Unlock()
 }
@@ -123,8 +127,14 @@ func (t *udpClientTable) setCgroupReplyBinding(client netip.AddrPort, expected *
 	}
 	expected.access.Lock()
 	defer expected.access.Unlock()
-	if expected.closed || expected.replyAliasCount >= udpReplyAliasLimit {
+	if expected.closed {
 		return false
+	}
+	current, loaded := expected.bindings[destination]
+	if !loaded || !current.replyAlias {
+		if expected.replyAliasCount >= udpReplyAliasLimit {
+			return false
+		}
 	}
 	expected.cgroupOriginals[redirectAddress] = commonEBPF.OriginalDestination{Destination: destination}
 	expected.cgroupDataPlane = true
@@ -133,7 +143,9 @@ func (t *udpClientTable) setCgroupReplyBinding(client netip.AddrPort, expected *
 		redirectAddress: redirectAddress,
 		packetInfo:      sourcePacketInfo(redirectAddress),
 	}
-	expected.replyAliasCount++
+	if !loaded || !current.replyAlias {
+		expected.replyAliasCount++
+	}
 	return true
 }
 
@@ -213,7 +225,11 @@ func (t *udpClientTable) setDirectBinding(
 		state.sourceMAC = append(state.sourceMAC[:0], sourceMAC...)
 	}
 	state.socketCookie = socketCookie
+	current, loaded := state.bindings[destination]
 	state.bindings[destination] = udpRedirectBinding{}
+	if loaded && current.replyAlias {
+		state.replyAliasCount--
+	}
 }
 
 func (t *udpClientTable) setDirectReplyBinding(
