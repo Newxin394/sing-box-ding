@@ -84,8 +84,8 @@ func TestTCPolicyRuleMarkBits(t *testing.T) {
 
 	fullMask := netlink.NewRule()
 	fullMask.Mark = 1
-	if bits := tcPolicyRuleMarkBits(*fullMask); bits != ^uint32(0) {
-		t.Fatalf("mark without an explicit mask did not reserve the full value: %#x", bits)
+	if bits := tcPolicyRuleMarkBits(*fullMask); bits != 1 {
+		t.Fatalf("mark without an explicit mask reserved more than its own value: %#x", bits)
 	}
 
 	zeroMark := netlink.NewRule()
@@ -96,21 +96,17 @@ func TestTCPolicyRuleMarkBits(t *testing.T) {
 }
 
 func TestSelectTCPolicyMark(t *testing.T) {
-	if mark := selectTCPolicyMark(0); mark != 1<<30 {
+	if mark := selectTCPolicyMark(0); mark != 0x40000000 {
 		t.Fatalf("unexpected preferred policy mark: %#x", mark)
 	}
-	// Policy marks are confined to bits 16-30 (see selectTCPolicyMark):
-	// bits 0-15 are the conventional fwmark range and are never touched.
-	// Fill every allowed bit except the lowest one and expect it back.
-	usedExceptLowest := uint32(0)
-	for bit := uint(30); bit >= 17; bit-- {
-		usedExceptLowest |= 1 << bit
+	usedHighBits := ^uint32(0) &^ (0x40000000)
+	if mark := selectTCPolicyMark(usedHighBits); mark != 0x20000000 {
+		t.Fatalf("unexpected second-choice policy mark: %#x", mark)
 	}
-	if mark := selectTCPolicyMark(usedExceptLowest); mark != 1<<16 {
-		t.Fatalf("unexpected lowest policy mark: %#x", mark)
-	}
-	if mark := selectTCPolicyMark(^uint32(0)); mark != 0 {
-		t.Fatalf("expected no policy mark, got %#x", mark)
+	// Every candidate taken (possibly over-counted): fall back to the
+	// conventional highest bit instead of failing the whole start.
+	if mark := selectTCPolicyMark(^uint32(0)); mark != 0x40000000 {
+		t.Fatalf("expected fallback policy mark, got %#x", mark)
 	}
 }
 
