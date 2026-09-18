@@ -193,22 +193,21 @@ func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, err
 	s.rebuildAccess.Lock()
 	defer s.rebuildAccess.Unlock()
 	// Another caller may have completed the walk while we waited. A fresh
-	// snapshot under either key throttles the rebuild: every new socket
-	// carries an inode no snapshot can contain, and rebuilding per miss
-	// degenerates into a continuous procfs walk on short-lived traffic.
-	throttled := false
-	for _, key := range []uint32{uid, processPathsAllUsers} {
-		if cached, ok := s.processPathCache.Get(key); ok {
-			if now := time.Now(); now.Sub(cached.builtAt) < processPathRescanInterval {
-				throttled = true
-				if processPaths, found := cached.lookup(targetInode); found {
-					return processPaths, nil
-				}
+	// all-users snapshot throttles the rebuild: when a full scan was already
+	// performed recently and targetInode was not found anywhere, rebuilding per
+	// miss degenerates into a continuous procfs walk on short-lived traffic.
+	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
+		if now := time.Now(); now.Sub(cached.builtAt) < processPathRescanInterval {
+			if processPaths, found := cached.lookup(targetInode); found {
+				return processPaths, nil
 			}
+			return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
 		}
 	}
-	if throttled {
-		return nil, E.New("process of uid(", uid, "), inode(", targetInode, ") not found")
+	if cached, ok := s.processPathCache.Get(uid); ok {
+		if processPaths, found := cached.lookup(targetInode); found {
+			return processPaths, nil
+		}
 	}
 	uidPaths, allPaths, err := buildProcessPaths(targetInode, uid)
 	if err != nil {
