@@ -242,10 +242,10 @@ NOINLINE int egress_ipv4(
     struct ipv4_header *ip = data + l3_offset;
     if ((void *)(ip + 1) > data_end || ip->version != 4U || ip->ihl < 5U) return SB_SHARED_ACT_CONTINUE;
     if (!ipv4_token_address(ip->source, control)) return SB_SHARED_ACT_CONTINUE;
-    if (!selected_protocol(ip->protocol, control)) return TC_ACT_SHOT;
+    if (!selected_protocol(ip->protocol, control)) return SB_SHARED_ACT_CONTINUE;
     __u16 fragment = swap16(ip->fragment_offset);
     if ((fragment & (IPV4_FRAGMENT_OFFSET_MASK | IPV4_FRAGMENT_MORE)) != 0U) {
-        return TC_ACT_SHOT;
+        return SB_SHARED_ACT_CONTINUE;
     }
     __u32 header_length = (__u32)ip->ihl * 4U;
     __u32 zero = 0U;
@@ -261,11 +261,6 @@ NOINLINE int egress_ipv4(
     ip = data + l3_offset;
     if ((void *)(ip + 1) > data_end || ip->version != 4U || ip->ihl < 5U ||
         !ipv4_token_address(ip->source, control)) {
-        return TC_ACT_SHOT;
-    }
-    fragment = swap16(ip->fragment_offset);
-    if (!selected_protocol(ip->protocol, control) ||
-        (fragment & (IPV4_FRAGMENT_OFFSET_MASK | IPV4_FRAGMENT_MORE)) != 0U) {
         return TC_ACT_SHOT;
     }
     header_length = (__u32)ip->ihl * 4U;
@@ -501,13 +496,13 @@ NOINLINE int egress_ipv6(
         l3_offset,
         &protocol);
     __u32 transport = (__u32)transport_result;
-    if (transport == IPV6_TRANSPORT_BYPASS) return TC_ACT_SHOT;
+    if (transport == IPV6_TRANSPORT_BYPASS) return SB_SHARED_ACT_CONTINUE;
     if ((transport & IPV6_TRANSPORT_MASK) < IPV6_TRANSPORT_MIN_OFFSET ||
         (transport & IPV6_TRANSPORT_MASK) > IPV6_TRANSPORT_MAX_OFFSET) {
         return TC_ACT_SHOT;
     }
     transport &= IPV6_TRANSPORT_MASK;
-    if (!selected_protocol(protocol, control)) return TC_ACT_SHOT;
+    if (!selected_protocol(protocol, control)) return SB_SHARED_ACT_CONTINUE;
     __u32 zero = 0U;
     struct sb_shared_scratch *scratch = map_lookup(&shared_scratch, &zero);
     if (scratch == 0) return TC_ACT_SHOT;
@@ -541,8 +536,7 @@ NOINLINE int egress_ipv6(
     if ((void *)(ports + 1) > data_end) return TC_ACT_SHOT;
     source_port_raw = ports->source;
     __be16 destination_port_raw = ports->destination;
-    if (!selected_protocol(protocol, control) ||
-        swap16(source_port_raw) != control->listener_port) {
+    if (swap16(source_port_raw) != control->listener_port) {
         return TC_ACT_SHOT;
     }
 

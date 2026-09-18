@@ -650,14 +650,12 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
         existing->ifindex != value.ifindex ||
         existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
-        sk_release(socket);
-        return TC_ACT_SHOT;
-    }
     long result = sk_assign(skb, socket, 0U);
     sk_release(socket);
     if (result != 0) {
-        map_delete(&tc_assignment, &assignment_key);
+        return TC_ACT_SHOT;
+    }
+    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
         return TC_ACT_SHOT;
     }
     return TC_ACT_OK;
@@ -686,14 +684,12 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
         existing->ifindex != value.ifindex ||
         existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
-        sk_release(socket);
-        return TC_ACT_SHOT;
-    }
     long result = sk_assign(skb, socket, 0U);
     sk_release(socket);
     if (result != 0) {
-        map_delete(&tc_assignment, &assignment_key);
+        return TC_ACT_SHOT;
+    }
+    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
         return TC_ACT_SHOT;
     }
     return TC_ACT_OK;
@@ -719,14 +715,12 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
         existing->ifindex != value.ifindex || existing->path != value.path ||
         existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
-        sk_release(socket);
-        return TC_ACT_SHOT;
-    }
     long result = sk_assign(skb, socket, 0U);
     sk_release(socket);
     if (result != 0) {
-        map_delete(&tc_assignment, &assignment_key);
+        return TC_ACT_SHOT;
+    }
+    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
         return TC_ACT_SHOT;
     }
     return TC_ACT_OK;
