@@ -99,9 +99,15 @@ func TestSelectTCPolicyMark(t *testing.T) {
 	if mark := selectTCPolicyMark(0); mark != 1<<30 {
 		t.Fatalf("unexpected preferred policy mark: %#x", mark)
 	}
-	usedHighBits := ^uint32(0) &^ (1 << 7)
-	if mark := selectTCPolicyMark(usedHighBits); mark != 1<<7 {
-		t.Fatalf("unexpected low-bit fallback policy mark: %#x", mark)
+	// Policy marks are confined to bits 16-30 (see selectTCPolicyMark):
+	// bits 0-15 are the conventional fwmark range and are never touched.
+	// Fill every allowed bit except the lowest one and expect it back.
+	usedExceptLowest := uint32(0)
+	for bit := uint(30); bit >= 17; bit-- {
+		usedExceptLowest |= 1 << bit
+	}
+	if mark := selectTCPolicyMark(usedExceptLowest); mark != 1<<16 {
+		t.Fatalf("unexpected lowest policy mark: %#x", mark)
 	}
 	if mark := selectTCPolicyMark(^uint32(0)); mark != 0 {
 		t.Fatalf("expected no policy mark, got %#x", mark)
