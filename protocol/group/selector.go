@@ -116,11 +116,30 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 }
 
 func (s *Selector) Network() []string {
+	// A configured udp_outbound is the selector's own UDP capability: the route
+	// layer checks Network() before ListenPacket runs, so without this a
+	// selector whose current member is TCP-only (e.g. a plain HTTP proxy) would
+	// have its UDP traffic rejected before delegation could ever happen.
+	if s.udpOutboundTag != "" {
+		return []string{N.NetworkTCP, N.NetworkUDP}
+	}
 	selected := s.selected.Load()
 	if selected == nil {
 		return []string{N.NetworkTCP, N.NetworkUDP}
 	}
 	return selected.Network()
+}
+
+// selectedSupportsUDP reports whether the currently selected member outbound can
+// carry UDP on its own. When it can, a configured udp_outbound must be skipped:
+// delegating a capable member through an extra hop only adds latency.
+func (s *Selector) selectedSupportsUDP() bool {
+	selected := s.selected.Load()
+	if selected == nil {
+		// Nothing resolved yet; fall back to delegating so UDP is never dropped.
+		return false
+	}
+	return common.Contains(selected.Network(), N.NetworkUDP)
 }
 
 func (s *Selector) Start() error {
@@ -371,7 +390,7 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	if s.udpOutboundTag != "" {
+	if s.udpOutboundTag != "" && !s.selectedSupportsUDP() {
 		if s.outbound == nil {
 			return nil, E.New("missing outbound manager for udp_outbound: ", s.udpOutboundTag)
 		}
