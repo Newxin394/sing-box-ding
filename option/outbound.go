@@ -103,6 +103,7 @@ type AbstractDialerOptions struct {
 	TCPKeepAliveInterval       badoption.Duration                `json:"tcp_keep_alive_interval,omitempty"`
 	TCPKeepAliveCount          int                               `json:"tcp_keep_alive_count,omitempty"`
 	TCPKeepAliveSystemDefaults bool                              `json:"-"`
+	TCPUserTimeout             badoption.Duration                `json:"tcp_user_timeout,omitempty"`
 	UDPBindPort                uint16                            `json:"-"`
 	UDPFragment                *bool                             `json:"udp_fragment,omitempty"`
 	UDPFragmentDefault         bool                              `json:"-"`

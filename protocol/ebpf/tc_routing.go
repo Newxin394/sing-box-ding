@@ -417,18 +417,30 @@ func allocateTCPolicyIdentifiers(loopbackIndex int, families []int, reservedMark
 	return identifiers, nil
 }
 
+// tcPolicyMarkCandidates lists routing marks in order of preference.
+// Android/MIUI policy rules never use these high bits (their fwmark masks
+// stay below 0x10000000), so picking from this fixed set cannot collide
+// with host policy rules. Restricting the candidates also keeps the choice
+// deterministic even when usedMarkBits was over-counted by a rule whose
+// FRA_FWMASK was not exposed by the kernel.
+var tcPolicyMarkCandidates = []uint32{
+	0x40000000, 0x20000000, 0x10000000, 0x08000000, 0x04000000,
+	0x02000000, 0x01000000, 0x00800000, 0x00400000, 0x00200000,
+	0x00100000, 0x00080000, 0x00040000, 0x00020000, 0x00010000,
+}
+
 func selectTCPolicyMark(usedMarkBits uint32) uint32 {
-	// Keep the mark in the positive int range used by netlink.Rule.Mask on
-	// 32-bit systems, and stay inside the high-bit range shared with
-	// allocatePreMatchMark (bits 16-30). Bits 0-15 are the conventional
-	// fwmark range and must not be touched by policy routing.
-	for bit := uint(30); bit >= 16; bit-- {
-		candidate := uint32(1) << bit
+	for _, candidate := range tcPolicyMarkCandidates {
 		if usedMarkBits&candidate == 0 {
 			return candidate
 		}
 	}
-	return 0
+	// Every candidate looks taken: this can only happen when a policy rule
+	// was over-counted (e.g. an Android kernel that does not expose
+	// FRA_FWMASK made a masked rule look like a full-mark rule). Fall back
+	// to the highest bit, which host policy rules never reserve, instead of
+	// failing the whole start.
+	return tcPolicyMarkCandidates[0]
 }
 
 func tcPolicyRuleMarkBits(rule netlink.Rule) uint32 {
@@ -437,8 +449,11 @@ func tcPolicyRuleMarkBits(rule netlink.Rule) uint32 {
 		return uint32(rule.Mask)
 	}
 	if rule.MarkSet || rule.Mark != 0 {
-		// A fwmark rule without FRA_FWMASK matches the full mark value.
-		return ^uint32(0)
+		// A fwmark rule without FRA_FWMASK matches one mark value only, so
+		// only its own bits are reserved. Some Android kernels fail to
+		// expose FRA_FWMASK to netlink; claiming every bit then locks out
+		// all TC routing marks ("no unused TC eBPF routing mark").
+		return uint32(rule.Mark)
 	}
 	return 0
 }

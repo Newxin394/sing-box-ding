@@ -160,7 +160,13 @@ type DNSRuleSetUpdateValidator interface {
 
 // ip_version is not a headless-rule item, so ContainsIPVersionRule is intentionally absent.
 type RuleSetMetadata struct {
-	ContainsProcessRule      bool
+	ContainsProcessRule bool
+	// ContainsProcessPathRule signals that the rule-set carries a sub-rule
+	// matching on process_name, process_path or process_path_regex. Those need
+	// the owning process's executable path, which only a procfs scan can
+	// supply. package_name and package_name_regex resolve from the socket's
+	// uid alone, so they set ContainsProcessRule without setting this.
+	ContainsProcessPathRule  bool
 	ContainsWIFIRule         bool
 	ContainsIPCIDRRule       bool
 	ContainsDNSQueryTypeRule bool

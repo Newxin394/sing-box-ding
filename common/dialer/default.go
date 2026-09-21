@@ -161,6 +161,11 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	} else {
 		dialer.Timeout = C.TCPConnectTimeout
 	}
+	if options.TCPUserTimeout > 0 {
+		if userTimeoutFunc := tcpUserTimeoutFunc(time.Duration(options.TCPUserTimeout)); userTimeoutFunc != nil {
+			dialer.Control = control.Append(dialer.Control, userTimeoutFunc)
+		}
+	}
 	if options.DisableTCPKeepAlive {
 		dialer.KeepAlive = -1
 		dialer.KeepAliveConfig.Enable = false

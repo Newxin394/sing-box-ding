@@ -82,7 +82,7 @@ func TestDumpSocketDiagUDP(t *testing.T) {
 
 func TestLinuxSearcherFindProcessInfo(t *testing.T) {
 	t.Parallel()
-	searcher, err := NewSearcher(Config{Logger: log.NewNOPFactory().NewLogger("test")})
+	searcher, err := NewSearcher(Config{Logger: log.NewNOPFactory().NewLogger("test"), NeedProcessPath: true})
 	require.NoError(t, err)
 	defer searcher.Close()
 	executable, err := os.Executable()

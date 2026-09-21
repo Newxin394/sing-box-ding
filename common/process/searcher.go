@@ -24,6 +24,12 @@ var ErrNotFound = E.New("process not found")
 type Config struct {
 	Logger         log.ContextLogger
 	PackageManager tun.PackageManager
+	// NeedProcessPath gates the procfs scan that resolves a socket's inode into
+	// the owning process's executable path. Rules matching on package_name,
+	// user or user_id only need the socket's uid, which netlink diagnostics
+	// already returns, so the scan is pure waste for them. Leave false unless a
+	// process_name / process_path / process_path_regex rule exists.
+	NeedProcessPath bool
 }
 
 func FindProcessInfo(searcher Searcher, ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error) {
