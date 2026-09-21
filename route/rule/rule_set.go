@@ -64,6 +64,14 @@ func isProcessHeadlessRule(rule option.DefaultHeadlessRule) bool {
 	return len(rule.ProcessName) > 0 || len(rule.ProcessPath) > 0 || len(rule.ProcessPathRegex) > 0 || len(rule.PackageName) > 0 || len(rule.PackageNameRegex) > 0
 }
 
+// isProcessPathHeadlessRule reports whether a rule-set sub-rule needs the
+// owning process's executable path. Only these three fields do: the package
+// fields resolve from the socket's uid, which netlink diagnostics returns
+// without touching procfs.
+func isProcessPathHeadlessRule(rule option.DefaultHeadlessRule) bool {
+	return len(rule.ProcessName) > 0 || len(rule.ProcessPath) > 0 || len(rule.ProcessPathRegex) > 0
+}
+
 func isWIFIHeadlessRule(rule option.DefaultHeadlessRule) bool {
 	return len(rule.WIFISSID) > 0 || len(rule.WIFIBSSID) > 0
 }
@@ -88,6 +96,7 @@ func isNonIPCIDRHeadlessRule(rule option.DefaultHeadlessRule) bool {
 func buildRuleSetMetadata(headlessRules []option.HeadlessRule) adapter.RuleSetMetadata {
 	return adapter.RuleSetMetadata{
 		ContainsProcessRule:      HasHeadlessRule(headlessRules, isProcessHeadlessRule),
+		ContainsProcessPathRule:  HasHeadlessRule(headlessRules, isProcessPathHeadlessRule),
 		ContainsWIFIRule:         HasHeadlessRule(headlessRules, isWIFIHeadlessRule),
 		ContainsIPCIDRRule:       HasHeadlessRule(headlessRules, isIPCIDRHeadlessRule),
 		ContainsDNSQueryTypeRule: HasHeadlessRule(headlessRules, isDNSQueryTypeHeadlessRule),

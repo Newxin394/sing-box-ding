@@ -110,7 +110,7 @@ func NewProviderLocal(ctx context.Context, router adapter.Router, logFactory log
 	filePath := filemanager.BasePath(ctx, options.Path)
 	provider.path, _ = filepath.Abs(filePath)
 	watcher, err := fswatch.NewWatcher(fswatch.Options{
-		Path: []string{filePath},
+		Path: []string{provider.path},
 		Callback: func(path string) {
 			uErr := provider.reloadFile(path)
 			if uErr != nil {

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -49,8 +50,11 @@ const (
 var _ Searcher = (*linuxSearcher)(nil)
 
 type linuxSearcher struct {
-	logger           log.ContextLogger
-	packageManager   tun.PackageManager
+	logger         log.ContextLogger
+	packageManager tun.PackageManager
+	// needProcessPath is atomic because SetNeedProcessPath can widen it from a
+	// rule-set reload callback while lookups run concurrently.
+	needProcessPath  atomic.Bool
 	diagConns        [4]*socketDiagConn
 	processPathCache *freelru.Cache[uint32, *uidProcessPaths]
 	// rebuildAccess serializes the full rebuild so a burst of concurrent misses
@@ -81,6 +85,7 @@ func NewSearcher(config Config) (Searcher, error) {
 		packageManager:   config.PackageManager,
 		processPathCache: processPathCache,
 	}
+	searcher.needProcessPath.Store(config.NeedProcessPath)
 	for _, family := range []uint8{syscall.AF_INET, syscall.AF_INET6} {
 		for _, protocol := range []uint8{syscall.IPPROTO_TCP, syscall.IPPROTO_UDP} {
 			searcher.diagConns[socketDiagConnIndex(family, protocol)] = &socketDiagConn{
@@ -94,6 +99,23 @@ func NewSearcher(config Config) (Searcher, error) {
 }
 
 func (s *linuxSearcher) ResetCache() {
+	s.processPathCache.Purge()
+}
+
+// SetNeedProcessPath widens the procfs gate at runtime.
+//
+// Whether the walk is needed is decided once at start, from the static
+// configuration plus the metadata of every rule-set that had been loaded at
+// that point. A rule-set reloaded afterwards can introduce process_path rules
+// that were absent from that metadata, and without widening here the walk stays
+// off and those rules can never match. It only ever enables the walk, so
+// repeated calls are harmless.
+func (s *linuxSearcher) SetNeedProcessPath() {
+	if s.needProcessPath.Swap(true) {
+		return
+	}
+	// The cache may hold snapshots built for a different target inode under the
+	// throttled regime, so drop them rather than let a stale snapshot answer.
 	s.processPathCache.Purge()
 }
 
@@ -116,11 +138,17 @@ func (s *linuxSearcher) FindProcessInfo(ctx context.Context, network string, sou
 	processInfo := &adapter.ConnectionOwner{
 		UserId: int32(uid),
 	}
-	processPaths, err := s.findProcessPaths(inode, uid)
-	if err != nil {
-		s.logger.DebugContext(ctx, "find process path: ", err)
-	} else {
-		processInfo.ProcessPaths = processPaths
+	// Resolving the inode into an executable path walks every fd of every
+	// process in procfs, which is by far the most expensive step here. The uid
+	// above already answers package_name, user and user_id rules, so skip the
+	// walk entirely when no rule needs a path.
+	if s.needProcessPath.Load() {
+		processPaths, err := s.findProcessPaths(inode, uid)
+		if err != nil {
+			s.logger.DebugContext(ctx, "find process path: ", err)
+		} else {
+			processInfo.ProcessPaths = processPaths
+		}
 	}
 	completeProcessInfo(processInfo, s.packageManager)
 	return processInfo, nil

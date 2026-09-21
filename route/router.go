@@ -40,6 +40,11 @@ type Router struct {
 	ruleByUUID        map[string]adapter.Rule
 	needFindProcess   bool
 	needFindNeighbor  bool
+	// needProcessPath is the subset of needFindProcess that actually requires
+	// the procfs scan: only process_name / process_path / process_path_regex
+	// rules do. package_name and user rules are satisfied by the socket's uid.
+	// find_process also enables the scan, so that its logging reports the path.
+	needProcessPath   bool
 	leaseFiles        []string
 	ruleSets          []adapter.RuleSet
 	ruleSetMap        map[string]adapter.RuleSet
@@ -51,6 +56,7 @@ type Router struct {
 	trackers          []adapter.ConnectionTracker
 	platformInterface adapter.PlatformInterface
 	started           bool
+	processPath       processPathState
 
 	quicSniffCache             *expiringmap.Map[quicSniffCacheKey, string]
 	defaultDomainMatchStrategy C.DomainMatchStrategy
@@ -72,6 +78,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		ruleByUUID:        make(map[string]adapter.Rule),
 		ruleSetMap:        make(map[string]adapter.RuleSet),
 		needFindProcess:   hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
+		needProcessPath:   hasRule(options.Rules, isProcessPathRule) || hasDNSRule(dnsOptions.Rules, isProcessPathDNSRule) || options.FindProcess,
 		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
 		leaseFiles:        options.DHCPLeaseFiles,
 		pauseManager:      service.FromContext[pause.Manager](ctx),
@@ -179,24 +186,33 @@ func (r *Router) Start(stage adapter.StartStage) error {
 		r.ruleSetUpdater = R.NewRuleSetUpdater(r.ctx, r.ruleSets)
 		r.network.Initialize(r.ruleSets)
 		needFindProcess := r.needFindProcess
+		needProcessPath := r.needProcessPath
 		for _, ruleSet := range r.ruleSets {
 			metadata := ruleSet.Metadata()
 			if metadata.ContainsProcessRule {
 				needFindProcess = true
 			}
+			if metadata.ContainsProcessPathRule {
+				needProcessPath = true
+			}
 		}
+		// Android forces process lookup on because package_name rules need the
+		// socket's uid, but a uid never requires the procfs scan, so this must
+		// not widen needProcessPath.
 		if C.IsAndroid && r.platformInterface != nil {
 			needFindProcess = true
 		}
 		r.needFindProcess = needFindProcess
+		r.needProcessPath = needProcessPath
 		if needFindProcess {
 			if r.platformInterface != nil && r.platformInterface.UsePlatformConnectionOwnerFinder() {
 				r.processSearcher = newPlatformSearcher(r.platformInterface)
 			} else {
 				monitor.Start("initialize process searcher")
 				searcher, err := process.NewSearcher(process.Config{
-					Logger:         r.logger,
-					PackageManager: r.network.PackageManager(),
+					Logger:          r.logger,
+					PackageManager:  r.network.PackageManager(),
+					NeedProcessPath: needProcessPath,
 				})
 				monitor.Finish()
 				if err != nil {
@@ -213,6 +229,9 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			processCache.SetLifetime(200 * time.Millisecond)
 			r.processCache = processCache
 		}
+		// Registered last, so that needProcessPath is final before a reload can
+		// widen it.
+		r.startProcessPathWidening()
 	case adapter.StartStatePostStart:
 		for i, rule := range r.rules {
 			monitor.Start("initialize rule[", i, "]")
@@ -238,6 +257,7 @@ func (r *Router) Start(stage adapter.StartStage) error {
 
 func (r *Router) Close() error {
 	r.quicSniffCache.Close()
+	r.stopProcessPathWidening()
 	monitor := taskmonitor.New(r.logger, C.StopTimeout)
 	var err error
 	if r.neighborResolver != nil {

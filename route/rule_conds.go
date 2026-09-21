@@ -45,6 +45,19 @@ func isProcessDNSRule(rule option.DefaultDNSRule) bool {
 	return len(rule.ProcessName) > 0 || len(rule.ProcessPath) > 0 || len(rule.ProcessPathRegex) > 0 || len(rule.PackageName) > 0 || len(rule.PackageNameRegex) > 0 || len(rule.User) > 0 || len(rule.UserID) > 0
 }
 
+// isProcessPathRule reports whether a rule needs the owning process's
+// executable path, the only thing a procfs scan can supply. package_name,
+// user and user_id resolve from the socket's uid alone, and netlink socket
+// diagnostics returns that uid without touching procfs, so they are excluded.
+func isProcessPathRule(rule option.DefaultRule) bool {
+	return len(rule.ProcessName) > 0 || len(rule.ProcessPath) > 0 || len(rule.ProcessPathRegex) > 0
+}
+
+// isProcessPathDNSRule is the DNS counterpart of isProcessPathRule.
+func isProcessPathDNSRule(rule option.DefaultDNSRule) bool {
+	return len(rule.ProcessName) > 0 || len(rule.ProcessPath) > 0 || len(rule.ProcessPathRegex) > 0
+}
+
 func isNeighborRule(rule option.DefaultRule) bool {
 	return len(rule.SourceMACAddress) > 0 || len(rule.SourceHostname) > 0
 }
