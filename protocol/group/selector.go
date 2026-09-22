@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"io"
 	"net"
 	"regexp"
 	"slices"
@@ -195,7 +196,10 @@ func (s *Selector) Start() error {
 	return nil
 }
 
-func (s *Selector) Now() string {
+// nowTag returns the currently selected member's tag, skipping the UDP
+// delegate/fallback so callers that fall back to the tag list never surface the
+// backend-only udp_outbound as the visible selection.
+func (s *Selector) nowTag() string {
 	selected := s.selected.Load()
 	if selected == nil {
 		s.stateAccess.RLock()
@@ -233,11 +237,33 @@ func (s *Selector) All() []string {
 }
 
 func (s *Selector) References() []string {
-	return []string{s.Now()}
+	return []string{s.nowTag()}
 }
 
-func (s *Selector) Selected() adapter.Outbound {
-	return s.selected.Load()
+// Selected implements adapter.OutboundGroup. Selection is network-aware: when a
+// udp_outbound is configured and the currently selected member cannot carry UDP
+// on its own (e.g. a plain HTTP免流 node), UDP resolution returns the delegate
+// so the nested-group chain resolver routes packets straight through it. TCP —
+// and UDP-capable members — keep using the selected member unchanged. This is
+// the resolver-path twin of the delegation ListenPacket still performs when the
+// selector is itself used as another outbound's udp_outbound target.
+func (s *Selector) Selected(network string) adapter.Outbound {
+	selected := s.selected.Load()
+	if network == N.NetworkUDP && s.udpOutboundTag != "" && !s.selectedSupportsUDP() {
+		if s.outbound != nil {
+			if delegate, loaded := s.outbound.Outbound(s.udpOutboundTag); loaded {
+				return delegate
+			}
+		}
+	}
+	return selected
+}
+
+// AttachConnection registers a raw connection with the interrupt group so that
+// selecting a new member (or a provider update) tears down in-flight traffic
+// that flowed through this group, including when it sits inside a nested chain.
+func (s *Selector) AttachConnection(closer io.Closer) func() {
+	return s.interruptGroup.Add(closer, true, false)
 }
 
 func (s *Selector) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
@@ -443,23 +469,17 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 }
 
-func RealTag(outboundManager adapter.OutboundManager, detour adapter.Outbound) string {
-	tag := detour.Tag()
+func RealTag(detour adapter.Outbound, network string) string {
 	for {
 		group, isGroup := detour.(adapter.OutboundGroup)
 		if !isGroup {
-			return tag
+			return detour.Tag()
 		}
-		now := group.Now()
-		if now == "" {
-			return tag
+		selected := group.Selected(network)
+		if selected == nil {
+			return group.Tag()
 		}
-		tag = now
-		var loaded bool
-		detour, loaded = outboundManager.Outbound(tag)
-		if !loaded {
-			return tag
-		}
+		detour = selected
 	}
 }
 

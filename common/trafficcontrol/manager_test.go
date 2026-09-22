@@ -23,7 +23,7 @@ func (t *testTracker) Close() error {
 }
 
 func TestClosedConnectionsLimit(t *testing.T) {
-	manager := NewManager(nil)
+	manager := NewManager()
 	require.NoError(t, manager.Start(adapter.StartStateInitialize))
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	manager.SetClosedConnectionsLimit(2)
@@ -66,7 +66,7 @@ func TestClosedConnectionsLimit(t *testing.T) {
 }
 
 func TestConnectionEvents(t *testing.T) {
-	manager := NewManager(nil)
+	manager := NewManager()
 	require.NoError(t, manager.Start(adapter.StartStateInitialize))
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	subscription, _, err := manager.SubscribeEvents()

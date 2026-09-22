@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -266,8 +267,12 @@ func (g *loadBalanceURLTestGroup) Network() []string {
 	return []string{N.NetworkTCP, N.NetworkUDP}
 }
 
-func (g *loadBalanceURLTestGroup) Now() string {
-	return ""
+func (g *loadBalanceURLTestGroup) Selected(network string) adapter.Outbound {
+	return nil
+}
+
+func (g *loadBalanceURLTestGroup) AttachConnection(closer io.Closer) func() {
+	return func() {}
 }
 
 func (g *loadBalanceURLTestGroup) All() []string {

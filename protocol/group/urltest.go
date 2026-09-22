@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"io"
 	"maps"
 	"net"
 	"regexp"
@@ -208,7 +209,7 @@ func (s *URLTest) Close() error {
 	)
 }
 
-func (s *URLTest) Now() string {
+func (s *URLTest) nowTag() string {
 	selectedOutboundTCP := s.group.selectedOutboundTCP.Load()
 	if selectedOutboundTCP != nil {
 		return selectedOutboundTCP.Tag()
@@ -218,6 +219,29 @@ func (s *URLTest) Now() string {
 		return selectedOutboundUDP.Tag()
 	}
 	return ""
+}
+
+// Selected implements adapter.OutboundGroup, resolving the best member for the
+// requested network. Falls back to the group's own Select() (which may run a
+// fresh pick) when no member has been latched yet.
+func (s *URLTest) Selected(network string) adapter.Outbound {
+	var outbound adapter.Outbound
+	if network == N.NetworkUDP {
+		outbound = s.group.selectedOutboundUDP.Load()
+	} else {
+		outbound = s.group.selectedOutboundTCP.Load()
+	}
+	if outbound == nil {
+		outbound, _ = s.group.Select(network)
+	}
+	return outbound
+}
+
+// AttachConnection registers a raw connection with the group's interrupt group
+// so a urltest re-pick tears down in-flight traffic, including nested chains.
+func (s *URLTest) AttachConnection(closer io.Closer) func() {
+	s.group.Touch()
+	return s.group.interruptGroup.Add(closer, true, false)
 }
 
 func (s *URLTest) All() []string {
@@ -531,7 +555,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 	case N.NetworkTCP:
 		selectedOutbound := g.selectedOutboundTCP.Load()
 		if selectedOutbound != nil {
-			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
+			if history := g.history.LoadURLTestHistory(RealTag(selectedOutbound, N.NetworkTCP)); history != nil {
 				minOutbound = selectedOutbound
 				minDelay = history.Delay
 			}
@@ -539,7 +563,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 	case N.NetworkUDP:
 		selectedOutbound := g.selectedOutboundUDP.Load()
 		if selectedOutbound != nil {
-			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
+			if history := g.history.LoadURLTestHistory(RealTag(selectedOutbound, N.NetworkUDP)); history != nil {
 				minOutbound = selectedOutbound
 				minDelay = history.Delay
 			}
@@ -550,7 +574,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		if !common.Contains(detour.Network(), network) {
 			continue
 		}
-		history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour))
+		history := g.history.LoadURLTestHistory(RealTag(detour, network))
 		if history == nil {
 			continue
 		}
@@ -738,7 +762,7 @@ func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 	testBatch.test(outbounds, link, interval, force)
 	b.Wait()
 	for _, outboundGroup := range testBatch.groups {
-		groupHistory := history.LoadURLTestHistory(RealTag(outboundManager, outboundGroup))
+		groupHistory := history.LoadURLTestHistory(RealTag(outboundGroup, N.NetworkTCP))
 		if groupHistory != nil {
 			testBatch.result[outboundGroup.Tag()] = groupHistory.Delay
 		}

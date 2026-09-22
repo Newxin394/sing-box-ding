@@ -3,6 +3,7 @@ package group
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/netip"
@@ -169,8 +170,32 @@ func (s *LoadBalance) Close() error {
 	)
 }
 
-func (s *LoadBalance) Now() string {
-	return ""
+// Selected implements adapter.OutboundGroup. Load-balancing picks a member per
+// connection (by consistent hashing / round-robin over the live metadata), so
+// there is no single stable "current" member the way a selector has. The
+// nested-group chain resolver only needs a representative UDP/TCP-capable leaf;
+// return the first candidate that supports the requested network, or nil when
+// none do (the resolver then reports the group as unsupported for that network).
+func (s *LoadBalance) Selected(network string) adapter.Outbound {
+	if s.group == nil {
+		return nil
+	}
+	for _, outbound := range s.group.loadOutbounds() {
+		if common.Contains(outbound.Network(), network) {
+			return outbound
+		}
+	}
+	return nil
+}
+
+// AttachConnection registers a raw connection with the group's interrupt group
+// so provider updates / rebalances tear down in-flight traffic through nested
+// chains.
+func (s *LoadBalance) AttachConnection(closer io.Closer) func() {
+	if s.group == nil {
+		return func() {}
+	}
+	return s.group.interruptGroup.Add(closer, true, false)
 }
 
 func (s *LoadBalance) All() []string {
@@ -501,8 +526,8 @@ func collectLoadBalanceURLTestLeafHistory(outboundManager adapter.OutboundManage
 			}
 			visiting[tag] = true
 			var memberTags []string
-			if now := outboundGroup.Now(); now != "" {
-				memberTags = []string{now}
+			if selected := outboundGroup.Selected(N.NetworkTCP); selected != nil {
+				memberTags = []string{selected.Tag()}
 			} else {
 				memberTags = outboundGroup.All()
 			}
@@ -579,7 +604,7 @@ func (g *LoadBalanceGroup) aliveForTestURL(proxy adapter.Outbound, checked map[s
 		}
 		return false
 	}
-	return g.history.LoadURLTestHistory(RealTag(g.outbound, proxy)) != nil
+	return g.history.LoadURLTestHistory(RealTag(proxy, N.NetworkTCP)) != nil
 }
 
 func (g *LoadBalanceGroup) nextFallback(outbounds []adapter.Outbound, touch bool, matcher outboundMatcher) adapter.Outbound {

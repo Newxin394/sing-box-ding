@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/sniff"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -119,10 +121,6 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 				buf.ReleaseMulti(buffers)
 				return E.New("outbound not found: ", action.Outbound)
 			}
-			if !common.Contains(selectedOutbound.Network(), N.NetworkTCP) {
-				buf.ReleaseMulti(buffers)
-				return E.New("TCP is not supported by outbound: ", selectedOutbound.Tag())
-			}
 		case *R.RuleActionBypass:
 			if action.Outbound == "" {
 				break
@@ -132,10 +130,6 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 			if !loaded {
 				buf.ReleaseMulti(buffers)
 				return E.New("outbound not found: ", action.Outbound)
-			}
-			if !common.Contains(selectedOutbound.Network(), N.NetworkTCP) {
-				buf.ReleaseMulti(buffers)
-				return E.New("TCP is not supported by outbound: ", selectedOutbound.Tag())
 			}
 		case *R.RuleActionReject:
 			buf.ReleaseMulti(buffers)
@@ -152,14 +146,13 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		}
 	}
 	if selectedRule == nil {
-		defaultOutbound := r.outbound.Default()
-		if !common.Contains(defaultOutbound.Network(), N.NetworkTCP) {
-			buf.ReleaseMulti(buffers)
-			return E.New("TCP is not supported by default outbound: ", defaultOutbound.Tag())
-		}
-		selectedOutbound = defaultOutbound
+		selectedOutbound = r.outbound.Default()
 	}
-
+	chain, err := resolveOutbound(selectedOutbound, N.NetworkTCP)
+	if err != nil {
+		buf.ReleaseMulti(buffers)
+		return err
+	}
 	for _, buffer := range buffers {
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
@@ -167,16 +160,58 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		metadata.RouteRule = selectedRule.String()
 	}
 	metadata.RouteOutbound = selectedOutbound.Tag()
+	metadata.OutboundChain = chain
 	metadata.InitExtended()
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
-	if outboundHandler, isHandler := selectedOutbound.(adapter.ConnectionHandler); isHandler {
+	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	onClose = registerInterrupt(chain, conn, onClose)
+	outbound := chain[len(chain)-1]
+	if outboundHandler, isHandler := outbound.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
-		r.connection.NewConnection(ctx, selectedOutbound, conn, metadata, onClose)
+		r.connection.NewConnection(ctx, outbound, conn, metadata, onClose)
 	}
 	return nil
+}
+
+func resolveOutbound(outbound adapter.Outbound, network string) ([]adapter.Outbound, error) {
+	chain := []adapter.Outbound{outbound}
+	for {
+		group, isGroup := outbound.(adapter.OutboundGroup)
+		if !isGroup {
+			break
+		}
+		outbound = group.Selected(network)
+		if outbound == nil {
+			return nil, E.New(strings.ToUpper(network), " is not supported by outbound: ", group.Tag())
+		}
+		chain = append(chain, outbound)
+	}
+	if !common.Contains(outbound.Network(), network) {
+		return nil, E.New(strings.ToUpper(network), " is not supported by outbound: ", outbound.Tag())
+	}
+	return chain, nil
+}
+
+func registerInterrupt(chain []adapter.Outbound, closer io.Closer, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
+	var removers []func()
+	for _, outbound := range chain {
+		group, isGroup := outbound.(adapter.OutboundGroup)
+		if !isGroup {
+			continue
+		}
+		removers = append(removers, group.AttachConnection(closer))
+	}
+	if len(removers) == 0 {
+		return onClose
+	}
+	return N.AppendClose(onClose, func(it error) {
+		for _, remove := range removers {
+			remove()
+		}
+	})
 }
 
 func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext) error {
@@ -256,10 +291,6 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 				N.ReleaseMultiPacketBuffer(packetBuffers)
 				return E.New("outbound not found: ", action.Outbound)
 			}
-			if !common.Contains(selectedOutbound.Network(), N.NetworkUDP) {
-				N.ReleaseMultiPacketBuffer(packetBuffers)
-				return E.New("UDP is not supported by outbound: ", selectedOutbound.Tag())
-			}
 		case *R.RuleActionBypass:
 			if action.Outbound == "" {
 				break
@@ -269,10 +300,6 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 			if !loaded {
 				N.ReleaseMultiPacketBuffer(packetBuffers)
 				return E.New("outbound not found: ", action.Outbound)
-			}
-			if !common.Contains(selectedOutbound.Network(), N.NetworkUDP) {
-				N.ReleaseMultiPacketBuffer(packetBuffers)
-				return E.New("UDP is not supported by outbound: ", selectedOutbound.Tag())
 			}
 		case *R.RuleActionReject:
 			N.ReleaseMultiPacketBuffer(packetBuffers)
@@ -285,12 +312,12 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 		}
 	}
 	if selectedRule == nil || selectReturn {
-		defaultOutbound := r.outbound.Default()
-		if !common.Contains(defaultOutbound.Network(), N.NetworkUDP) {
-			N.ReleaseMultiPacketBuffer(packetBuffers)
-			return E.New("UDP is not supported by outbound: ", defaultOutbound.Tag())
-		}
-		selectedOutbound = defaultOutbound
+		selectedOutbound = r.outbound.Default()
+	}
+	chain, err := resolveOutbound(selectedOutbound, N.NetworkUDP)
+	if err != nil {
+		N.ReleaseMultiPacketBuffer(packetBuffers)
+		return err
 	}
 	for _, buffer := range slices.Backward(packetBuffers) {
 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
@@ -300,6 +327,7 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 		metadata.RouteRule = selectedRule.String()
 	}
 	metadata.RouteOutbound = selectedOutbound.Tag()
+	metadata.OutboundChain = chain
 	metadata.InitExtended()
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedPacketConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
@@ -307,11 +335,14 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	if metadata.FakeIP || metadata.DestOverride {
 		conn = newFakeIPNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, metadata.Destination)
 	}
+	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	onClose = registerInterrupt(chain, conn, onClose)
 	onClose = r.wrapQUICSniffIdleCache(metadata, onClose)
-	if outboundHandler, isHandler := selectedOutbound.(adapter.PacketConnectionHandler); isHandler {
+	outbound := chain[len(chain)-1]
+	if outboundHandler, isHandler := outbound.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
-		r.connection.NewPacketConnection(ctx, selectedOutbound, conn, metadata, onClose)
+		r.connection.NewPacketConnection(ctx, outbound, conn, metadata, onClose)
 	}
 	return nil
 }
@@ -476,12 +507,21 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 			return continueResult
 		}
 	}
+	// Build the group chain (for nested-group connection interruption) before
+	// the local pre-match resolution collapses it to the final member.
+	chain, chainErr := resolveOutbound(outbound, metadata.Network)
 	outbound, flowAction := r.selectPreMatchOutbound(metadata, outbound, 0)
 	if outbound == nil {
 		return continueResult
 	}
 	if flowAction != adapter.PreMatchFlow {
 		return adapter.PreMatchResult{Action: flowAction, Outbound: outbound}
+	}
+	if chainErr != nil {
+		// resolveOutbound only fails when the final member cannot carry the
+		// network; selectPreMatchOutbound already validated this path, so fall
+		// back to a single-element chain rather than dropping the flow.
+		chain = []adapter.Outbound{outbound}
 	}
 	flowOutbound := outbound.(adapter.FlowOutbound)
 	result := adapter.PreMatchResult{Action: adapter.PreMatchFlow, Outbound: outbound}
@@ -543,11 +583,16 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 	} else if metadata.Destination != packetDestination {
 		result.Destination = metadata.Destination.AddrPort()
 	}
+	metadata.OutboundChain = chain
 	r.logger.InfoContext(ctx, "pre-match: forward ", metadata.Network, " connection from ", metadata.Source.AddrString(), " to ", metadata.Destination.AddrString(), " via outbound/", outbound.Type(), "[", outbound.Tag(), "]")
 	metadataCopy := *metadata
 	result.NewTracker = func() tun.FlowTracker {
-		flowTrackers := make([]tun.FlowTracker, 0, len(r.trackers)+1)
+		flowTrackers := make([]tun.FlowTracker, 0, len(r.trackers)+2)
 		flowTrackers = append(flowTrackers, newFlowLogger(ctx, r.logger, metadataCopy, outbound))
+		flowInterrupter := newFlowInterrupter(chain)
+		if flowInterrupter != nil {
+			flowTrackers = append(flowTrackers, flowInterrupter)
+		}
 		for _, tracker := range r.trackers {
 			flowTracker := tracker.RoutedFlow(ctx, metadataCopy, matchedRule, outbound)
 			if flowTracker != nil {
@@ -572,8 +617,8 @@ func (r *Router) selectPreMatchOutbound(metadata *adapter.InboundContext, outbou
 		})
 	}
 	if group, isGroup := outbound.(adapter.OutboundGroup); isGroup {
-		selectedOutbound, selectedLoaded := r.outbound.Outbound(group.Now())
-		if !selectedLoaded {
+		selectedOutbound := group.Selected(metadata.Network)
+		if selectedOutbound == nil {
 			return nil, adapter.PreMatchContinue
 		}
 		return r.selectPreMatchOutbound(metadata, selectedOutbound, depth+1)

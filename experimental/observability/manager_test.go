@@ -104,7 +104,7 @@ func TestHandlerAcceptsMountedPrefix(t *testing.T) {
 }
 
 func TestConfigurationLimits(t *testing.T) {
-	traffic := trafficcontrol.NewManager(nil)
+	traffic := trafficcontrol.NewManager()
 	_, err := New(context.Background(), log.NewNOPFactory().NewLogger("test"), traffic, option.ObservabilityOptions{
 		RecentConnections: MaxRecentConnections + 1,
 	})
@@ -226,7 +226,7 @@ func BenchmarkTopDimensionHeap(b *testing.B) {
 
 func newTestManager(t *testing.T, exposeSensitive bool) *Manager {
 	t.Helper()
-	service, err := New(context.Background(), log.NewNOPFactory().NewLogger("test"), trafficcontrol.NewManager(nil), option.ObservabilityOptions{
+	service, err := New(context.Background(), log.NewNOPFactory().NewLogger("test"), trafficcontrol.NewManager(), option.ObservabilityOptions{
 		ExposeSensitive: exposeSensitive,
 	})
 	require.NoError(t, err)

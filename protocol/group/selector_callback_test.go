@@ -21,11 +21,11 @@ func TestSelectorUpdateGuard(t *testing.T) {
 	s.selected.Store(s.outbounds["a"])
 	guardErr := errors.New("guard rejected update")
 	guard := s.RegisterUpdateGuard(func(previous, selected string) error { return guardErr })
-	if err := s.SelectOutboundContext("b"); !errors.Is(err, guardErr) || s.Now() != "a" {
-		t.Fatalf("guard did not reject update: %v, now=%s", err, s.Now())
+	if err := s.SelectOutboundContext("b"); !errors.Is(err, guardErr) || s.Selected("tcp").Tag() != "a" {
+		t.Fatalf("guard did not reject update: %v, now=%s", err, s.Selected("tcp").Tag())
 	}
 	s.UnregisterUpdateGuard(guard)
-	if err := s.SelectOutboundContext("b"); err != nil || s.Now() != "b" {
+	if err := s.SelectOutboundContext("b"); err != nil || s.Selected("tcp").Tag() != "b" {
 		t.Fatalf("selector update failed: %v", err)
 	}
 	a, b := new(int), new(int)

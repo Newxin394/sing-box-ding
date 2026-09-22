@@ -50,7 +50,7 @@ func TestProviderGroupConcurrentUpdates(t *testing.T) {
 		selector.selected.Store(firstOutbound)
 		runConcurrentProviderUpdates(t, selector.onProviderUpdated, func() {
 			_ = selector.All()
-			_ = selector.Now()
+			_ = selector.Selected("tcp")
 			selector.SelectOutbound(firstOutbound.Tag())
 		})
 		require.Equal(t, expectedTags, selector.All())
