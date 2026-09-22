@@ -103,8 +103,17 @@ func normalizeBypassSelector(options *option.EBPFBypassSelectorOptions, localDat
 	if !hasBypassRuleSet {
 		return nil, E.New("local.bypass_selector requires bypass_rule_set")
 	}
-	if options.Tag == "" {
-		return nil, E.New("local.bypass_selector.tag is required")
+	// Merge the legacy single `tag` into `tags` so the runtime always works
+	// with one unified, de-duplicated selector list. Both may be supplied at
+	// once; the union is watched.
+	tags := make([]string, 0, len(options.Tags)+1)
+	if options.Tag != "" {
+		tags = append(tags, options.Tag)
+	}
+	tags = append(tags, options.Tags...)
+	tags = common.Uniq(tags)
+	if len(tags) == 0 {
+		return nil, E.New("local.bypass_selector.tag or local.bypass_selector.tags is required")
 	}
 	if len(options.BypassWhen) == 0 {
 		return nil, E.New("local.bypass_selector.bypass_when is required")
@@ -142,6 +151,10 @@ func normalizeBypassSelector(options *option.EBPFBypassSelectorOptions, localDat
 	normalized.RapidSwitchWindow = badoption.Duration(rapidSwitchWindow)
 	normalized.RapidSwitchThreshold = options.RapidSwitchThreshold
 	normalized.BypassWhen = common.Uniq(normalized.BypassWhen)
+	// Canonicalize: the runtime reads only Tags; Tag is cleared to avoid
+	// double-watching the same selector.
+	normalized.Tag = ""
+	normalized.Tags = tags
 	return &normalized, nil
 }
 

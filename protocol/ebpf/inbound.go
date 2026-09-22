@@ -165,15 +165,16 @@ type Inbound struct {
 	bypassRuleSetShared          bypassRuleSetBackendVersion
 
 	bypassSelectorOptions    *option.EBPFBypassSelectorOptions
-	bypassSelector           *group.Selector
-	bypassSelectorGuard      *list.Element[group.SelectorUpdateGuard]
-	bypassSelectorCallback   *list.Element[group.SelectorUpdateCallback]
+	bypassSelectors          []*group.Selector
+	bypassSelectorGuards     []*list.Element[group.SelectorUpdateGuard]
+	bypassSelectorCallbacks  []*list.Element[group.SelectorUpdateCallback]
 	bypassSelectorEvents     chan struct{}
 	bypassSelectorGeneration atomic.Uint64
 	bypassSelectorCancel     context.CancelFunc
 	bypassSelectorDone       chan struct{}
 	bypassSelectorState      bool
 	bypassSelectorStateKnown bool
+	bypassSelectorDirectWild bool
 
 	udpClientTable    udpClientTable
 	udpReplySockets   udpReplySocketPool

@@ -8,9 +8,12 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
+	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 )
 
@@ -20,18 +23,53 @@ func (i *Inbound) startBypassSelector() error {
 		return nil
 	}
 	m := service.FromContext[adapter.OutboundManager](i.ctx)
-	ob, ok := m.Outbound(o.Tag)
-	if !ok {
-		return E.New("local.bypass_selector selector not found: ", o.Tag)
+	// Resolve every watched selector. normalizeBypassSelector guarantees Tags
+	// is the canonical, de-duplicated list (legacy `tag` already merged in).
+	selectors := make([]*group.Selector, 0, len(o.Tags))
+	for _, tag := range o.Tags {
+		ob, ok := m.Outbound(tag)
+		if !ok {
+			return E.New("local.bypass_selector selector not found: ", tag)
+		}
+		s, ok := ob.(*group.Selector)
+		if !ok {
+			return E.New("local.bypass_selector outbound is not a selector: ", tag)
+		}
+		selectors = append(selectors, s)
 	}
-	s, ok := ob.(*group.Selector)
-	if !ok {
-		return E.New("local.bypass_selector outbound is not a selector: ", o.Tag)
+	directWildcard := common.Contains(o.BypassWhen, option.EBPFBypassSelectorDirectWildcard)
+	if directWildcard {
+		// The wildcard requires EVERY watched selector to actually contain at
+		// least one direct member; otherwise the wildcard can never match for
+		// that selector and the configuration is likely a mistake.
+		for _, s := range selectors {
+			hasDirect := false
+			for _, tag := range s.All() {
+				member, ok := m.Outbound(tag)
+				if ok && member.Type() == C.TypeDirect {
+					hasDirect = true
+					break
+				}
+			}
+			if !hasDirect {
+				return E.New("local.bypass_selector.bypass_when direct wildcard \"", option.EBPFBypassSelectorDirectWildcard, "\" requires selector to contain at least one direct outbound: ", s.Tag())
+			}
+		}
 	}
 	for _, tag := range o.BypassWhen {
-		if !common.Contains(s.All(), tag) {
-			return E.New("local.bypass_selector.bypass_when outbound not found in selector: ", tag)
+		if tag == option.EBPFBypassSelectorDirectWildcard {
+			// The wildcard keyword may double as a real direct outbound tag
+			// (e.g. an outbound literally named "直连"). If such an outbound
+			// exists it must be a direct one; if it does not exist the keyword
+			// is treated purely as the wildcard, which is already validated
+			// above, so skip the strict per-tag membership check here.
+			if member, ok := m.Outbound(tag); ok && member.Type() != C.TypeDirect {
+				return E.New("local.bypass_selector.bypass_when must be a direct outbound: ", tag)
+			}
+			continue
 		}
+		// Non-wildcard explicit tags: must be a direct outbound and must be a
+		// member of at least one watched selector.
 		member, ok := m.Outbound(tag)
 		if !ok {
 			return E.New("local.bypass_selector.bypass_when outbound not found: ", tag)
@@ -39,28 +77,87 @@ func (i *Inbound) startBypassSelector() error {
 		if member.Type() != C.TypeDirect {
 			return E.New("local.bypass_selector.bypass_when must be a direct outbound: ", tag)
 		}
+		inAny := false
+		for _, s := range selectors {
+			if common.Contains(s.All(), tag) {
+				inAny = true
+				break
+			}
+		}
+		if !inAny {
+			return E.New("local.bypass_selector.bypass_when outbound not found in any watched selector: ", tag)
+		}
 	}
-	if err := s.ClaimController(i); err != nil {
-		return E.Cause(err, "local.bypass_selector conflict")
+	i.bypassSelectorDirectWild = directWildcard
+	// Claim every selector for this inbound. On any failure, release the ones
+	// already claimed so we do not leak controllers.
+	claimed := make([]*group.Selector, 0, len(selectors))
+	for _, s := range selectors {
+		if err := s.ClaimController(i); err != nil {
+			for _, c := range claimed {
+				c.ReleaseController(i)
+			}
+			return E.Cause(err, "local.bypass_selector conflict")
+		}
+		claimed = append(claimed, s)
 	}
 	ctx, cancel := context.WithCancel(i.ctx)
-	i.bypassSelector = s
+	i.bypassSelectors = selectors
 	i.bypassSelectorEvents = make(chan struct{}, 1)
 	i.bypassSelectorCancel = cancel
 	i.bypassSelectorDone = make(chan struct{})
-	i.bypassSelectorGuard = s.RegisterUpdateGuard(i.guardBypassSelectorUpdate)
-	i.bypassSelectorCallback = s.RegisterUpdateCallback(i.notifyBypassSelectorUpdate)
+	i.bypassSelectorGuards = make([]*list.Element[group.SelectorUpdateGuard], 0, len(selectors))
+	i.bypassSelectorCallbacks = make([]*list.Element[group.SelectorUpdateCallback], 0, len(selectors))
+	for _, s := range selectors {
+		i.bypassSelectorGuards = append(i.bypassSelectorGuards, s.RegisterUpdateGuard(i.guardBypassSelectorUpdate))
+		i.bypassSelectorCallbacks = append(i.bypassSelectorCallbacks, s.RegisterUpdateCallback(i.notifyBypassSelectorUpdate))
+	}
 	go i.runBypassSelector(ctx)
 	if err := i.setBypassSelectorState(false, true); err != nil {
 		i.stopBypassSelector()
 		return E.Cause(err, "initialize safe eBPF bypass_selector state")
 	}
-	i.notifyBypassSelectorUpdate(s.Now())
+	i.notifyBypassSelectorUpdate("")
 	return nil
 }
 
-func (i *Inbound) bypassSelectorWantsBypass(selected string) bool {
-	return i.bypassSelectorOptions != nil && common.Contains(i.bypassSelectorOptions.BypassWhen, selected)
+// bypassSelectorWantsBypassAny reports whether ANY watched selector currently
+// points at a member that should trigger the bypass (OR aggregation). This is
+// the multi-selector replacement for the old single-selector check.
+func (i *Inbound) bypassSelectorWantsBypassAny() bool {
+	if i.bypassSelectorOptions == nil {
+		return false
+	}
+	for _, s := range i.bypassSelectors {
+		selected := s.Selected(N.NetworkTCP)
+		if selected == nil {
+			continue
+		}
+		if i.bypassSelectorMemberTriggers(selected.Tag()) {
+			return true
+		}
+	}
+	return false
+}
+
+// bypassSelectorMemberTriggers reports whether a single selected member should
+// engage the bypass: either it is explicitly listed in bypass_when, or the
+// direct wildcard is active and the member resolves to a direct outbound.
+func (i *Inbound) bypassSelectorMemberTriggers(selected string) bool {
+	if i.bypassSelectorOptions == nil || selected == "" {
+		return false
+	}
+	if common.Contains(i.bypassSelectorOptions.BypassWhen, selected) {
+		return true
+	}
+	if i.bypassSelectorDirectWild {
+		if m := service.FromContext[adapter.OutboundManager](i.ctx); m != nil {
+			if member, ok := m.Outbound(selected); ok && member.Type() == C.TypeDirect {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (i *Inbound) guardBypassSelectorUpdate(previous, selected string) error {
@@ -133,7 +230,7 @@ func (i *Inbound) runBypassSelector(ctx context.Context) {
 			}
 			rapid := len(recent) >= threshold
 			stop(&st, &sc)
-			if i.bypassSelectorWantsBypass(i.bypassSelector.Now()) {
+			if i.bypassSelectorWantsBypassAny() {
 				settleGeneration = generation
 				d := settle
 				if rapid && final > d {
@@ -147,7 +244,7 @@ func (i *Inbound) runBypassSelector(ctx context.Context) {
 			reset(&ft, &fc, final)
 		case <-sc:
 			sc = nil
-			if settleGeneration == generation && i.bypassSelectorWantsBypass(i.bypassSelector.Now()) {
+			if settleGeneration == generation && i.bypassSelectorWantsBypassAny() {
 				if err := i.setBypassSelectorState(true, true); err != nil {
 					i.logger.Error("enable eBPF bypass_selector: ", err)
 				} else {
@@ -156,7 +253,7 @@ func (i *Inbound) runBypassSelector(ctx context.Context) {
 			}
 		case <-fc:
 			fc = nil
-			expected := i.bypassSelectorWantsBypass(i.bypassSelector.Now())
+			expected := i.bypassSelectorWantsBypassAny()
 			if expected && sc != nil && settleGeneration == generation {
 				reset(&ft, &fc, final)
 				continue
@@ -207,8 +304,10 @@ func (i *Inbound) setBypassSelectorState(enabled, clean bool) error {
 			i.bypassSelectorStateKnown = true
 			return E.Cause(err, "reset eBPF UDP state after bypass_selector update")
 		}
-		if i.bypassSelectorOptions.InterruptExistingConnections && i.bypassSelector != nil {
-			i.bypassSelector.InterruptConnections(true)
+		if i.bypassSelectorOptions.InterruptExistingConnections {
+			for _, s := range i.bypassSelectors {
+				s.InterruptConnections(true)
+			}
 		}
 	}
 	i.bypassSelectorState = enabled
@@ -217,8 +316,9 @@ func (i *Inbound) setBypassSelectorState(enabled, clean bool) error {
 }
 
 func (i *Inbound) stopBypassSelector() {
-	s := i.bypassSelector
-	if s != nil {
+	// Release controllers first so no further update events are delivered while
+	// we tear down.
+	for _, s := range i.bypassSelectors {
 		s.ReleaseController(i)
 	}
 	if i.bypassSelectorCancel != nil {
@@ -227,13 +327,19 @@ func (i *Inbound) stopBypassSelector() {
 	if i.bypassSelectorDone != nil {
 		<-i.bypassSelectorDone
 	}
-	if s != nil {
-		s.UnregisterUpdateGuard(i.bypassSelectorGuard)
-		s.UnregisterUpdateCallback(i.bypassSelectorCallback)
+	// Unregister guards/callbacks. Guards and callbacks are registered in
+	// lock-step with bypassSelectors, so indices line up.
+	for idx, s := range i.bypassSelectors {
+		if idx < len(i.bypassSelectorGuards) {
+			s.UnregisterUpdateGuard(i.bypassSelectorGuards[idx])
+		}
+		if idx < len(i.bypassSelectorCallbacks) {
+			s.UnregisterUpdateCallback(i.bypassSelectorCallbacks[idx])
+		}
 	}
-	i.bypassSelector = nil
-	i.bypassSelectorGuard = nil
-	i.bypassSelectorCallback = nil
+	i.bypassSelectors = nil
+	i.bypassSelectorGuards = nil
+	i.bypassSelectorCallbacks = nil
 	i.bypassSelectorEvents = nil
 	i.bypassSelectorCancel = nil
 	i.bypassSelectorDone = nil

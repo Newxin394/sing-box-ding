@@ -78,8 +78,17 @@ type EBPFLocalOptions struct {
 	BypassPortRange      badoption.Listable[string] `json:"bypass_port_range,omitempty"`
 }
 
+// EBPFBypassSelectorDirectWildcard is a reserved keyword usable inside
+// bypass_when. When present, the eBPF bypass engages whenever the watched
+// selector currently points at ANY direct-type outbound, instead of requiring
+// each direct outbound tag to be listed explicitly. It coexists with explicit
+// tags: bypass triggers if the selected member matches a listed tag OR (the
+// wildcard is present AND the selected member is a direct outbound).
+const EBPFBypassSelectorDirectWildcard = "直连"
+
 type EBPFBypassSelectorOptions struct {
-	Tag                          string                     `json:"tag" reference:"outbound"`
+	Tag                          string                     `json:"tag,omitempty" reference:"outbound"`
+	Tags                         badoption.Listable[string] `json:"tags,omitempty" reference:"outbound"`
 	BypassWhen                   badoption.Listable[string] `json:"bypass_when" reference:"outbound"`
 	SettleDelay                  badoption.Duration         `json:"settle_delay,omitempty"`
 	FinalCheckDelay              badoption.Duration         `json:"final_check_delay,omitempty"`
