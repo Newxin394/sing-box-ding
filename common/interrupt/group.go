@@ -23,6 +23,22 @@ func NewGroup() *Group {
 	return &Group{}
 }
 
+// Add registers an arbitrary io.Closer with the group and returns a remove
+// callback. Used by nested-group connection interruption, where the raw
+// connection is tracked by every OutboundGroup along the resolved chain so a
+// member switch at any level tears down in-flight traffic. Such connections are
+// never provider connections.
+func (g *Group) Add(closer io.Closer, isExternal bool, isProvider bool) (remove func()) {
+	g.access.Lock()
+	defer g.access.Unlock()
+	element := g.connections.PushBack(&groupConnItem{closer, isExternal, isProvider})
+	return func() {
+		g.access.Lock()
+		defer g.access.Unlock()
+		g.connections.Remove(element)
+	}
+}
+
 func (g *Group) NewConn(conn net.Conn, isExternal, isProvider bool) net.Conn {
 	g.access.Lock()
 	defer g.access.Unlock()
@@ -39,15 +55,17 @@ func (g *Group) NewPacketConn(conn net.PacketConn, isExternal, isProvider bool) 
 
 func (g *Group) Interrupt(interruptExternalConnections bool) {
 	g.access.Lock()
-	defer g.access.Unlock()
-	var toDelete []*list.Element[*groupConnItem]
-	for element := g.connections.Front(); element != nil; element = element.Next() {
+	var closers []io.Closer
+	for element := g.connections.Front(); element != nil; {
+		nextElement := element.Next()
 		if !element.Value.isProvider && (!element.Value.isExternal || interruptExternalConnections) {
-			element.Value.conn.Close()
-			toDelete = append(toDelete, element)
+			closers = append(closers, element.Value.conn)
+			g.connections.Remove(element)
 		}
+		element = nextElement
 	}
-	for _, element := range toDelete {
-		g.connections.Remove(element)
+	g.access.Unlock()
+	for _, closer := range closers {
+		closer.Close()
 	}
 }
