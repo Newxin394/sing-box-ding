@@ -23,6 +23,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/block"
 	"github.com/sagernet/sing-box/protocol/bridge"
+	"github.com/sagernet/sing-box/protocol/cns"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
@@ -108,6 +109,7 @@ func OutboundRegistry() *outbound.Registry {
 
 	socks.RegisterOutbound(registry)
 	http.RegisterOutbound(registry)
+	cns.RegisterOutbound(registry)
 	shadowsocks.RegisterOutbound(registry)
 	snell.RegisterOutbound(registry)
 	vmess.RegisterOutbound(registry)

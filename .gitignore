@@ -9,6 +9,8 @@
 /dist/
 /sing-box
 /sing-box.exe
+/sing-box.cns
+/sing-box.tun
 /build/
 /*.jar
 /*.aar
