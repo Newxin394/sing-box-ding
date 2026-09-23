@@ -99,7 +99,7 @@ func TestSelectTCPolicyMark(t *testing.T) {
 	if mark := selectTCPolicyMark(0); mark != 0x40000000 {
 		t.Fatalf("unexpected preferred policy mark: %#x", mark)
 	}
-	usedHighBits := ^uint32(0) &^ (0x40000000)
+	usedHighBits := uint32(0x40000000)
 	if mark := selectTCPolicyMark(usedHighBits); mark != 0x20000000 {
 		t.Fatalf("unexpected second-choice policy mark: %#x", mark)
 	}

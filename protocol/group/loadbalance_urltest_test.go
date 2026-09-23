@@ -259,6 +259,10 @@ type loadBalanceURLTestGroup struct {
 	members []string
 }
 
+func (g *loadBalanceURLTestGroup) Type() string {
+	return C.TypeLoadBalance
+}
+
 func (g *loadBalanceURLTestGroup) Tag() string {
 	return g.tag
 }

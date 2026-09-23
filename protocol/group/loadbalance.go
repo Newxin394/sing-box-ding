@@ -526,7 +526,10 @@ func collectLoadBalanceURLTestLeafHistory(outboundManager adapter.OutboundManage
 			}
 			visiting[tag] = true
 			var memberTags []string
-			if selected := outboundGroup.Selected(N.NetworkTCP); selected != nil {
+			isLoadBalance := outboundGroup.Type() == C.TypeLoadBalance
+			if isLoadBalance {
+				memberTags = outboundGroup.All()
+			} else if selected := outboundGroup.Selected(N.NetworkTCP); selected != nil {
 				memberTags = []string{selected.Tag()}
 			} else {
 				memberTags = outboundGroup.All()
@@ -537,7 +540,7 @@ func collectLoadBalanceURLTestLeafHistory(outboundManager adapter.OutboundManage
 			})), visiting)
 			delete(visiting, tag)
 			maps.Copy(leaves, groupLeaves)
-			if _, isLoadBalance := outboundGroup.(adapter.LoadBalanceGroup); isLoadBalance {
+			if isLoadBalance {
 				updateLoadBalanceURLTestHistoryFromLeaves(history, tag, groupLeaves)
 			}
 			continue

@@ -29,7 +29,7 @@ func TestTCXUnsupportedError(t *testing.T) {
 }
 
 func TestTCVethNamesFitLinuxLimit(t *testing.T) {
-	redirectName, deliveryName, err := nextTCVethNames()
+	redirectName, deliveryName, err := tcVethNames(0xffff, 0xffff)
 	if err != nil {
 		t.Fatal(err)
 	}

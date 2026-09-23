@@ -1867,14 +1867,22 @@ func (d *tcDataPlane) createTCDeliveryLink() (*tcDeliveryLink, error) {
 	return delivery, nil
 }
 
+func tcVethNames(pid, sequence uint32) (string, string, error) {
+	suffix := fmt.Sprintf("%04x%04x", pid&0xffff, sequence&0xffff)
+	redirectName := "sbt" + suffix
+	deliveryName := "sbd" + suffix
+	if len(redirectName) > 15 || len(deliveryName) > 15 {
+		return "", "", E.New("TC eBPF delivery link name exceeds Linux limit")
+	}
+	return redirectName, deliveryName, nil
+}
+
 func nextTCVethNames() (string, string, error) {
 	for range 1024 {
 		sequence := tcVethSequence.Add(1)
-		suffix := fmt.Sprintf("%04x%04x", uint32(os.Getpid())&0xffff, sequence&0xffff)
-		redirectName := "sbt" + suffix
-		deliveryName := "sbd" + suffix
-		if len(redirectName) > 15 || len(deliveryName) > 15 {
-			return "", "", E.New("TC eBPF delivery link name exceeds Linux limit")
+		redirectName, deliveryName, err := tcVethNames(uint32(os.Getpid()), sequence)
+		if err != nil {
+			return "", "", err
 		}
 		_, redirectErr := netlink.LinkByName(redirectName)
 		_, deliveryErr := netlink.LinkByName(deliveryName)

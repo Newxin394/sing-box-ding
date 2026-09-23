@@ -762,7 +762,11 @@ func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 	testBatch.test(outbounds, link, interval, force)
 	b.Wait()
 	for _, outboundGroup := range testBatch.groups {
-		groupHistory := history.LoadURLTestHistory(RealTag(outboundGroup, N.NetworkTCP))
+		historyTag := RealTag(outboundGroup, N.NetworkTCP)
+		if outboundGroup.Type() == C.TypeLoadBalance {
+			historyTag = outboundGroup.Tag()
+		}
+		groupHistory := history.LoadURLTestHistory(historyTag)
 		if groupHistory != nil {
 			testBatch.result[outboundGroup.Tag()] = groupHistory.Delay
 		}
