@@ -18,6 +18,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMatchRuleResolvesSelectorWithNetwork(t *testing.T) {
+	selected := &testFlowOutbound{outboundType: "direct", tag: "selected"}
+	selector := &testSelectorGroup{Outbound: selected, tag: "selector", selected: selected}
+	router := &Router{
+		logger: log.NewNOPFactory().NewLogger("router"),
+		outbound: &testL3OutboundManager{
+			outbounds: map[string]adapter.Outbound{"selector": selector},
+		},
+		dns:          new(testL3DNSRouter),
+		dnsTransport: new(testL3DNSTransportManager),
+		rules: []adapter.Rule{
+			&testL3Rule{action: &R.RuleActionRoute{Outbound: "selector"}},
+		},
+	}
+	metadata := &adapter.InboundContext{
+		Network:     N.NetworkTCP,
+		Source:      M.ParseSocksaddr("192.0.2.1:1234"),
+		Destination: M.ParseSocksaddr("198.51.100.1:443"),
+	}
+
+	var selectedRule adapter.Rule
+	require.NotPanics(t, func() {
+		var err error
+		selectedRule, _, _, _, err = router.matchRule(context.Background(), metadata, nil, nil)
+		require.NoError(t, err)
+	})
+	require.Same(t, router.rules[0], selectedRule)
+}
+
 func TestPreMatchFlowUsesSelectedOutboundDomainResolver(t *testing.T) {
 	queryOptions := adapter.DNSQueryOptions{Strategy: C.DomainStrategyPreferIPv4}
 	selectedOutbound := &testResolvingFlowOutbound{
@@ -216,6 +245,32 @@ func (m *testL3OutboundManager) Default() adapter.Outbound {
 func (m *testL3OutboundManager) Outbound(tag string) (adapter.Outbound, bool) {
 	outbound, loaded := m.outbounds[tag]
 	return outbound, loaded
+}
+
+type testSelectorGroup struct {
+	adapter.Outbound
+	tag      string
+	selected adapter.Outbound
+}
+
+func (g *testSelectorGroup) Type() string {
+	return C.TypeSelector
+}
+
+func (g *testSelectorGroup) Tag() string {
+	return g.tag
+}
+
+func (g *testSelectorGroup) Selected(string) adapter.Outbound {
+	return g.selected
+}
+
+func (g *testSelectorGroup) AttachConnection(io.Closer) func() {
+	return func() {}
+}
+
+func (g *testSelectorGroup) All() []string {
+	return []string{g.selected.Tag()}
 }
 
 type testOutboundGroup struct {

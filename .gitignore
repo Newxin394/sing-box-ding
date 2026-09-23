@@ -25,6 +25,7 @@ CLAUDE.md
 AGENTS.md
 /.claude/
 # local build artifacts (never commit; large binaries and build logs)
+/sing-box.tc
 /build2.log
 /sb-ding-final
 /sb-ding-stripped
