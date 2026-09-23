@@ -8,6 +8,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -32,6 +33,11 @@ type Outbound struct {
 	client      dialClient
 	udpOutbound string
 	udpDetour   adapter.Outbound
+	// interruptGroup tracks connections delegated to udp_outbound so they can
+	// be released/interrupted as a group. Without it the delegated UDP conns
+	// escape lifecycle management (no onClose, no interrupt), which lets a
+	// high-churn UDP app (e.g. QUIC video) pile up unreclaimable connections.
+	interruptGroup *interrupt.Group
 }
 
 // dialClient is the TCP dialing surface shared by the upstream sing HTTP
@@ -71,11 +77,12 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		networks = append(networks, N.NetworkUDP)
 	}
 	return &Outbound{
-		Adapter:     outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, networks, options.DialerOptions),
-		ctx:         ctx,
-		logger:      logger,
-		client:      client,
-		udpOutbound: options.UDPOutbound,
+		Adapter:        outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, networks, options.DialerOptions),
+		ctx:            ctx,
+		logger:         logger,
+		client:         client,
+		udpOutbound:    options.UDPOutbound,
+		interruptGroup: interrupt.NewGroup(),
 	}, nil
 }
 
@@ -110,7 +117,11 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if h.udpDetour != nil && N.NetworkName(network) == N.NetworkUDP {
 		// UDP-connect mode (used by UDP-over-TCP transports and WireGuard)
 		// arrives through DialContext, not ListenPacket; delegate it the same way.
-		return h.udpDetour.DialContext(ctx, network, destination)
+		conn, err := h.udpDetour.DialContext(ctx, network, destination)
+		if err != nil {
+			return nil, err
+		}
+		return h.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
 	}
 	if N.NetworkName(network) == N.NetworkUDP {
 		return nil, E.New("UDP is not supported by outbound: ", h.Tag())
@@ -127,7 +138,14 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		ctx, metadata := adapter.ExtendContext(ctx)
 		metadata.Destination = destination
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination, " via ", h.udpDetour.Tag())
-		return h.udpDetour.ListenPacket(ctx, destination)
+		conn, err := h.udpDetour.ListenPacket(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
+		// Wrap in the interrupt group so the delegated packet conn is tracked
+		// and can be released/interrupted, mirroring how a selector group
+		// manages its delegated udp_outbound connections.
+		return h.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
 	}
 	// The adapter advertises TCP only, so reaching this path means a route rule
 	// sent UDP at an HTTP outbound. Say so explicitly: the bare os.ErrInvalid
