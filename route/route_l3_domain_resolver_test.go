@@ -2,6 +2,7 @@ package route
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/netip"
 	"testing"
@@ -23,7 +24,7 @@ func TestPreMatchFlowUsesSelectedOutboundDomainResolver(t *testing.T) {
 		testFlowOutbound: &testFlowOutbound{outboundType: "wireguard", tag: "wg"},
 		queryOptions:     queryOptions,
 	}
-	selector := &testOutboundGroup{now: selectedOutbound.Tag(), selected: selectedOutbound}
+	selector := &testOutboundGroup{Outbound: selectedOutbound, now: selectedOutbound.Tag(), selected: selectedOutbound}
 	dnsRouter := &testL3DNSRouter{addresses: []netip.Addr{netip.MustParseAddr("203.0.113.1")}}
 	router := &Router{
 		logger: log.NewNOPFactory().NewLogger("router"),
@@ -223,8 +224,12 @@ type testOutboundGroup struct {
 	selected adapter.Outbound
 }
 
-func (g *testOutboundGroup) Now() string {
-	return g.now
+func (g *testOutboundGroup) Selected(string) adapter.Outbound {
+	return g.selected
+}
+
+func (g *testOutboundGroup) AttachConnection(io.Closer) func() {
+	return func() {}
 }
 
 func (g *testOutboundGroup) All() []string {

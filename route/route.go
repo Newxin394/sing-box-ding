@@ -717,7 +717,7 @@ match:
 		case *R.RuleActionRoute:
 			if selectedOutbound, loaded := r.outbound.Outbound(action.Outbound); loaded {
 				if selectedOutbound.Type() == C.TypeSelector {
-					selectedOutbound = selectedOutbound.(adapter.SelectorGroup).Selected()
+					selectedOutbound = selectedOutbound.(adapter.OutboundGroup).Selected(metadata.Network)
 				}
 				if selectedOutbound.Type() == C.TypePass {
 					continue
