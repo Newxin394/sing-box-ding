@@ -65,6 +65,16 @@ const (
 	TCPathDelivery = 2
 )
 
+const tcStatCount = 5
+
+const (
+	TCStatRawIPAttempts uint32 = iota
+	TCStatRawIPHeadFailures
+	TCStatRawIPHeaderFailures
+	TCStatRawIPRedirectFailures
+	TCStatDeliveryParseFailures
+)
+
 type TCConfig struct {
 	ListenerPort      uint16
 	EnableLocal       bool
@@ -202,6 +212,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	_ = raiseMemlockLimit()
 	mapOverrides := map[string]mapSpecOverride{
 		"tc_control":             {name: "sb_tc_ctl", mapType: CiliumEBPF.Array, maxEntries: 1},
+		"tc_stats":               {name: "sb_tc_stat", mapType: CiliumEBPF.PerCPUArray, maxEntries: tcStatCount},
 		"tc_listener_sockets":    {name: "sb_tc_listen", mapType: CiliumEBPF.SockMap, maxEntries: 2},
 		"tc_assignment":          {name: "sb_tc_assign", mapType: CiliumEBPF.LRUHash, maxEntries: config.MapCapacity.Assignment},
 		"tc_uid_policy":          {name: "sb_tc_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(uidEntries)), 1), flags: bpfFlagNoPrealloc},
@@ -550,6 +561,33 @@ func (b *TCBackend) TCPListenerLookupMode() string {
 		return "sockmap"
 	}
 	return "direct"
+}
+
+func (b *TCBackend) Stat(index uint32) (uint64, error) {
+	if b == nil {
+		return 0, errBackendClosed
+	}
+	if index >= tcStatCount {
+		return 0, E.New("invalid TC eBPF statistic index")
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.runtime == nil {
+		return 0, errBackendClosed
+	}
+	statsMap := b.runtime.maps["tc_stats"]
+	if statsMap == nil {
+		return 0, errBackendClosed
+	}
+	var perCPU []uint64
+	if err := statsMap.Lookup(&index, &perCPU); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, value := range perCPU {
+		total += value
+	}
+	return total, nil
 }
 
 func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, remove bool) (TCAssignment, error) {

@@ -234,6 +234,15 @@ MAP(tc_host_ipv6, struct sb_tc_ipv6_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_local_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_shared_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 
+#define SB_TC_STAT_RAW_IP_ATTEMPT 0U
+#define SB_TC_STAT_RAW_IP_HEAD_FAILURE 1U
+#define SB_TC_STAT_RAW_IP_HEADER_FAILURE 2U
+#define SB_TC_STAT_RAW_IP_REDIRECT_FAILURE 3U
+#define SB_TC_STAT_DELIVERY_PARSE_FAILURE 4U
+#define SB_TC_STAT_COUNT 5U
+
+MAP(tc_stats, __u32, __u64, BPF_MAP_TYPE_PERCPU_ARRAY, SB_TC_STAT_COUNT);
+
 static void *(*map_lookup)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
 static long (*map_update)(void *map, const void *key, const void *value, __u64 flags) =
     (void *)BPF_FUNC_map_update_elem;
@@ -252,6 +261,11 @@ static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple
 static long (*sk_assign)(void *ctx, struct bpf_sock *socket, __u64 flags) =
     (void *)BPF_FUNC_sk_assign;
 static void (*sk_release)(struct bpf_sock *socket) = (void *)BPF_FUNC_sk_release;
+
+INLINE void record_tc_stat(__u32 index) {
+    __u64 *counter = map_lookup(&tc_stats, &index);
+    if (counter != 0) *counter += 1U;
+}
 
 INLINE __u16 network_order16(__u16 value) {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -738,13 +752,22 @@ INLINE int redirect_local(struct __sk_buff *skb, const struct sb_tc_control *con
     if (ethernet) {
         if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_UNSPEC;
     } else {
+        record_tc_stat(SB_TC_STAT_RAW_IP_ATTEMPT);
         __be16 protocol = skb->protocol;
-        if (skb_change_head(skb, sizeof(struct ethernet_header), 0U) != 0) return TC_ACT_UNSPEC;
+        if (skb_change_head(skb, sizeof(struct ethernet_header), 0U) != 0) {
+            record_tc_stat(SB_TC_STAT_RAW_IP_HEAD_FAILURE);
+            return TC_ACT_UNSPEC;
+        }
         struct ethernet_header header = {.protocol = protocol};
         __builtin_memcpy(header.destination, control->delivery_mac, 6U);
-        if (skb_store_bytes(skb, 0U, &header, sizeof(header), 0U) != 0) return TC_ACT_SHOT;
+        if (skb_store_bytes(skb, 0U, &header, sizeof(header), 0U) != 0) {
+            record_tc_stat(SB_TC_STAT_RAW_IP_HEADER_FAILURE);
+            return TC_ACT_SHOT;
+        }
     }
-    return redirect((int)control->delivery_ifindex, 0U);
+    long result = redirect((int)control->delivery_ifindex, 0U);
+    if (result != 0 && !ethernet) record_tc_stat(SB_TC_STAT_RAW_IP_REDIRECT_FAILURE);
+    return (int)result;
 }
 
 INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_process) {
@@ -869,7 +892,10 @@ int singbox_tc_delivery_ingress(struct __sk_buff *skb) {
     if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
     struct sb_tc_assign_key key;
     __u8 source_mac[6];
-    if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, true, &key, source_mac)) return TC_ACT_UNSPEC;
+    if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, true, &key, source_mac)) {
+        record_tc_stat(SB_TC_STAT_DELIVERY_PARSE_FAILURE);
+        return TC_ACT_UNSPEC;
+    }
     skb->mark |= control->routing_mark;
     return assign_socket(skb, control, &key, source_mac, SB_TC_PATH_DELIVERY);
 }

@@ -38,6 +38,24 @@ func TestTCABI(t *testing.T) {
 	}
 }
 
+func TestTCStatLayout(t *testing.T) {
+	if tcStatCount != 5 {
+		t.Fatalf("tcStatCount = %d, want 5", tcStatCount)
+	}
+	indices := []uint32{
+		TCStatRawIPAttempts,
+		TCStatRawIPHeadFailures,
+		TCStatRawIPHeaderFailures,
+		TCStatRawIPRedirectFailures,
+		TCStatDeliveryParseFailures,
+	}
+	for index, got := range indices {
+		if got != uint32(index) {
+			t.Fatalf("TC statistic index %d = %d", index, got)
+		}
+	}
+}
+
 func TestTCIPv6PathFlags(t *testing.T) {
 	localFlags := tcFlags(TCConfig{EnableLocalIPv6: true}, CompiledPolicy{})
 	if localFlags&tcFlagLocalIPv6 == 0 || localFlags&tcFlagSharedIPv6 != 0 {

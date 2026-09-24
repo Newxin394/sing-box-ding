@@ -55,6 +55,11 @@ type ebpfCounters struct {
 // from udpReplySocketPool's own existing capacity/reclaim tracking (item 4).
 type EBPFCounters struct {
 	AssignmentLookupFailures uint64 `json:"assignment_lookup_failures"`
+	RawIPAttempts            uint64 `json:"raw_ip_attempts"`
+	RawIPHeadFailures        uint64 `json:"raw_ip_head_failures"`
+	RawIPHeaderFailures      uint64 `json:"raw_ip_header_failures"`
+	RawIPRedirectFailures    uint64 `json:"raw_ip_redirect_failures"`
+	DeliveryParseFailures    uint64 `json:"delivery_parse_failures"`
 	// TokenReservationFailures and RewriteFailures are 0 whenever this
 	// inbound has no shared packet-rewrite backend to read them from, not
 	// necessarily because nothing ever failed.

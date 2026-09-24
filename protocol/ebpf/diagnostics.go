@@ -388,6 +388,20 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
 
 	diagnostics.Counters = i.counters.snapshot()
+	if backend := i.tcBackend(); backend != nil {
+		readTCStat := func(index uint32) uint64 {
+			value, err := backend.Stat(index)
+			if err != nil {
+				return 0
+			}
+			return value
+		}
+		diagnostics.Counters.RawIPAttempts = readTCStat(commonEBPF.TCStatRawIPAttempts)
+		diagnostics.Counters.RawIPHeadFailures = readTCStat(commonEBPF.TCStatRawIPHeadFailures)
+		diagnostics.Counters.RawIPHeaderFailures = readTCStat(commonEBPF.TCStatRawIPHeaderFailures)
+		diagnostics.Counters.RawIPRedirectFailures = readTCStat(commonEBPF.TCStatRawIPRedirectFailures)
+		diagnostics.Counters.DeliveryParseFailures = readTCStat(commonEBPF.TCStatDeliveryParseFailures)
+	}
 	var sharedRewriteBackend *commonEBPF.SharedNetworkBackend
 	if shared := i.sharedRewriteInstance(); shared != nil {
 		sharedRewriteBackend = shared.sharedBackendInstance()
@@ -527,10 +541,13 @@ func (d EBPFDiagnostics) WriteText(w io.Writer) error {
 		d.UDPReplySockets.Count, d.UDPReplySockets.Peak, d.UDPReplySockets.Evicted, d.UDPReplySockets.CapacityRejected,
 	))
 	lines = append(lines, fmt.Sprintf(
-		"Counters: assignment_lookup_failures=%d token_reservation_failures=%d rewrite_failures=%d "+
+		"Counters: assignment_lookup_failures=%d raw_ip_attempts=%d raw_ip_head_failures=%d raw_ip_header_failures=%d "+
+			"raw_ip_redirect_failures=%d delivery_parse_failures=%d token_reservation_failures=%d rewrite_failures=%d "+
 			"shared_reconcile_failures=%d recovery_attempts=%d recovery_successes=%d recovery_failures=%d",
-		d.Counters.AssignmentLookupFailures, d.Counters.TokenReservationFailures, d.Counters.RewriteFailures,
-		d.Counters.SharedReconcileFailures, d.Counters.RecoveryAttempts, d.Counters.RecoverySuccesses, d.Counters.RecoveryFailures,
+		d.Counters.AssignmentLookupFailures, d.Counters.RawIPAttempts, d.Counters.RawIPHeadFailures,
+		d.Counters.RawIPHeaderFailures, d.Counters.RawIPRedirectFailures, d.Counters.DeliveryParseFailures,
+		d.Counters.TokenReservationFailures, d.Counters.RewriteFailures, d.Counters.SharedReconcileFailures,
+		d.Counters.RecoveryAttempts, d.Counters.RecoverySuccesses, d.Counters.RecoveryFailures,
 	))
 	lines = append(lines, fmt.Sprintf(
 		"fakeip_icmp counters: replies=%d pass_through=%d rewrite_failure_drops=%d",

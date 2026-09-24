@@ -2,7 +2,11 @@
 
 package ebpf
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // TestRecordTCUpdateOutcomeCountsRecoveryAttempts proves a round in which
 // any component reports Recoverable counts as one attempt, whether or not
@@ -82,6 +86,41 @@ func TestRecordTCUpdateOutcomeCountsRecoveryFailureOnUnrecoverable(t *testing.T)
 // incremented at tc_connection.go's failure sites is what Diagnostics
 // reports -- exercised directly here rather than through a real lookup,
 // since the counter itself, not the lookup, is what this test is about.
+func TestRawIPCounterFieldsInDiagnostics(t *testing.T) {
+	inbound := &Inbound{}
+	inbound.counters.assignmentLookupFailures.Store(0)
+	diagnostics := inbound.Diagnostics()
+	diagnostics.Counters.RawIPAttempts = 3
+	diagnostics.Counters.RawIPHeadFailures = 1
+	diagnostics.Counters.RawIPHeaderFailures = 2
+	diagnostics.Counters.RawIPRedirectFailures = 4
+	diagnostics.Counters.DeliveryParseFailures = 5
+	if diagnostics.Counters.RawIPAttempts != 3 || diagnostics.Counters.RawIPHeadFailures != 1 ||
+		diagnostics.Counters.RawIPHeaderFailures != 2 || diagnostics.Counters.RawIPRedirectFailures != 4 ||
+		diagnostics.Counters.DeliveryParseFailures != 5 {
+		t.Fatalf("raw-IP diagnostic fields were not retained: %+v", diagnostics.Counters)
+	}
+	encoded, err := json.Marshal(diagnostics.Counters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"raw_ip_attempts":3`,
+		`"raw_ip_head_failures":1`,
+		`"raw_ip_header_failures":2`,
+		`"raw_ip_redirect_failures":4`,
+		`"delivery_parse_failures":5`,
+	} {
+		if !containsJSONField(encoded, field) {
+			t.Fatalf("JSON diagnostics missing %s: %s", field, encoded)
+		}
+	}
+}
+
+func containsJSONField(encoded []byte, field string) bool {
+	return strings.Contains(string(encoded), field)
+}
+
 func TestAssignmentLookupFailureCounterInDiagnostics(t *testing.T) {
 	inbound := &Inbound{}
 	inbound.counters.assignmentLookupFailures.Add(3)
