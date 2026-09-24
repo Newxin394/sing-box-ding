@@ -13,8 +13,11 @@
   "password": "admin",
   "path": "",
   "headers": {},
+  "version": 0,
+  "disable_version_fallback": false,
   "tls": {},
-  
+
+  ... // HTTP2 Fields / QUIC Fields
   ... // Dial Fields
 }
 ```
@@ -49,6 +52,26 @@ Path of HTTP request.
 
 Extra headers of HTTP request.
 
+#### version
+
+!!! question "Since sing-box 1.15.0"
+
+HTTP version.
+
+Available values: `1`, `2`, `3`.
+
+`2` is used by default, or `1` if `path` or the `Host` header is set.
+
+`path` and the `Host` header are only available for `1`.
+
+When `3`, [HTTP2 Fields](#http2-fields) are replaced by [QUIC Fields](#quic-fields).
+
+#### disable_version_fallback
+
+!!! question "Since sing-box 1.15.0"
+
+Disable automatic fallback to lower HTTP version.
+
 #### tls
 
 TLS configuration, see [TLS](/configuration/shared/tls/#outbound).
@@ -63,6 +86,22 @@ HTTP proxy. The target outbound must support UDP.
 
 Without it the outbound only advertises TCP; setting it makes the outbound
 advertise UDP as well, which is what lets route rules match UDP traffic here.
+
+### HTTP2 Fields
+
+!!! question "Since sing-box 1.15.0"
+
+When `version` is `2` (default).
+
+See [HTTP2 Fields](/configuration/shared/http2/) for details.
+
+### QUIC Fields
+
+!!! question "Since sing-box 1.15.0"
+
+When `version` is `3`.
+
+See [QUIC Fields](/configuration/shared/quic/) for details.
 
 ### Dial Fields
 

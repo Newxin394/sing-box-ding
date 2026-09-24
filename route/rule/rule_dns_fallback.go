@@ -10,6 +10,7 @@ import (
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
 var _ adapter.DNSFallbackRule = (*DNSFallbackRule)(nil)
@@ -44,7 +45,19 @@ func NewDNSFallbackRules(ctx context.Context, router adapter.Router, options []o
 			rule.items = append(rule.items, NewClashModeItem(ctx, fallbackOptions.ClashMode))
 		}
 		if len(fallbackOptions.IPCIDR) > 0 {
-			item, err := NewIPCIDRItem(false, fallbackOptions.IPCIDR)
+			prefixables := make([]*badoption.Prefixable, 0, len(fallbackOptions.IPCIDR))
+			for index, value := range fallbackOptions.IPCIDR {
+				prefix, err := netip.ParsePrefix(value)
+				if err != nil {
+					address, addressErr := netip.ParseAddr(value)
+					if addressErr != nil {
+						return nil, E.Cause(err, "fallback_rule[", i, "] ip_cidr[", index, "]")
+					}
+					prefix = netip.PrefixFrom(address, address.BitLen())
+				}
+				prefixables = append(prefixables, common.Ptr(badoption.Prefixable(prefix)))
+			}
+			item, err := NewIPCIDRItem(false, prefixables)
 			if err != nil {
 				return nil, E.Cause(err, "fallback_rule[", i, "] ip_cidr")
 			}

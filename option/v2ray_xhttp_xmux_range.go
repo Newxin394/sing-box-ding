@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sagernet/sing-box/schema"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 )
@@ -54,4 +55,15 @@ func (r *XmuxRange) UnmarshalJSON(content []byte) error {
 		return E.New("invalid xmux range: array form takes 1 or 2 elements, got ", len(arrayValue))
 	}
 	return nil
+}
+
+// DescribeSchema reports the accepted JSON spellings for an XMUX range: the
+// canonical "min-max" string, a bare number, or a [min,max] array. Marshal
+// always emits the string form, but all three remain valid input.
+func (r XmuxRange) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return schema.AnyOf(
+		schema.StringNode(),
+		schema.UnsignedNode(64),
+		&schema.Node{Type: "array", Items: schema.UnsignedNode(64)},
+	), nil
 }

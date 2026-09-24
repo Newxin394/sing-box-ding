@@ -9,11 +9,13 @@ import (
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/interrupt"
-	"github.com/sagernet/sing-box/common/tls"
+	TLS "github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	transportHTTP "github.com/sagernet/sing-box/transport/http"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -28,21 +30,21 @@ func RegisterOutbound(registry *outbound.Registry) {
 
 type Outbound struct {
 	outbound.Adapter
-	ctx         context.Context
-	logger      logger.ContextLogger
-	client      dialClient
-	udpOutbound string
-	udpDetour   adapter.Outbound
-	// interruptGroup tracks connections delegated to udp_outbound so they can
-	// be released/interrupted as a group. Without it the delegated UDP conns
-	// escape lifecycle management (no onClose, no interrupt), which lets a
-	// high-churn UDP app (e.g. QUIC video) pile up unreclaimable connections.
+	ctx            context.Context
+	logger         logger.ContextLogger
+	client         dialClient
+	nativeClient   *transportHTTP.Client
+	udpOutbound    string
+	udpDetour      adapter.Outbound
 	interruptGroup *interrupt.Group
 }
 
-// dialClient is the TCP dialing surface shared by the upstream sing HTTP
-// client and the ding-direct client in ding.go.
 type dialClient interface {
+	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
+	ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
+}
+
+type dingOnlyDialClient interface {
 	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
 }
 
@@ -51,39 +53,35 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
-	detour, err := tls.NewDialerFromOptions(ctx, logger, outboundDialer, options.Server, common.PtrValueOrDefault(options.TLS))
-	if err != nil {
-		return nil, err
-	}
 	headers := options.Headers.Build()
-	clientOptions := sHTTP.Options{
-		Dialer:   detour,
-		Server:   options.ServerOptions.Build(),
-		Username: options.Username,
-		Password: options.Password,
-		Path:     options.Path,
-		Headers:  headers,
-	}
-	var client dialClient
-	if dingHost := headers.Get(dingHeader); dingHost != "" {
-		// The With-At header is not a real header: it is consumed here and
-		// appended to the CONNECT request target as "host:port@<dingHost>".
-		client = newDingClient(clientOptions, dingHost)
+	var nativeClient *transportHTTP.Client
+	var legacyClient dialClient
+	if headers.Get(dingHeader) == "" {
+		nativeClient, err = transportHTTP.NewClientWithTLS(ctx, logger, outboundDialer, options.ServerOptions, common.PtrValueOrDefault(options.TLS), transportHTTP.ClientOptions{
+			Username: options.Username, Password: options.Password, Path: options.Path, Headers: headers,
+			Version:                transportHTTP.ResolveVersion(options.Version, options.Path, headers.Get("Host")),
+			DisableVersionFallback: options.DisableVersionFallback, HTTP2Options: options.HTTP2Options, HTTP3Options: options.HTTP3Options,
+		})
+		if err != nil {
+			return nil, err
+		}
 	} else {
-		client = sHTTP.NewClient(clientOptions)
+		detour, dialErr := TLS.NewDialerFromOptions(ctx, logger, outboundDialer, options.Server, common.PtrValueOrDefault(options.TLS))
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		clientOptions := sHTTP.Options{Dialer: detour, Server: options.ServerOptions.Build(), Username: options.Username, Password: options.Password, Path: options.Path, Headers: headers}
+		legacyClient = newDingClient(clientOptions, headers.Get(dingHeader))
+	}
+	client := legacyClient
+	if nativeClient != nil {
+		client = nativeClient
 	}
 	networks := []string{N.NetworkTCP}
-	if options.UDPOutbound != "" {
+	if nativeClient != nil || options.UDPOutbound != "" {
 		networks = append(networks, N.NetworkUDP)
 	}
-	return &Outbound{
-		Adapter:        outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, networks, options.DialerOptions),
-		ctx:            ctx,
-		logger:         logger,
-		client:         client,
-		udpOutbound:    options.UDPOutbound,
-		interruptGroup: interrupt.NewGroup(),
-	}, nil
+	return &Outbound{Adapter: outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, networks, options.DialerOptions), ctx: ctx, logger: logger, client: client, nativeClient: nativeClient, udpOutbound: options.UDPOutbound, interruptGroup: interrupt.NewGroup()}, nil
 }
 
 func (h *Outbound) Start(stage adapter.StartStage) error {
@@ -113,6 +111,19 @@ func (h *Outbound) Dependencies() []string {
 	return dependencies
 }
 
+func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+	if h.nativeClient != nil {
+		h.nativeClient.ResetConnections()
+	}
+}
+
+func (h *Outbound) Close() error {
+	if h.nativeClient != nil {
+		return h.nativeClient.Close()
+	}
+	return nil
+}
+
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if h.udpDetour != nil && N.NetworkName(network) == N.NetworkUDP {
 		// UDP-connect mode (used by UDP-over-TCP transports and WireGuard)
@@ -123,14 +134,29 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		}
 		return h.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
 	}
-	if N.NetworkName(network) == N.NetworkUDP {
+	if N.NetworkName(network) == N.NetworkUDP && h.nativeClient == nil {
 		return nil, E.New("UDP is not supported by outbound: ", h.Tag())
 	}
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
-	h.logger.InfoContext(ctx, "outbound connection to ", destination)
-	return h.client.DialContext(ctx, network, destination)
+	switch N.NetworkName(network) {
+	case N.NetworkTCP:
+		h.logger.InfoContext(ctx, "outbound connection to ", destination)
+		return h.client.DialContext(ctx, network, destination)
+	case N.NetworkUDP:
+		if h.nativeClient == nil {
+			return nil, E.New("UDP is not supported by outbound: ", h.Tag())
+		}
+		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+		packetConn, err := h.nativeClient.ListenPacket(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
+		return bufio.NewBindPacketConn(packetConn, destination), nil
+	default:
+		return nil, E.Extend(N.ErrUnknownNetwork, network)
+	}
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -142,13 +168,14 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 		if err != nil {
 			return nil, err
 		}
-		// Wrap in the interrupt group so the delegated packet conn is tracked
-		// and can be released/interrupted, mirroring how a selector group
-		// manages its delegated udp_outbound connections.
 		return h.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
 	}
-	// The adapter advertises TCP only, so reaching this path means a route rule
-	// sent UDP at an HTTP outbound. Say so explicitly: the bare os.ErrInvalid
-	// ("invalid argument") gives no clue which side is misconfigured.
-	return nil, E.New("UDP is not supported by outbound: ", h.Tag())
+	if h.nativeClient == nil {
+		return nil, E.New("UDP is not supported by outbound: ", h.Tag())
+	}
+	ctx, metadata := adapter.ExtendContext(ctx)
+	metadata.Outbound = h.Tag()
+	metadata.Destination = destination
+	h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+	return h.nativeClient.ListenPacket(ctx, destination)
 }

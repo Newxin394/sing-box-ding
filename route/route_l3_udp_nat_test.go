@@ -145,7 +145,7 @@ type testL3RouterNATHandler struct {
 }
 
 func (h *testL3RouterNATHandler) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
-	return adapter.JudgeFlow(h.router, "tun-in", C.TypeTun, network, source, destination, firstPacket)
+	return adapter.JudgeFlow(h.router, adapter.InboundContext{Inbound: "tun-in", InboundType: C.TypeTun}, network, source, destination, firstPacket)
 }
 
 type testL3NATFlowOutbound struct {

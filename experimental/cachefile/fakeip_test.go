@@ -30,6 +30,27 @@ func newTestCacheFile(t *testing.T) *CacheFile {
 // reports ErrBucketNotFound, and a batch that returns an error rolls back, which
 // used to leave every mapping in place and let a changed FakeIP range keep
 // handing out addresses allocated from the previous one.
+func TestFakeIPReplacementInvalidatesOldDomainAndPreservesNew(t *testing.T) {
+	t.Parallel()
+	cacheFile := newTestCacheFile(t)
+	address := netip.MustParseAddr("198.18.0.7")
+	if err := cacheFile.FakeIPStore(address, "old.example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cacheFile.FakeIPStore(address, "new.example"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cacheFile.FakeIPLoadDomain("old.example", false); ok {
+		t.Fatal("old reverse mapping remained visible")
+	}
+	if got, ok := cacheFile.FakeIPLoadDomain("new.example", false); !ok || got != address {
+		t.Fatalf("new reverse mapping = %s, %t", got, ok)
+	}
+	if got, ok := cacheFile.FakeIPLoad(address); !ok || got != "new.example" {
+		t.Fatalf("forward mapping = %q, %t", got, ok)
+	}
+}
+
 func TestFakeIPResetWithoutIPv6Bucket(t *testing.T) {
 	t.Parallel()
 	cacheFile := newTestCacheFile(t)

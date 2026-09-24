@@ -279,5 +279,5 @@ func (c *realityConnWrapper) ReaderReplaceable() bool {
 }
 
 func (c *realityConnWrapper) WriterReplaceable() bool {
-	return true
+	return false
 }

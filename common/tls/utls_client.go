@@ -219,7 +219,7 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if options.Insecure {
 		tlsConfig.InsecureSkipVerify = options.Insecure
 	} else if len(options.CertificatePinSHA256) > 0 {
-		if len(options.CertificatePublicKeySHA256) > 0 || len(options.Certificate) > 0 || options.CertificatePath != "" {
+		if len(options.CertificateSHA256) > 0 || len(options.CertificatePublicKeySHA256) > 0 || len(options.Certificate) > 0 || options.CertificatePath != "" {
 			return nil, E.New("certificate_pin_sha256 is conflict with certificate_public_key_sha256 or certificate or certificate_path")
 		}
 		fingerprint := strings.TrimSpace(strings.ReplaceAll(options.CertificatePinSHA256, ":", ""))
@@ -237,11 +237,7 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 				hash := sha256.Sum256(cert.Raw)
 				if bytes.Equal(fpByte, hash[:]) {
 					if i > 0 {
-						opts := x509.VerifyOptions{
-							Roots:         x509.NewCertPool(),
-							Intermediates: x509.NewCertPool(),
-							DNSName:       verificationServerName,
-						}
+						opts := x509.VerifyOptions{Roots: x509.NewCertPool(), Intermediates: x509.NewCertPool(), DNSName: verificationServerName}
 						if tlsConfig.Time != nil {
 							opts.CurrentTime = tlsConfig.Time()
 						}
@@ -257,13 +253,13 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 			}
 			return E.New("certificate fingerprint mismatch")
 		}
-	} else if len(options.CertificatePublicKeySHA256) > 0 {
+	} else if len(options.CertificateSHA256) > 0 || len(options.CertificatePublicKeySHA256) > 0 {
 		if len(options.Certificate) > 0 || options.CertificatePath != "" {
-			return nil, E.New("certificate_public_key_sha256 is conflict with certificate or certificate_path")
+			return nil, E.New("certificate_sha256 or certificate_public_key_sha256 is conflict with certificate or certificate_path")
 		}
 		tlsConfig.InsecureSkipVerify = true
 		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			return VerifyPublicKeySHA256(options.CertificatePublicKeySHA256, rawCerts)
+			return VerifyPinnedCertificate(options.CertificateSHA256, options.CertificatePublicKeySHA256, rawCerts)
 		}
 	} else if options.DisableSNI || options.CertificateServerName != "" {
 		if options.Reality != nil && options.Reality.Enabled {

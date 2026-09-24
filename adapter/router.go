@@ -55,11 +55,7 @@ type PreMatchResult struct {
 	NewTracker  func() tun.FlowTracker
 }
 
-func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
-	return JudgeFlowWithUser(router, inbound, inboundType, "", network, source, destination, firstPacket)
-}
-
-func JudgeFlowWithUser(router Router, inbound string, inboundType string, user string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+func JudgeFlow(router Router, metadata InboundContext, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
 	var networkName string
 	switch network {
 	case uint8(header.TCPProtocolNumber):
@@ -71,14 +67,9 @@ func JudgeFlowWithUser(router Router, inbound string, inboundType string, user s
 	default:
 		return tun.FlowVerdict{Action: tun.ActionAccept}
 	}
-	metadata := InboundContext{
-		Inbound:     inbound,
-		InboundType: inboundType,
-		User:        user,
-		Network:     networkName,
-		Source:      M.SocksaddrFromNetIP(source),
-		Destination: M.SocksaddrFromNetIP(destination),
-	}
+	metadata.Network = networkName
+	metadata.Source = M.SocksaddrFromNetIP(source)
+	metadata.Destination = M.SocksaddrFromNetIP(destination)
 	if networkName == N.NetworkICMP {
 		metadata.Source.Port = 0
 		metadata.Destination.Port = 0

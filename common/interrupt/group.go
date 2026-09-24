@@ -23,11 +23,8 @@ func NewGroup() *Group {
 	return &Group{}
 }
 
-// Add registers an arbitrary io.Closer with the group and returns a remove
-// callback. Used by nested-group connection interruption, where the raw
-// connection is tracked by every OutboundGroup along the resolved chain so a
-// member switch at any level tears down in-flight traffic. Such connections are
-// never provider connections.
+// Add registers a connection and returns its removal callback.
+// Preserve provider classification when tracking a resolved outbound chain.
 func (g *Group) Add(closer io.Closer, isExternal bool, isProvider bool) (remove func()) {
 	g.access.Lock()
 	defer g.access.Unlock()
