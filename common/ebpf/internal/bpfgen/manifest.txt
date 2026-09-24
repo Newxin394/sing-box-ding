@@ -3,7 +3,7 @@ targets: bpfel,bpfeb
 cflags: -mcpu=v1 -O2 -g0 -ffreestanding -mllvm -disable-block-placement -mllvm -disable-branch-fold -nostdinc -Inative -isystem <clang-resource>/include -isystem <ndk-sysroot>/usr/include -isystem <ndk-sysroot>/usr/include/aarch64-linux-android
 include_environment: cleared
 bpf2go: v0.22.1-0.20260724091036-00feb08ae4e5
-clang: Android (13989888, +pgo, +bolt, +lto, +mlgo, based on r563880c) clang version 21.0.0 (https://android.googlesource.com/toolchain/llvm-project 5e96669f06077099aa41290cdb4c5e6fa0f59349)
+clang: clang version 21.1.8 (Termux aarch64-unknown-linux-android24; NDK r29 Clang 21 unavailable where the tc objects were rebuilt, so the tc entry below was regenerated on-device with this compiler)
 db3ddc279384e20f6c189af6319c196c9981f07c1bd0be4166e9bc4273801cf2  native/abi.h
 acef2ae96d9657f06d0533ced13e39509f624074cbcf46197c2ed9909c5844b1  native/bpf_compat.h
 d08531807f96ae230409dde9edb4b68bb5f0c68ef2b92742eb36faad3c07c636  native/cgroup.bpf.c
@@ -18,7 +18,7 @@ ddfc18d40c63fc4852a826111cbe2f61be1c79c6b7e4be939f52d646760207fc  native/shared_
 2857a13fc1404bb137ad03cc8a304cdd3c360ffbc0d265cfe7a13d1f70b8b453  native/shared_network_packet.h
 ab8a1207d1d3547d38d361c7afe863c9d75e69dc010261eb552b882c9e4c826f  native/shared_network_policy.h
 ab800d6eafe5080e9910c09ac2a29b9f7eb6ca11661541c2d0ba5a91a0d50e0b  native/shared_network_rewrite.h
-6d6c910e4ac9f724f32577c992c4eaa8ff78ea96d1de00028b1ce5309cf6abd8  native/tc.bpf.c
+c8f4e6db2a59239132249e72a6d93a4b172e5d75adc415888c10d39faca58d1d  native/tc.bpf.c
 2f168be2ff062a6fbc26f0ad7c9554d4e7dc4649024ab05a65237fba2986aaac  internal/bpfgen/cgroup_bpfeb.o
 47d79bcfb5daeb7ccb9b2ca5d2a0c8219a1429f868c28820a70125bcf4e6c6cb  internal/bpfgen/cgroup_bpfel.o
 9ccb57c4282525d0fd1a77902ea8148f3a0340a938d71c8578913ce5e4727d4a  internal/bpfgen/cgroup_coarse_bpfeb.o
@@ -29,5 +29,5 @@ ad854743feb778ef1cec190830c150ffbff340f00a276e89b085a1f57a2ca2fd  internal/bpfge
 51ad649c4f86593b6adc9e8a941fcd5e39bb8c1410010de61758515313708b04  internal/bpfgen/fakeip_icmp_bpfel.o
 047c2d1606f3eac26de639e0faced25d673f4643b788ec8e6f649070e0bbc1e0  internal/bpfgen/shared_network_bpfeb.o
 85b05bff005e24cf252e32072260fc075bbebc80974d55ec76dfd577289394cb  internal/bpfgen/shared_network_bpfel.o
-93ce4d9bb722534547403e7daa141b4d8187b6c2648f73b5f78b6cd71bf618f0  internal/bpfgen/tc_bpfeb.o
-a28d04f76c5082a0a18064b780ce637f7ace2b45ea0604bdc5d0cdf5eb521b5e  internal/bpfgen/tc_bpfel.o
+dbe68ff02645e0449a6c40c432f4a1563bcaf996a2f436c72e423bb604277146  internal/bpfgen/tc_bpfeb.o
+9ae5e7423fd622f6b46240b738dea5560f0eef1f6744732b3f23bddc3f5f461f  internal/bpfgen/tc_bpfel.o

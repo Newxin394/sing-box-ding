@@ -14,6 +14,7 @@
 #define BPF_TCP_LISTEN 10U
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
+#define TC_ACT_REDIRECT 7
 #define TC_ACT_UNSPEC (-1)
 
 #define ETH_P_IP_VALUE 0x0800U
@@ -766,7 +767,7 @@ INLINE int redirect_local(struct __sk_buff *skb, const struct sb_tc_control *con
         }
     }
     long result = redirect((int)control->delivery_ifindex, 0U);
-    if (result != 0 && !ethernet) record_tc_stat(SB_TC_STAT_RAW_IP_REDIRECT_FAILURE);
+    if (result != TC_ACT_REDIRECT && !ethernet) record_tc_stat(SB_TC_STAT_RAW_IP_REDIRECT_FAILURE);
     return (int)result;
 }
 
