@@ -75,22 +75,22 @@ func RegisterEndpoint(registry *endpoint.Registry) {
 
 type Endpoint struct {
 	endpoint.Adapter
-	ctx               context.Context
-	router            adapter.Router
-	logger            logger.ContextLogger
-	queryOptions      adapter.DNSQueryOptions
+	ctx                  context.Context
+	router               adapter.Router
+	logger               logger.ContextLogger
+	queryOptions         adapter.DNSQueryOptions
 	innerDNSQueryOptions adapter.DNSQueryOptions
-	dnsRouter         adapter.DNSRouter
-	network           adapter.NetworkManager
-	platformInterface adapter.PlatformInterface
-	detour            string
-	server            *tsnet.Server
-	stack             *tun.Go
-	returnAccess      sync.Mutex
-	returnPath        tun.Return
-	wgEngine          wgengine.ExportedUserspaceEngine
-	onReconfigHook    wgengine.ReconfigListener
-	sshReconfigHook   wgengine.ReconfigListener
+	dnsRouter            adapter.DNSRouter
+	network              adapter.NetworkManager
+	platformInterface    adapter.PlatformInterface
+	detour               string
+	server               *tsnet.Server
+	stack                *tun.Go
+	returnAccess         sync.Mutex
+	returnPath           tun.Return
+	wgEngine             wgengine.ExportedUserspaceEngine
+	onReconfigHook       wgengine.ReconfigListener
+	sshReconfigHook      wgengine.ReconfigListener
 
 	cfg           *wgcfg.Config
 	routerCfg     *router.Config

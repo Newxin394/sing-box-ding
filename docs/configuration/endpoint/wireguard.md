@@ -158,7 +158,6 @@ It is also used to resolve unresolved domain destinations when this endpoint is 
 This option uses the same format as [domain_resolver](/configuration/shared/dial/#domain_resolver).
 
 When not set, the default DNS is used.
-
 ### UDP NAT Fields
 
 See [UDP NAT Fields](/configuration/shared/udp-nat/) for details.

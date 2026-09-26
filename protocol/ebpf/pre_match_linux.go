@@ -724,7 +724,7 @@ func (h *preMatchNFQueue) handle(attr nfqueue.Attribute) int {
 		h.set(attr, nfqueue.NfRepeat, h.bypassMark)
 		return 0
 	}
-	verdict := adapter.JudgeFlow(h.router, h.inbound, h.inboundType, packet.protocol, packet.source, packet.destination, packet.firstPacket)
+	verdict := adapter.JudgeFlow(h.router, adapter.InboundContext{Inbound: h.inbound, InboundType: h.inboundType}, packet.protocol, packet.source, packet.destination, packet.firstPacket)
 	switch verdict.Action {
 	case tun.ActionAccept, tun.ActionBypass:
 		if h.inboundRef.preMatchFakeIP(packet.destination.Addr()) {

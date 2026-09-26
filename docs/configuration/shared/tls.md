@@ -2,6 +2,11 @@
 icon: material/new-box
 ---
 
+!!! quote "Changes in sing-box 1.15.0"
+
+    :material-plus: [certificate_sha256](#certificate_sha256)  
+    :material-plus: [client_certificate_sha256](#client_certificate_sha256)
+
 !!! quote "Changes in sing-box 1.14.0"
 
     :material-plus: [certificate_provider](#certificate_provider)  
@@ -54,6 +59,7 @@ icon: material/new-box
   "client_authentication": "",
   "client_certificate": [],
   "client_certificate_path": [],
+  "client_certificate_sha256": [],
   "client_certificate_public_key_sha256": [],
   "key": [],
   "key_path": "",
@@ -124,6 +130,7 @@ icon: material/new-box
   "curve_preferences": [],
   "certificate": "",
   "certificate_path": "",
+  "certificate_sha256": [],
   "certificate_public_key_sha256": [],
   "client_certificate": [],
   "client_certificate_path": "",
@@ -219,6 +226,7 @@ Supported fields:
 * `min_version`
 * `max_version`
 * `certificate` / `certificate_path`
+* `certificate_sha256`
 * `certificate_public_key_sha256`
 * `handshake_timeout`
 
@@ -253,6 +261,7 @@ Supported fields:
 * `min_version`
 * `max_version`
 * `certificate` / `certificate_path`
+* `certificate_sha256`
 * `certificate_public_key_sha256`
 * `handshake_timeout`
 
@@ -354,6 +363,27 @@ Server certificates chain line array, in PEM format.
 The path to server certificate chain, in PEM format.
 
 
+#### certificate_sha256
+
+!!! question "Since sing-box 1.15.0"
+
+==Client only==
+
+List of SHA-256 hashes of server certificates, in base64 format.
+
+The hash is computed over the whole DER-encoded certificate, so it changes whenever the certificate is renewed,
+even when the key stays the same. Use `certificate_public_key_sha256` when only the key should be pinned.
+
+To generate the SHA-256 hash for a certificate, use the following commands:
+
+```bash
+# For a certificate file
+openssl x509 -in certificate.pem -outform der | openssl dgst -sha256 -binary | openssl enc -base64
+
+# For a certificate from a remote server
+echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/null | openssl x509 -outform der | openssl dgst -sha256 -binary | openssl enc -base64
+```
+
 #### certificate_public_key_sha256
 
 !!! question "Since sing-box 1.13.0"
@@ -436,7 +466,7 @@ Available values:
 * `verify-if-given`
 * `require-and-verify`
 
-One of `client_certificate`, `client_certificate_path`, or `client_certificate_public_key_sha256` is required
+One of `client_certificate`, `client_certificate_path`, `client_certificate_sha256`, or `client_certificate_public_key_sha256` is required
 if this option is set to `verify-if-given`, or `require-and-verify`.
 
 #### client_certificate
@@ -458,6 +488,16 @@ Client certificate chain line array, in PEM format.
     Will be automatically reloaded if file modified.
 
 List of path to client certificate chain, in PEM format.
+
+#### client_certificate_sha256
+
+!!! question "Since sing-box 1.15.0"
+
+==Server only==
+
+List of SHA-256 hashes of client certificates, in base64 format.
+
+The hash is computed over the whole DER-encoded certificate, see [certificate_sha256](#certificate_sha256).
 
 #### client_certificate_public_key_sha256
 

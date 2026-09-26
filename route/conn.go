@@ -302,13 +302,17 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	_, err := bufio.CopyWithIncreateBuffer(destination, source, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
 	if err != nil {
 		common.Close(source, destination)
-	} else if duplexDst, isDuplex := destination.(N.WriteCloser); isDuplex {
-		err = duplexDst.CloseWrite()
-		if err != nil {
-			common.Close(source, destination)
-		}
 	} else {
-		destination.Close()
+		destinationWriter, _ := N.UnwrapCountWriter(destination, nil)
+		duplexDst, isDuplex := N.UnwrapWriter(destinationWriter).(N.WriteCloser)
+		if isDuplex {
+			err = duplexDst.CloseWrite()
+			if err != nil {
+				common.Close(source, destination)
+			}
+		} else {
+			destination.Close()
+		}
 	}
 	if done.Swap(true) {
 		if onClose != nil {
@@ -427,9 +431,7 @@ type socketOwner struct {
 	closed   bool
 }
 
-// attach stores closer as the current owner and returns the original socket so
-// the caller can migrate it. ok reports whether the attach succeeded.
-func (o *socketOwner) attach(closer io.Closer) (io.Closer, bool) {
+func (o *socketOwner) Attach(closer io.Closer) (io.Closer, bool) {
 	o.access.Lock()
 	defer o.access.Unlock()
 	if o.closed || o.owner != nil {
@@ -437,13 +439,6 @@ func (o *socketOwner) attach(closer io.Closer) (io.Closer, bool) {
 	}
 	o.owner = closer
 	return o.original, true
-}
-
-// Attach satisfies tun.SpliceSocket. The original socket is handed back so the
-// splice path can take ownership of it, which is what the current sing-tun
-// declares; the owner is stored so it can be closed or detached later.
-func (o *socketOwner) Attach(closer io.Closer) (io.Closer, bool) {
-	return o.attach(closer)
 }
 
 func (o *socketOwner) detach() bool {
@@ -513,35 +508,6 @@ type trackedPacketConn struct {
 	socketOwner
 	manager *ConnectionManager
 	element *list.Element[io.Closer]
-}
-
-func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
-	if packetReader, ok := c.NetPacketConn.(N.PacketReader); ok {
-		return packetReader.ReadPacket(buffer)
-	}
-	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
-	if !isPacketConn {
-		return M.Socksaddr{}, os.ErrInvalid
-	}
-	_, addr, err := buffer.ReadPacketFrom(packetConn)
-	if err != nil {
-		return M.Socksaddr{}, err
-	}
-	return M.SocksaddrFromNet(addr).Unwrap(), err
-}
-
-func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	if packetWriter, ok := c.NetPacketConn.(N.PacketWriter); ok {
-		return packetWriter.WritePacket(buffer, destination)
-	}
-	packetConn, isPacketConn := c.NetPacketConn.(net.PacketConn)
-	if !isPacketConn {
-		buffer.Release()
-		return os.ErrInvalid
-	}
-	defer buffer.Release()
-	_, err := packetConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
-	return err
 }
 
 func (c *trackedPacketConn) SyscallConn() (syscall.RawConn, error) {

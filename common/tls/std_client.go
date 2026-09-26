@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -144,7 +145,7 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	if options.Insecure {
 		tlsConfig.InsecureSkipVerify = options.Insecure
 	} else if len(options.CertificatePinSHA256) > 0 {
-		if len(options.CertificatePublicKeySHA256) > 0 || len(options.Certificate) > 0 || options.CertificatePath != "" {
+		if len(options.CertificateSHA256) > 0 || len(options.CertificatePublicKeySHA256) > 0 || len(options.Certificate) > 0 || options.CertificatePath != "" {
 			return nil, E.New("certificate_pin_sha256 is conflict with certificate_public_key_sha256 or certificate or certificate_path")
 		}
 		fingerprint := strings.TrimSpace(strings.ReplaceAll(options.CertificatePinSHA256, ":", ""))
@@ -182,13 +183,13 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 			}
 			return E.New("certificate fingerprint mismatch")
 		}
-	} else if len(options.CertificatePublicKeySHA256) > 0 {
+	} else if len(options.CertificateSHA256) > 0 || len(options.CertificatePublicKeySHA256) > 0 {
 		if len(options.Certificate) > 0 || options.CertificatePath != "" {
-			return nil, E.New("certificate_public_key_sha256 is conflict with certificate or certificate_path")
+			return nil, E.New("certificate_sha256 or certificate_public_key_sha256 is conflict with certificate or certificate_path")
 		}
 		tlsConfig.InsecureSkipVerify = true
 		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			return VerifyPublicKeySHA256(options.CertificatePublicKeySHA256, rawCerts)
+			return VerifyPinnedCertificate(options.CertificateSHA256, options.CertificatePublicKeySHA256, rawCerts)
 		}
 	} else if options.DisableSNI || options.CertificateServerName != "" {
 		tlsConfig.InsecureSkipVerify = true
@@ -328,21 +329,26 @@ func verifyConnection(rootCAs *x509.CertPool, timeFunc func() time.Time, serverN
 	}
 }
 
-func VerifyPublicKeySHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
+func VerifyPinnedCertificate(certificateHashes [][]byte, publicKeyHashes [][]byte, rawCerts [][]byte) error {
+	if len(rawCerts) == 0 {
+		return E.New("missing peer certificate")
+	}
+	certificateHash := sha256.Sum256(rawCerts[0])
+	if slices.ContainsFunc(certificateHashes, func(value []byte) bool { return bytes.Equal(value, certificateHash[:]) }) {
+		return nil
+	}
 	leafCertificate, err := x509.ParseCertificate(rawCerts[0])
 	if err != nil {
-		return E.Cause(err, "failed to parse leaf certificate")
+		return E.Cause(err, "parse leaf certificate")
 	}
-
-	pubKeyBytes, err := x509.MarshalPKIXPublicKey(leafCertificate.PublicKey)
+	publicKeyBytes, err := x509.MarshalPKIXPublicKey(leafCertificate.PublicKey)
 	if err != nil {
-		return E.Cause(err, "failed to marshal public key")
+		return E.Cause(err, "marshal public key")
 	}
-	hashValue := sha256.Sum256(pubKeyBytes)
-	for _, value := range knownHashValues {
-		if bytes.Equal(value, hashValue[:]) {
-			return nil
-		}
+	publicKeyHash := sha256.Sum256(publicKeyBytes)
+	if slices.ContainsFunc(publicKeyHashes, func(value []byte) bool { return bytes.Equal(value, publicKeyHash[:]) }) {
+		return nil
 	}
-	return E.New("unrecognized remote public key: ", base64.StdEncoding.EncodeToString(hashValue[:]))
+	return E.New("unrecognized peer certificate: sha256 ", base64.StdEncoding.EncodeToString(certificateHash[:]),
+		", public key sha256 ", base64.StdEncoding.EncodeToString(publicKeyHash[:]))
 }

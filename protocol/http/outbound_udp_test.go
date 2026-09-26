@@ -7,22 +7,40 @@ import (
 
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 	sHTTP "github.com/sagernet/sing/protocol/http"
 )
 
-func TestHTTPAndDingRejectUDPWithoutDelegate(t *testing.T) {
+func TestOrdinaryHTTPHasNativeUDPButWithAtKeepsHTTP1Only(t *testing.T) {
 	ctx := context.Background()
-	logger := log.NewNOPFactory().NewLogger("test")
-	httpOutbound, err := NewOutbound(ctx, nil, logger, "http-test", option.HTTPOutboundOptions{
+	factory := log.NewNOPFactory()
+	ordinary, err := NewOutbound(ctx, nil, factory.NewLogger("ordinary"), "ordinary", option.HTTPOutboundOptions{
 		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 8080},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = httpOutbound.DialContext(ctx, "udp", M.ParseSocksaddr("example.com:443"))
-	if err == nil || !strings.Contains(err.Error(), "UDP is not supported by outbound: http-test") {
-		t.Fatalf("unexpected HTTP UDP error: %v", err)
+	if ordinary.(*Outbound).nativeClient == nil {
+		t.Fatal("ordinary HTTP did not use official native client")
+	}
+	if !common.Contains(ordinary.Network(), N.NetworkUDP) {
+		t.Fatalf("ordinary HTTP should advertise native UDP, got %v", ordinary.Network())
+	}
+	withAt, err := NewOutbound(ctx, nil, factory.NewLogger("with-at"), "with-at", option.HTTPOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 8080},
+		Headers:       badoption.HTTPHeader{"With-At": badoption.Listable[string]{"gw.example"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withAt.(*Outbound).nativeClient != nil {
+		t.Fatal("With-At must retain the dedicated HTTP/1 path")
+	}
+	if common.Contains(withAt.Network(), N.NetworkUDP) {
+		t.Fatalf("With-At without explicit UDP delegate must remain TCP-only, got %v", withAt.Network())
 	}
 
 	ding := newDingClient(sHTTP.Options{Server: M.ParseSocksaddr("127.0.0.1:8080")}, "gw.example")
@@ -57,16 +75,14 @@ func TestOutboundAdvertisesUDPWhenDelegating(t *testing.T) {
 	if !hasTCP || !hasUDP {
 		t.Fatalf("expected tcp+udp, got %v", networks)
 	}
-	// Without udp_outbound the outbound must still be TCP-only.
+	// Native HTTP now supports UDP itself; the explicit delegate remains an override.
 	o2, err := NewOutbound(context.Background(), nil, log.NewNOPFactory().NewLogger("http"), "test2", option.HTTPOutboundOptions{
 		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 8080},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range o2.Network() {
-		if n == "udp" {
-			t.Fatal("http outbound without udp_outbound must not offer udp")
-		}
+	if !common.Contains(o2.Network(), N.NetworkUDP) {
+		t.Fatalf("native HTTP must advertise UDP, got %v", o2.Network())
 	}
 }
