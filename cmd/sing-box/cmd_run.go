@@ -58,6 +58,12 @@ func readConfigAt(path string) (*OptionsEntry, error) {
 	if err != nil {
 		return nil, E.Cause(err, "read config at ", path)
 	}
+	if isYAMLPath(path) {
+		configContent, err = yamlToJSON(configContent)
+		if err != nil {
+			return nil, E.Cause(err, "decode YAML config at ", path)
+		}
+	}
 	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, configContent)
 	if err != nil {
 		return nil, E.Cause(err, "decode config at ", path)
@@ -84,7 +90,10 @@ func readConfig() ([]*OptionsEntry, error) {
 			return nil, E.Cause(err, "read config directory at ", directory)
 		}
 		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), ".json") || entry.IsDir() {
+			if entry.IsDir() {
+				continue
+			}
+			if !strings.HasSuffix(entry.Name(), ".json") && !isYAMLEntry(entry.Name()) {
 				continue
 			}
 			optionsEntry, err := readConfigAt(filepath.Join(directory, entry.Name()))
