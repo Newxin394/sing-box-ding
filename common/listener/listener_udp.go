@@ -49,7 +49,9 @@ func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.Packe
 	} else {
 		udpFragment = l.listenOptions.UDPFragmentDefault
 	}
-	if !udpFragment {
+	if udpFragment {
+		listenConfig.Control = control.Append(listenConfig.Control, control.EnableUDPFragment())
+	} else {
 		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
 	}
 	if l.tproxy {
