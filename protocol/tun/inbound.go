@@ -565,6 +565,26 @@ func (t *Inbound) InterfaceUpdated(ctx context.Context) {
 }
 
 func (t *Inbound) Close() error {
+	for index, callback := range t.routeRuleSetCallback {
+		if index < len(t.routeRuleSet) {
+			t.routeRuleSet[index].UnregisterCallback(callback)
+		}
+	}
+	for index, callback := range t.routeExcludeRuleSetCallback {
+		if index < len(t.routeExcludeRuleSet) {
+			t.routeExcludeRuleSet[index].UnregisterCallback(callback)
+		}
+	}
+	t.routeRuleSetCallback = nil
+	t.routeExcludeRuleSetCallback = nil
+	for _, ruleSet := range t.routeRuleSet {
+		ruleSet.DecRef()
+	}
+	for _, ruleSet := range t.routeExcludeRuleSet {
+		ruleSet.DecRef()
+	}
+	t.routeRuleSet = nil
+	t.routeExcludeRuleSet = nil
 	return common.Close(
 		t.tunStack,
 		t.tunIf,
