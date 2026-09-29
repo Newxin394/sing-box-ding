@@ -57,6 +57,7 @@ type Inbound struct {
 	platformInterface           adapter.PlatformInterface
 	platformOptions             option.TunPlatformOptions
 	autoRedirect                tun.AutoRedirect
+	captureActive               bool
 	routeRuleSet                []adapter.RuleSet
 	routeRuleSetCallback        []*list.Element[adapter.RuleSetUpdateCallback]
 	routeExcludeRuleSet         []adapter.RuleSet
@@ -527,6 +528,7 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			if err != nil {
 				return E.Cause(err, "auto-redirect")
 			}
+			t.captureActive = true
 		}
 	}
 	return nil

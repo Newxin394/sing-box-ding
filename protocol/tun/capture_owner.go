@@ -1,11 +1,13 @@
 package tun
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/sagernet/sing-box/common/capture"
-	E "github.com/sagernet/sing/common/exceptions"
 )
+
+var errTUNCaptureUnavailable = errors.New("TUN capture is unavailable")
 
 var _ capture.Owner = (*captureOwner)(nil)
 
@@ -19,11 +21,12 @@ func (i *Inbound) CaptureOwner() capture.Owner {
 	return &captureOwner{inbound: i}
 }
 
-// Prepare is side-effect free. TUN allocation remains owned by the staged
-// inbound lifecycle until the coordinator is wired at the manager level.
 func (o *captureOwner) Prepare() error {
 	if o == nil || o.inbound == nil {
-		return E.New("nil TUN capture owner")
+		return errTUNCaptureUnavailable
+	}
+	if o.inbound.tunIf == nil || o.inbound.tunStack == nil {
+		return errTUNCaptureUnavailable
 	}
 	return nil
 }
@@ -34,13 +37,16 @@ func (o *captureOwner) Activate() error {
 	if o.active {
 		return nil
 	}
-	if o.inbound.tunIf == nil || o.inbound.tunStack == nil {
-		return E.New("TUN capture is not prepared")
+	if err := o.Prepare(); err != nil {
+		return err
 	}
-	// The staged lifecycle has already started the TUN stack and auto-redirect.
-	// This flag is the seam for the later stop/start split; it must not create a
-	// second TUN interface or a second auto-redirect chain.
+	if o.inbound.autoRedirect != nil {
+		if err := o.inbound.autoRedirect.Start(); err != nil {
+			return err
+		}
+	}
 	o.active = true
+	o.inbound.captureActive = true
 	return nil
 }
 
@@ -50,16 +56,25 @@ func (o *captureOwner) Deactivate() error {
 	if !o.active {
 		return nil
 	}
-	// Do not close the stack here yet. The manager-level integration must first
-	// add a reversible sing-tun redirect lifecycle; closing it here would tear
-	// down resources the existing staged lifecycle still owns.
+	if o.inbound.autoRedirect != nil {
+		if err := o.inbound.autoRedirect.Close(); err != nil {
+			return err
+		}
+	}
 	o.active = false
+	o.inbound.captureActive = false
 	return nil
 }
 
 func (o *captureOwner) Close() error {
 	o.access.Lock()
+	defer o.access.Unlock()
+	if o.active && o.inbound.autoRedirect != nil {
+		if err := o.inbound.autoRedirect.Close(); err != nil {
+			return err
+		}
+	}
 	o.active = false
-	o.access.Unlock()
+	o.inbound.captureActive = false
 	return nil
 }
