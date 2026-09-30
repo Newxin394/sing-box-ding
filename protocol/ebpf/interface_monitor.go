@@ -530,6 +530,11 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 	if ctx.Err() != nil {
 		return
 	}
+	if i.captureDeferredState.Load() {
+		outcome.general = tcSharedRewriteSettled
+		outcome.sharedRewrite = tcSharedRewriteSettled
+		return
+	}
 	outcome.bypassRuleSet = i.retryBypassRuleSetIfNeededLocked()
 	if err := i.networkManager.UpdateInterfaces(); err != nil {
 		i.interfaceWarnings.inventory.warn(i.logger, "update interfaces for TC eBPF: ", err)
@@ -551,7 +556,10 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 		}
 		return
 	}
-	localTCEnabled := i.localTCEnabled()
+	// A deferred TC owner is staged for the coordinator but must stay detached
+	// from the current default interface. Otherwise a cellular handoff makes
+	// the inactive TC path attach to ccmni while TUN owns capture.
+	localTCEnabled := i.localTCEnabled() && !i.captureDeferredState.Load()
 	localInterface, err := availableLocalTCInterface(localTCEnabled, defaultInterface)
 	if err != nil {
 		i.interfaceWarnings.topology.warn(i.logger, "inspect TC eBPF local interface: ", err)

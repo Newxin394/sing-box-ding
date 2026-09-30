@@ -192,6 +192,9 @@ func startTCDataPlane(
 	if err = backend.SetRoutingMark(routing.mark); err != nil {
 		return cleanup(E.Cause(err, "set TC eBPF routing mark"))
 	}
+	if _, err = reclaimStaleTCDeliveryLinks(); err != nil {
+		return cleanup(E.Cause(err, "reclaim stale TC eBPF delivery links"))
+	}
 	if localEnabled {
 		delivery, err := dataPlane.createTCDeliveryLink()
 		dataPlane.delivery = delivery

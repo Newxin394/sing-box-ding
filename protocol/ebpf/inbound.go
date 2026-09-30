@@ -74,6 +74,8 @@ type Inbound struct {
 	listeners                internalListenerSet
 	udpNat                   *udpnat.Service
 	tcDataPlane              *tcDataPlane
+	captureDeferred          bool
+	captureDeferredState     atomic.Bool
 	udpTimeout               time.Duration
 	enableTCP                bool
 	enableUDP                bool

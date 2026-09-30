@@ -50,9 +50,6 @@ func (o *captureOwner) Activate() error {
 func (o *captureOwner) Deactivate() error {
 	o.access.Lock()
 	defer o.access.Unlock()
-	if !o.active {
-		return nil
-	}
 	if err := o.inbound.deactivateTCCapture(); err != nil {
 		return E.Cause(err, "disable eBPF TC capture")
 	}
@@ -63,9 +60,6 @@ func (o *captureOwner) Deactivate() error {
 func (o *captureOwner) Close() error {
 	o.access.Lock()
 	defer o.access.Unlock()
-	if !o.active {
-		return nil
-	}
 	if err := o.inbound.deactivateTCCapture(); err != nil {
 		return E.Cause(err, "disable eBPF TC capture")
 	}

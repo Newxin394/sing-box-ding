@@ -72,6 +72,9 @@ func startTCPolicyRouting(enableIPv6 bool, reservedMarks ...uint32) (*tcPolicyRo
 		families = append(families, unix.AF_INET6)
 	}
 	routing.families = families
+	if _, err = reclaimStaleTCPolicyRouting(loopback.Attrs().Index); err != nil {
+		return cleanup(E.Cause(err, "reclaim stale TC eBPF policy routing"))
+	}
 	identifiers, err := allocateTCPolicyIdentifiers(loopback.Attrs().Index, families, reservedMarks...)
 	if err != nil {
 		return cleanup(err)
