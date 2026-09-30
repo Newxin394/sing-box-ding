@@ -52,6 +52,7 @@ func (s *sharedRewrite) NewConnection(ctx context.Context, conn net.Conn, metada
 	onClose = N.AppendClose(onClose, func(error) {
 		s.releaseFlow(flow)
 	})
+	s.inbound.logInboundConnection(ctx, metadata)
 	s.inbound.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
@@ -150,6 +151,7 @@ func (s *sharedRewrite) NewPacketConnectionEx(ctx context.Context, conn N.Packet
 			metadata.SourceMACAddress = clientState.sourceMACAddress()
 		}
 	}
+	s.inbound.logInboundPacketConnection(ctx, metadata)
 	s.inbound.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 

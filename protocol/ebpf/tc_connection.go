@@ -49,6 +49,7 @@ func (i *Inbound) newTCConnection(
 	if assignment.Path == commonEBPF.TCPathShared && assignment.SourceMACValid != 0 {
 		metadata.SourceMACAddress = net.HardwareAddr(assignment.SourceMAC[:])
 	}
+	i.logInboundConnection(ctx, metadata)
 	i.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 

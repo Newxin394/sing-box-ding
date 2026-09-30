@@ -57,6 +57,7 @@ func (i *Inbound) NewConnection(
 		metadata.Source = M.SocksaddrFromNet(conn.RemoteAddr())
 		metadata.Destination = M.SocksaddrFromNetIP(original.Destination)
 		metadata.ProcessInfo = i.lookupProcessInfo(original.SocketCookie)
+		i.logInboundConnection(ctx, metadata)
 		i.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 		return
 	}
@@ -120,6 +121,7 @@ func (i *Inbound) newPreMatchConnection(ctx context.Context, conn net.Conn, meta
 			(originalErr != nil && i.sharedDNSMode == dnsModeHijack)) {
 		metadata.Protocol = C.ProtocolDNS
 	}
+	i.logInboundConnection(ctx, metadata)
 	i.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
@@ -205,6 +207,7 @@ func (i *Inbound) NewPacketConnectionEx(
 			}
 		}
 	}
+	i.logInboundPacketConnection(ctx, metadata)
 	i.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 
