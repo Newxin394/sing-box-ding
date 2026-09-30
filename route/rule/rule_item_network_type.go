@@ -24,6 +24,12 @@ func NewNetworkTypeItem(networkManager adapter.NetworkManager, networkType []C.I
 }
 
 func (r *NetworkTypeItem) Match(metadata *adapter.InboundContext) bool {
+	// On Android the interface list can be transiently empty while the system
+	// rebuilds connectivity. Falling back to the WiFi state avoids mis-routing
+	// in that window instead of reporting "not wifi" unconditionally.
+	if C.IsAndroid && len(r.networkManager.NetworkInterfaces()) == 0 {
+		return common.Contains(r.networkType, C.InterfaceTypeWIFI) && r.networkManager.WIFIState().SSID != ""
+	}
 	networkInterface := r.networkManager.DefaultNetworkInterface()
 	if networkInterface == nil {
 		return false
