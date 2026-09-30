@@ -20,6 +20,7 @@ type NetworkManager interface {
 	UpdateInterfaces() error
 	DefaultNetworkInterface() *NetworkInterface
 	NetworkInterfaces() []NetworkInterface
+	RegisterInterfaceUpdateListener(listener InterfaceUpdateListener)
 	NetworkEnvironment() uint64
 	AutoDetectInterface() bool
 	AutoDetectInterfaceFunc() control.Func

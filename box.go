@@ -359,6 +359,12 @@ func New(options Options) (*Box, error) {
 			return nil, E.Cause(err, "initialize inbound[", i, "]")
 		}
 	}
+	if captureService := route.NewCaptureCoordinator(ctx, networkManager, inboundManager, logFactory.NewLogger("capture")); captureService != nil {
+		internalServices = append(internalServices, captureService)
+		if listener, ok := captureService.(adapter.InterfaceUpdateListener); ok {
+			networkManager.RegisterInterfaceUpdateListener(listener)
+		}
+	}
 	options.Outbounds = append(options.Outbounds, option.Outbound{
 		Tag:  "Compatible",
 		Type: C.TypeDirect,

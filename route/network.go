@@ -67,6 +67,8 @@ type NetworkManager struct {
 	interfaceUpdateElement  *list.Element[tun.DefaultInterfaceUpdateCallback]
 	interfaceUpdateAccess   sync.Mutex
 	interfaceUpdateCancel   context.CancelFunc
+	captureListeners        []adapter.InterfaceUpdateListener
+	captureListenerAccess   sync.RWMutex
 	networkResetPending     bool
 	resetRunAccess          sync.Mutex
 	interfaceRecheckAccess  sync.Mutex
@@ -357,6 +359,24 @@ func (r *NetworkManager) UpdateInterfaces() error {
 			}), ", "))
 		}
 		return nil
+	}
+}
+
+func (r *NetworkManager) RegisterInterfaceUpdateListener(listener adapter.InterfaceUpdateListener) {
+	if listener == nil {
+		return
+	}
+	r.captureListenerAccess.Lock()
+	r.captureListeners = append(r.captureListeners, listener)
+	r.captureListenerAccess.Unlock()
+}
+
+func (r *NetworkManager) notifyCaptureListeners(ctx context.Context) {
+	r.captureListenerAccess.RLock()
+	listeners := append([]adapter.InterfaceUpdateListener(nil), r.captureListeners...)
+	r.captureListenerAccess.RUnlock()
+	for _, listener := range listeners {
+		listener.InterfaceUpdated(ctx)
 	}
 }
 
@@ -684,6 +704,7 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 	if resetNetwork {
 		r.ResetNetwork(ctx)
 	}
+	r.notifyCaptureListeners(ctx)
 }
 
 func (r *NetworkManager) notifyWindowsPowerEvent(event int) {

@@ -124,6 +124,37 @@ func (c *Coordinator) Current() Mode {
 // its error directly and does not publish a duplicate Failure.
 func (c *Coordinator) Errors() <-chan Failure { return c.errors }
 
+// Initialize establishes a known single-owner baseline after both legacy
+// inbound lifecycles have started. It disables both capture backends before
+// activating the selected one, preventing a dual-capture startup window.
+func (c *Coordinator) Initialize(mode Mode) error {
+	if !validMode(mode) {
+		return fmt.Errorf("invalid capture mode: %d", mode)
+	}
+	c.transitionAccess.Lock()
+	defer c.transitionAccess.Unlock()
+	c.stateAccess.Lock()
+	if c.closed {
+		c.stateAccess.Unlock()
+		return ErrClosed
+	}
+	c.stateAccess.Unlock()
+	var err error
+	for _, owner := range c.owners[1:] {
+		if owner != nil {
+			err = errors.Join(err, owner.Deactivate())
+		}
+	}
+	if err != nil {
+		return err
+	}
+	result, err := c.transition(ModeNone, mode)
+	c.stateAccess.Lock()
+	c.current = result
+	c.stateAccess.Unlock()
+	return err
+}
+
 // RequestMode schedules a debounced transition and returns its generation.
 // Newer requests supersede older requests that have not started.
 func (c *Coordinator) RequestMode(mode Mode) uint64 {

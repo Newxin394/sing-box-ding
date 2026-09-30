@@ -39,7 +39,7 @@ func (s *captureCoordinatorService) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStarted {
 		return nil
 	}
-	return s.requestCurrent()
+	return s.initializeCurrent()
 }
 
 func (s *captureCoordinatorService) Close() error {
@@ -54,6 +54,21 @@ func (s *captureCoordinatorService) InterfaceUpdated(ctx context.Context) {
 		return
 	}
 	_ = s.requestCurrent()
+}
+
+func (s *captureCoordinatorService) initializeCurrent() error {
+	s.access.Lock()
+	defer s.access.Unlock()
+	if s.network == nil || s.coord == nil {
+		return nil
+	}
+	defaultInterface := s.network.DefaultNetworkInterface()
+	mode, class, ok := s.policy.Select(defaultInterface, s.network.NetworkInterfaces())
+	if !ok {
+		return nil
+	}
+	s.logger.Info("capture coordinator: initial interface ", defaultInterface.Name, " class=", class, " mode=", mode)
+	return s.coord.Initialize(mode)
 }
 
 func (s *captureCoordinatorService) requestCurrent() error {
