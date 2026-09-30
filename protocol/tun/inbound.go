@@ -14,12 +14,10 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
-	"github.com/sagernet/sing-box/common/taskmonitor"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	"github.com/sagernet/sing/common"
@@ -57,7 +55,10 @@ type Inbound struct {
 	platformInterface           adapter.PlatformInterface
 	platformOptions             option.TunPlatformOptions
 	autoRedirect                tun.AutoRedirect
+	autoRedirectStarted         bool
 	captureActive               bool
+	captureDeferred             bool
+	captureAccess               sync.RWMutex
 	routeRuleSet                []adapter.RuleSet
 	routeRuleSetCallback        []*list.Element[adapter.RuleSetUpdateCallback]
 	routeExcludeRuleSet         []adapter.RuleSet
@@ -430,11 +431,6 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 				}
 			}
 		}
-		var (
-			tunInterface tun.Tun
-			err          error
-		)
-		monitor := taskmonitor.New(t.logger, C.StartTimeout)
 		tunOptions := t.tunOptions
 		if t.autoRedirect == nil && !(runtime.GOOS == "android" && t.platformInterface != nil) {
 			for _, ipSet := range routeAddressSet {
@@ -456,79 +452,25 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 				}
 			}
 		}
-		monitor.Start("open interface")
-		if t.platformInterface != nil && t.platformInterface.UsePlatformInterface() {
-			tunInterface, err = t.platformInterface.OpenInterface(&tunOptions, t.platformOptions)
-		} else {
-			tunInterface, err = tun.New(tunOptions)
+		if t.captureDeferred {
+			// Both a TUN and an eBPF inbound exist. The capture coordinator owns
+			// activation, so build nothing here; leaving the TUN unbuilt keeps
+			// its auto-route rules off the system until this backend is selected.
+			t.logger.Info("TUN runtime deferred to capture coordinator")
+			break
 		}
-		monitor.Finish()
-		t.tunOptions.Name = tunOptions.Name
-		if err != nil {
-			return E.Cause(err, "configure tun interface")
-		}
-		t.logger.Trace("creating stack")
-		t.tunIf = tunInterface
-		if t.platformInterface != nil {
-			err = t.platformInterface.ProcessPlatformOptions(t.platformOptions)
-			if err != nil {
-				closeError := t.tunIf.Close()
-				t.tunIf = nil
-				return E.Errors(E.Cause(err, "process platform options"), closeError)
-			}
-		}
-		var includeAllNetworks bool
-		if t.platformInterface != nil && t.platformInterface.UnderNetworkExtension() {
-			includeAllNetworks = t.platformInterface.NetworkExtensionIncludeAllNetworks()
-		}
-		var memoryPressure func() tun.MemoryPressure
-		oomKiller := service.FromContext[*oomkiller.Service](t.ctx)
-		if oomKiller != nil {
-			memoryPressure = oomKiller.MemoryPressure
-		}
-		tunStack, err := tun.NewStack(t.stack, tun.StackOptions{
-			Context:                t.ctx,
-			Tun:                    tunInterface,
-			TunOptions:             t.tunOptions,
-			UDPTimeout:             t.udpTimeout,
-			ICMPTimeout:            C.ICMPTimeout,
-			UDPMapping:             t.udpMapping,
-			UDPFiltering:           t.udpFiltering,
-			UDPNATMax:              t.udpNATMax,
-			Handler:                t,
-			Logger:                 t.logger,
-			ForwarderBindInterface: C.IsDarwin,
-			InterfaceFinder:        t.networkManager.InterfaceFinder(),
-			IncludeAllNetworks:     includeAllNetworks,
-			MemoryPressure:         memoryPressure,
-		})
-		if err != nil {
+		if err := t.buildTunRuntime(tunOptions); err != nil {
 			return err
 		}
-		t.tunStack = tunStack
 		t.logger.Info("started at ", t.tunOptions.Name)
 	case adapter.StartStatePostStart:
-		monitor := taskmonitor.New(t.logger, C.StartTimeout)
-		monitor.Start("starting tun stack")
-		err := t.tunStack.Start()
-		monitor.Finish()
-		if err != nil {
-			return E.Cause(err, "starting tun stack")
+		if t.captureDeferred {
+			// Activation is owned by the capture coordinator; see the deferred
+			// branch in StartStateStart. Nothing to start here.
+			break
 		}
-		monitor.Start("starting tun interface")
-		err = t.tunIf.Start()
-		monitor.Finish()
-		if err != nil {
-			return E.Cause(err, "starting TUN interface")
-		}
-		if t.autoRedirect != nil {
-			monitor.Start("initialize auto-redirect")
-			err := t.autoRedirect.Start()
-			monitor.Finish()
-			if err != nil {
-				return E.Cause(err, "auto-redirect")
-			}
-			t.captureActive = true
+		if err := t.startTunCapture(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -541,6 +483,15 @@ func (t *Inbound) updateRouteAddressSet(it adapter.RuleSet) {
 	t.routeAddressSet = routeAddressSet
 	t.routeExcludeAddressSet = routeExcludeAddressSet
 	t.routeAddressSetAccess.Unlock()
+	t.captureAccess.RLock()
+	autoRedirectStarted := t.autoRedirectStarted
+	t.captureAccess.RUnlock()
+	if !autoRedirectStarted {
+		// TUN is not currently capturing (deferred or torn down). The recomputed
+		// address sets are already stored; startTunCapture picks them up on the
+		// next activation. Avoid poking an unstarted redirect.
+		return
+	}
 	err := t.autoRedirect.UpdateRouteAddressSet()
 	if err != nil {
 		t.logger.Error("update route address set: ", err)
@@ -560,7 +511,9 @@ func (t *Inbound) routeAddressSetPrefixes() (include []netip.Prefix, exclude []n
 }
 
 func (t *Inbound) InterfaceUpdated(ctx context.Context) {
+	t.captureAccess.RLock()
 	tunStack := t.tunStack
+	t.captureAccess.RUnlock()
 	if tunStack != nil {
 		tunStack.ResetNetwork()
 	}

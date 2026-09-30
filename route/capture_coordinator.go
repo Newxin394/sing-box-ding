@@ -4,6 +4,7 @@ package route
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -64,11 +65,35 @@ func (s *captureCoordinatorService) initializeCurrent() error {
 	}
 	defaultInterface := s.network.DefaultNetworkInterface()
 	mode, class, ok := s.policy.Select(defaultInterface, s.network.NetworkInterfaces())
-	if !ok {
-		return nil
+	name := ""
+	if defaultInterface != nil {
+		name = defaultInterface.Name
 	}
-	s.logger.Info("capture coordinator: initial interface ", defaultInterface.Name, " class=", class, " mode=", mode)
-	return s.coord.Initialize(mode)
+	s.last = name
+	if !ok {
+		// Unknown network class. Because both backends deferred self-activation,
+		// leaving nothing active would blackhole all traffic. Fall back to TC,
+		// the proven default capture path, instead of guessing per-class.
+		s.logger.Warn("capture coordinator: unknown default interface ", name, "; falling back to TC capture")
+		mode = capture.ModeTC
+	}
+	s.logger.Info("capture coordinator: initial interface ", name, " class=", class, " mode=", mode)
+	if err := s.coord.Initialize(mode); err != nil {
+		if mode == capture.ModeNone {
+			return err
+		}
+		// The selected backend failed to activate. Try the other one so the
+		// device is not left without any capture path.
+		fallback := capture.ModeTUN
+		if mode == capture.ModeTUN {
+			fallback = capture.ModeTC
+		}
+		s.logger.Error("capture coordinator: initialize ", mode, " failed (", err, "); trying fallback ", fallback)
+		if fbErr := s.coord.Initialize(fallback); fbErr != nil {
+			return errors.Join(err, fbErr)
+		}
+	}
+	return nil
 }
 
 func (s *captureCoordinatorService) requestCurrent() error {

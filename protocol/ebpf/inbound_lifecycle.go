@@ -196,8 +196,10 @@ func (i *Inbound) startInbound() error {
 				return E.Cause(err, "prepare safe TC eBPF bypass_selector state")
 			}
 		}
-		if err = backend.Enable(); err != nil {
-			return err
+		if !i.captureDeferred {
+			if err = backend.Enable(); err != nil {
+				return err
+			}
 		}
 	}
 	if backend != nil || i.cgroupBackendInstance() != nil || i.sharedRewriteInstance() != nil {
