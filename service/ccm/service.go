@@ -213,7 +213,8 @@ func (s *Service) Start(stage adapter.StartStage) error {
 	if s.usageTracker != nil {
 		err = s.usageTracker.Load()
 		if err != nil {
-			s.logger.Warn("load usage statistics: ", err)
+			s.logger.Error("load usage statistics: ", err, ", usage tracking and saving disabled")
+			s.usageTracker = nil
 		}
 	}
 
