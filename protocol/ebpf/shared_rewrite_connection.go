@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -78,18 +79,22 @@ func (s *sharedRewrite) logMissingSharedTCPRedirect(
 }
 
 func (s *sharedRewrite) NewPacket(buffer *buf.Buffer, oob []byte, source M.Socksaddr) {
+	s.handlePacket(buffer, oob, source, false)
+}
+
+func (s *sharedRewrite) handlePacket(buffer *buf.Buffer, oob []byte, source M.Socksaddr, takeOwnership bool) bool {
 	backend := s.sharedBackendInstance()
 	if backend == nil {
-		return
+		return false
 	}
 	tokenAddress, _, _, err := packetDestinationsFromOOB(oob)
 	if err != nil {
 		s.udpWarnings.packetInfo.warn(s.inbound.logger, "read shared-network UDP token address: ", err)
-		return
+		return false
 	}
 	client := source.AddrPort()
 	tokenDestination := netip.AddrPortFrom(tokenAddress, s.listeners.selectedPort())
-	cached, bindingReady, loaded := s.sharedUDPClientTable.cachedPacketState(client, tokenAddress)
+	key, cached, bindingReady, loaded := s.sharedUDPClientTable.cachedPacketState(client, tokenAddress)
 	original := cached.original
 	flow := cached.sharedFlow
 	retainedFlow := false
@@ -97,18 +102,40 @@ func (s *sharedRewrite) NewPacket(buffer *buf.Buffer, oob []byte, source M.Socks
 		original, flow, err = backend.LookupFlow(ECommon.ProtocolUDP, client, tokenDestination)
 		if err != nil {
 			s.udpWarnings.originalDestination.warn(s.inbound.logger, "lookup shared-network UDP original destination: ", err)
-			return
+			return false
 		}
 		retainedFlow = true
+		key = udpSessionKey{
+			Source:         client,
+			Scope:          udpSessionScopeSharedRewrite,
+			InterfaceIndex: flow.InterfaceIndex(),
+		}
 	}
 	if !bindingReady {
-		released, installed := s.sharedUDPClientTable.setSharedBinding(client, original, tokenAddress, flow)
+		released, installed := s.sharedUDPClientTable.setSharedBinding(key, original, tokenAddress, flow)
 		if retainedFlow && !installed {
 			s.releaseFlow(flow)
 		}
 		s.releaseFlows(released)
 	}
-	s.udpNat.NewPacket([][]byte{buffer.Bytes()}, source, M.SocksaddrFromNetIP(original.Destination), nil)
+	if takeOwnership {
+		s.udpNat.NewPacketBuffer(key, buffer, source, M.SocksaddrFromNetIP(original.Destination), nil)
+		return true
+	}
+	s.udpNat.NewPacket(key, [][]byte{buffer.Bytes()}, source, M.SocksaddrFromNetIP(original.Destination), nil)
+	return false
+}
+
+func (s *sharedRewrite) NewOOBPacketBatch(buffers []*buf.Buffer, oobs [][]byte, sources []M.Socksaddr) {
+	if len(buffers) != len(oobs) || len(buffers) != len(sources) {
+		buf.ReleaseMulti(buffers)
+		return
+	}
+	for index, buffer := range buffers {
+		if !s.handlePacket(buffer, oobs[index], sources[index], true) {
+			buffer.Release()
+		}
+	}
 }
 
 func (s *sharedRewrite) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -118,23 +145,25 @@ func (s *sharedRewrite) NewPacketConnectionEx(ctx context.Context, conn N.Packet
 		Source:      source,
 		Destination: destination,
 	}
-	if clientState, loaded := s.sharedUDPClientTable.load(source.AddrPort()); loaded {
-		metadata.SourceMACAddress = clientState.sourceMACAddress()
+	if key, loaded := udpSessionKeyFromContext(ctx); loaded {
+		if clientState, found := s.sharedUDPClientTable.load(key); found {
+			metadata.SourceMACAddress = clientState.sourceMACAddress()
+		}
 	}
 	s.inbound.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 
-func (s *sharedRewrite) preparePacketConnection(source M.Socksaddr, destination M.Socksaddr, _ any) (bool, context.Context, N.PacketWriter, N.CloseHandlerFunc) {
+func (s *sharedRewrite) preparePacketConnection(key udpSessionKey, source M.Socksaddr, destination M.Socksaddr, _ any) (bool, context.Context, N.PacketWriter, N.CloseHandlerFunc) {
 	ctx := log.ContextWithNewID(s.inbound.ctx)
-	client := source.AddrPort()
-	clientState := s.sharedUDPClientTable.loadOrCreate(client)
+	ctx = context.WithValue(ctx, udpNATContextKey{}, key)
+	clientState := s.sharedUDPClientTable.loadOrCreate(key)
 	writer := &sharedPacketWriter{
 		sharedRewrite: s,
-		client:        client,
+		key:           key,
 		clientState:   clientState,
 	}
 	return true, ctx, writer, func(error) {
-		s.releaseFlows(s.sharedUDPClientTable.deleteShared(client, clientState))
+		s.releaseFlows(s.sharedUDPClientTable.deleteShared(key, clientState))
 	}
 }
 
@@ -159,7 +188,7 @@ func (s *sharedRewrite) releaseFlow(flow *ECommon.SharedNetworkFlowHandle) {
 
 type sharedPacketWriter struct {
 	sharedRewrite *sharedRewrite
-	client        netip.AddrPort
+	key           udpSessionKey
 	clientState   *sharedUDPClientState
 }
 
@@ -176,7 +205,38 @@ func (w *sharedPacketWriter) WritePacket(buffer *buf.Buffer, destination M.Socks
 			return E.Cause(err, "recover missing shared-network UDP token for ", destination)
 		}
 	}
-	return w.sharedRewrite.listeners.writeUDP(buffer.Bytes(), binding.packetInfo, w.client, binding.address)
+	return w.sharedRewrite.listeners.writeUDP(buffer.Bytes(), binding.packetInfo, w.key.Source, binding.address)
+}
+
+func (w *sharedPacketWriter) WritePacketBatch(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
+	if len(buffers) == 0 || len(buffers) != len(destinations) {
+		buf.ReleaseMulti(buffers)
+		return os.ErrInvalid
+	}
+	w.sharedRewrite.lifecycleAccess.RLock()
+	defer w.sharedRewrite.lifecycleAccess.RUnlock()
+	packetInfos := make([][]byte, len(buffers))
+	sources := make([]netip.Addr, len(buffers))
+	for index, destination := range destinations {
+		binding, err := w.ensureReplyBinding(destination.AddrPort())
+		if err != nil {
+			buf.ReleaseMulti(buffers)
+			return E.Cause(err, "recover missing shared-network UDP token for ", destination)
+		}
+		packetInfos[index] = binding.packetInfo
+		sources[index] = binding.address
+	}
+	return w.sharedRewrite.listeners.writeUDPBatch(buffers, packetInfos, w.key.Source, sources)
+}
+
+var _ N.PacketBatchWriter = (*sharedPacketWriter)(nil)
+
+func (w *sharedPacketWriter) ensureReplyBinding(destination netip.AddrPort) (sharedUDPRedirectBinding, error) {
+	binding, loaded := w.clientState.redirectBinding(destination)
+	if loaded {
+		return binding, nil
+	}
+	return w.reserveReplyBinding(destination)
 }
 
 func (w *sharedPacketWriter) reserveReplyBinding(destination netip.AddrPort) (sharedUDPRedirectBinding, error) {
@@ -197,7 +257,7 @@ func (w *sharedPacketWriter) reserveReplyBinding(destination netip.AddrPort) (sh
 		return sharedUDPRedirectBinding{}, err
 	}
 	released, installed := w.sharedRewrite.sharedUDPClientTable.setSharedReplyBinding(
-		w.client,
+		w.key,
 		w.clientState,
 		ECommon.OriginalDestination{Destination: destination, SourceMAC: sourceMAC},
 		redirectAddress,

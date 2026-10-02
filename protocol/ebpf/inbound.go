@@ -20,7 +20,6 @@ import (
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
-	udpnat "github.com/sagernet/sing/common/udpnat2"
 	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 )
@@ -72,11 +71,12 @@ type Inbound struct {
 	processInfoCache         *processInfoCache
 	usePlatformProcessFinder bool
 	listeners                internalListenerSet
-	udpNat                   *udpnat.Service
+	udpNat                   *udpNATService
 	tcDataPlane              *tcDataPlane
 	captureDeferred          bool
 	captureDeferredState     atomic.Bool
 	udpTimeout               time.Duration
+	udpFragment              bool
 	enableTCP                bool
 	enableUDP                bool
 	localDNSMode             string
@@ -375,8 +375,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if options.UDPTimeout != 0 {
 		udpTimeout = time.Duration(options.UDPTimeout)
 	}
+	inbound.udpFragment = options.UDPFragment != nil && *options.UDPFragment
 	inbound.udpTimeout = udpTimeout
-	inbound.udpNat = udpnat.New(inbound, inbound.preparePacketConnection, udpTimeout, false)
+	if udpTimeout < 5*time.Second {
+		return nil, E.New("eBPF UDP timeout must be at least 5s: ", udpTimeout)
+	}
+	inbound.udpNat = newUDPNATService(inbound, inbound.preparePacketConnection, udpTimeout)
 	return inbound, nil
 }
 

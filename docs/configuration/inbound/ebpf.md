@@ -77,7 +77,12 @@ Enabled transport protocols, `tcp` and/or `udp`. Both are enabled by default.
 
 #### udp_timeout
 
-UDP session timeout. Default is `5m`.
+UDP session timeout. Default is `5m`. Values below `5s` are rejected.
+
+#### udp_fragment
+
+Allow the internal transparent UDP sockets to fragment oversized datagrams.
+The default is `false`.
 
 #### tc_priority
 

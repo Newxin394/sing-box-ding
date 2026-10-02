@@ -12,7 +12,6 @@ import (
 
 	"github.com/sagernet/netlink"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
-	udpnat "github.com/sagernet/sing/common/udpnat2"
 
 	"github.com/cilium/ebpf/link"
 )
@@ -138,7 +137,8 @@ func TestInboundTCCloseRetriesOwnedResources(t *testing.T) {
 				routing:     &tcPolicyRouting{lock: routingLock}, delivery: &tcDeliveryLink{},
 			}
 			i := &Inbound{}
-			i.udpNat = udpnat.New(i, i.preparePacketConnection, time.Minute, false)
+			i.udpTimeout = time.Minute
+			i.udpNat = newUDPNATService(i, i.preparePacketConnection, time.Minute)
 			i.setTCDataPlane(d)
 			closeFirst := i.Close
 			if startup {

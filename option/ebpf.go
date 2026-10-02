@@ -8,8 +8,11 @@ import (
 )
 
 type EBPFInboundOptions struct {
-	Network       NetworkList                `json:"network,omitempty"`
-	UDPTimeout    UDPTimeoutCompat           `json:"udp_timeout,omitempty"`
+	Network    NetworkList      `json:"network,omitempty"`
+	UDPTimeout UDPTimeoutCompat `json:"udp_timeout,omitempty"`
+	// UDPFragment controls whether internal transparent UDP sockets may
+	// fragment oversized datagrams. Omitted keeps fragmentation disabled.
+	UDPFragment   *bool                      `json:"udp_fragment,omitempty"`
 	TCPriority    EBPFTCPriority             `json:"tc_priority,omitempty"`
 	PreMatch      bool                       `json:"pre_match,omitempty"`
 	BypassRuleSet badoption.Listable[string] `json:"bypass_rule_set,omitempty" reference:"rule_set"`

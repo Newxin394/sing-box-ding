@@ -573,7 +573,10 @@ func (i *Inbound) closeResources() error {
 		}
 	}
 	listenerErr := i.closeListeners()
-	i.udpNat.Purge()
+	var udpNATErr error
+	if i.udpNat != nil {
+		udpNATErr = i.udpNat.Close()
+	}
 	i.udpReplySockets.stopSweeper()
 	udpReplySocketErr := i.udpReplySockets.close()
 	dataPlaneErr := i.closeTakenTCDataPlane(dataPlane)
@@ -593,7 +596,7 @@ func (i *Inbound) closeResources() error {
 		processTrackerErr = i.processTracker.Close()
 		i.processTracker = nil
 	}
-	return E.Errors(monitorErr, preMatchErr, sharedRewriteErr, disableErr, listenerErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, selfBypassErr)
+	return E.Errors(monitorErr, preMatchErr, sharedRewriteErr, disableErr, listenerErr, udpNATErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, selfBypassErr)
 }
 
 func (i *Inbound) prepareCgroupBackend() error {

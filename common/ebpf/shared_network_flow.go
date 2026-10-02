@@ -14,6 +14,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// InterfaceIndex reports the ingress interface encoded in this flow handle.
+// It lets protocol-level session state keep the kernel flow identity intact
+// without exposing the ABI key structure.
+func (h *SharedNetworkFlowHandle) InterfaceIndex() uint32 {
+	if h == nil {
+		return 0
+	}
+	return h.originalKey.InterfaceIndex
+}
+
 func (b *SharedNetworkBackend) LookupFlow(
 	protocol uint8,
 	client netip.AddrPort,

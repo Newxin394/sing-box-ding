@@ -11,13 +11,23 @@ import (
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 )
 
+func testUDPSessionKey(client netip.AddrPort, cookie uint64, interfaceIndex uint32) udpSessionKey {
+	return udpSessionKey{
+		Source:         client,
+		Scope:          udpSessionScopeLocalTC,
+		SocketCookie:   cookie,
+		InterfaceIndex: interfaceIndex,
+	}
+}
+
 func TestUDPDirectBinding(t *testing.T) {
 	var table udpClientTable
 	client := netip.MustParseAddrPort("192.0.2.10:53000")
 	destination := netip.MustParseAddrPort("1.1.1.1:53")
 	sourceMAC := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
-	table.setDirectBinding(client, destination, sourceMAC, 42)
-	state, loaded := table.load(client)
+	key := testUDPSessionKey(client, 42, 7)
+	table.setDirectBinding(key, destination, sourceMAC, 42)
+	state, loaded := table.load(key)
 	if !loaded {
 		t.Fatal("client state was not created")
 	}
@@ -37,12 +47,13 @@ func TestUDPCgroupBindingLifecycle(t *testing.T) {
 	client := netip.MustParseAddrPort("192.0.2.10:53000")
 	destination := netip.MustParseAddrPort("1.1.1.1:53")
 	redirect := netip.MustParseAddr("127.128.0.7")
-	table.setCgroupBinding(client, commonEBPF.OriginalDestination{
+	key := udpSessionKey{Source: client, Scope: udpSessionScopeLocalCgroup, SocketCookie: 42}
+	table.setCgroupBinding(key, commonEBPF.OriginalDestination{
 		Destination:  destination,
 		ConnectedUDP: true,
 		SocketCookie: 42,
 	}, redirect)
-	state, loaded := table.load(client)
+	state, loaded := table.load(key)
 	if !loaded || !state.isCgroupDataPlane() {
 		t.Fatal("cgroup client state was not created")
 	}
@@ -50,7 +61,7 @@ func TestUDPCgroupBindingLifecycle(t *testing.T) {
 	if !loaded || binding.redirectAddress != redirect || !binding.connected {
 		t.Fatalf("unexpected cgroup binding: %+v", binding)
 	}
-	released := table.delete(client, state)
+	released := table.delete(key, state)
 	if len(released) != 1 || released[0] != redirect {
 		t.Fatalf("unexpected released redirects: %v", released)
 	}
@@ -147,16 +158,17 @@ func TestUDPDirectReplyBindingChecksGeneration(t *testing.T) {
 	client := netip.MustParseAddrPort("192.0.2.10:53000")
 	base := netip.MustParseAddrPort("1.1.1.1:53")
 	reply := netip.MustParseAddrPort("8.8.8.8:53")
-	table.setDirectBinding(client, base, nil, 0)
-	state, _ := table.load(client)
-	if !table.setDirectReplyBinding(client, state, reply) {
+	key := testUDPSessionKey(client, 0, 7)
+	table.setDirectBinding(key, base, nil, 0)
+	state, _ := table.load(key)
+	if !table.setDirectReplyBinding(key, state, reply) {
 		t.Fatal("reply binding was not installed")
 	}
 	if binding, loaded := state.redirectBinding(reply); !loaded || !binding.replyAlias {
 		t.Fatalf("unexpected reply binding: %+v", binding)
 	}
-	table.delete(client, state)
-	if table.setDirectReplyBinding(client, state, netip.MustParseAddrPort("9.9.9.9:53")) {
+	table.delete(key, state)
+	if table.setDirectReplyBinding(key, state, netip.MustParseAddrPort("9.9.9.9:53")) {
 		t.Fatal("closed session was resurrected")
 	}
 }
@@ -206,7 +218,7 @@ func TestUDPClientTableShardsSpreadAcrossClientAddress(t *testing.T) {
 			netip.AddrFrom4([4]byte{192, 168, byte(i >> 8), byte(i)}),
 			51413,
 		)
-		counts[table.clientShard(client)]++
+		counts[table.clientShard(testUDPSessionKey(client, 0, 0))]++
 	}
 	if len(counts) < 2 {
 		t.Fatalf(

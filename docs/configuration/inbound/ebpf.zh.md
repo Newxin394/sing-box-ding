@@ -76,7 +76,11 @@ eBPF 入站不使用[监听字段](/zh/configuration/shared/listen/)。
 
 #### udp_timeout
 
-UDP 会话超时，默认 `5m`。
+UDP 会话超时，默认 `5m`。小于 `5s` 的值会被拒绝。
+
+#### udp_fragment
+
+允许内部透明 UDP socket 对超大数据报进行分片，默认值为 `false`。
 
 #### tc_priority
 

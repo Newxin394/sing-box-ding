@@ -64,6 +64,31 @@ type BypassRuleSetBackendState struct {
 	Known   bool   `json:"known"`
 }
 
+// UDPNATDiagnostics reports userspace UDP NAT state. Session counters come
+// from the NAT cache; queue and release counters are updated on the packet
+// and lifecycle paths without polling the kernel.
+type UDPNATDiagnostics struct {
+	ActiveSessions                 int    `json:"active_sessions"`
+	CreatedSessions                uint64 `json:"created_sessions"`
+	CapacityEvictions              uint64 `json:"capacity_evictions"`
+	QueueDrops                     uint64 `json:"queue_drops"`
+	SocketReleaseEvents            uint64 `json:"socket_release_events"`
+	SocketReleaseMatched           uint64 `json:"socket_release_matched"`
+	PendingReleaseCapacityRejected uint64 `json:"pending_release_capacity_rejected"`
+	ReleaseNotificationDrops       uint64 `json:"release_notification_drops"`
+}
+
+func (d *UDPNATDiagnostics) add(other UDPNATDiagnostics) {
+	d.ActiveSessions += other.ActiveSessions
+	d.CreatedSessions += other.CreatedSessions
+	d.CapacityEvictions += other.CapacityEvictions
+	d.QueueDrops += other.QueueDrops
+	d.SocketReleaseEvents += other.SocketReleaseEvents
+	d.SocketReleaseMatched += other.SocketReleaseMatched
+	d.PendingReleaseCapacityRejected += other.PendingReleaseCapacityRejected
+	d.ReleaseNotificationDrops += other.ReleaseNotificationDrops
+}
+
 // EBPFDiagnostics is one running eBPF inbound's actual interception state,
 // as distinct from the static kernel-capability probe `sing-box tools ebpf
 // status` reports: answering "is this configured inbound intercepting
@@ -174,6 +199,7 @@ type EBPFDiagnostics struct {
 	// clients, not the number of destination bindings or flows any one
 	// client may have open (a single client can hold several of those).
 	UDPSessionCount int                        `json:"udp_session_count"`
+	UDPNAT          UDPNATDiagnostics          `json:"udp_nat"`
 	UDPReplySockets udpReplySocketPoolSnapshot `json:"udp_reply_sockets"`
 
 	Counters EBPFCounters `json:"counters"`
@@ -382,8 +408,14 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 	i.bypassRuleSetAccess.Unlock()
 
 	diagnostics.UDPSessionCount = i.udpClientTable.count()
+	if i.udpNat != nil {
+		diagnostics.UDPNAT.add(i.udpNat.diagnostics())
+	}
 	if shared := i.sharedRewriteInstance(); shared != nil {
 		diagnostics.UDPSessionCount += shared.sharedUDPClientTable.count()
+		if shared.udpNat != nil {
+			diagnostics.UDPNAT.add(shared.udpNat.diagnostics())
+		}
 	}
 	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
 
@@ -536,6 +568,11 @@ func (d EBPFDiagnostics) WriteText(w io.Writer) error {
 	}
 	lines = append(lines, fmt.Sprintf("bypass_rule_set: consistent=%t pending=%t", d.BypassRuleSetConsistent, d.BypassRuleSetPending))
 	lines = append(lines, fmt.Sprintf("UDP sessions: %d", d.UDPSessionCount))
+	lines = append(lines, fmt.Sprintf(
+		"UDP NAT: active=%d created=%d evictions=%d queue_drops=%d socket_release=%d matched=%d pending_release_rejected=%d",
+		d.UDPNAT.ActiveSessions, d.UDPNAT.CreatedSessions, d.UDPNAT.CapacityEvictions, d.UDPNAT.QueueDrops,
+		d.UDPNAT.SocketReleaseEvents, d.UDPNAT.SocketReleaseMatched, d.UDPNAT.PendingReleaseCapacityRejected,
+	))
 	lines = append(lines, fmt.Sprintf(
 		"UDP reply sockets: count=%d peak=%d evicted=%d capacity_rejected=%d",
 		d.UDPReplySockets.Count, d.UDPReplySockets.Peak, d.UDPReplySockets.Evicted, d.UDPReplySockets.CapacityRejected,

@@ -7420,6 +7420,9 @@
             "udp_timeout": {
               "$ref": "#/$defs/UDPTimeout"
             },
+            "udp_fragment": {
+              "type": "boolean"
+            },
             "tc_priority": {
               "type": "integer",
               "minimum": 1,

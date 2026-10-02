@@ -6,13 +6,17 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	"github.com/sagernet/sing-box/common/listener"
+	"github.com/sagernet/sing-box/common/udpio"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
@@ -39,14 +43,18 @@ func (i *Inbound) newInternalListener(
 		Logger:  i.logger,
 		Network: []string{network},
 		Listen: option.ListenOptions{
-			Listen:     common.Ptr(badoption.Addr(listenAddress)),
-			ListenPort: port,
+			Listen:             common.Ptr(badoption.Addr(listenAddress)),
+			ListenPort:         port,
+			UDPFragmentDefault: i.udpFragment,
 		},
 		ConnectionHandler:   handler,
 		OOBPacketHandler:    handler,
 		DisablePacketOutput: true,
 		DisableLog:          true,
-		SocketControl:       i.socketControl(ipv6Listener),
+		SocketControl: control.Append(
+			control.UDPSocketBuffer(listener.UDPSocketBufferSize()),
+			i.socketControl(ipv6Listener),
+		),
 	})
 }
 
@@ -65,11 +73,14 @@ func (i *Inbound) startTCListeners() error {
 }
 
 type internalListenerSet struct {
-	tcp4 *listener.Listener
-	tcp6 *listener.Listener
-	udp4 *listener.Listener
-	udp6 *listener.Listener
-	port uint16
+	access    sync.RWMutex
+	tcp4      *listener.Listener
+	tcp6      *listener.Listener
+	udp4      *listener.Listener
+	udp6      *listener.Listener
+	udp4Batch udpio.OOBPacketBatchWriter
+	udp6Batch udpio.OOBPacketBatchWriter
+	port      uint16
 }
 
 func (s *internalListenerSet) start(
@@ -79,7 +90,9 @@ func (s *internalListenerSet) start(
 	enableIPv6 bool,
 	newListener func(network string, ipv6 bool, port uint16) *listener.Listener,
 ) error {
-	if !s.isClosed() || s.port != 0 {
+	s.access.Lock()
+	defer s.access.Unlock()
+	if !s.isClosedLocked() || s.port != 0 {
 		return E.New("internal eBPF listeners are already started")
 	}
 	type listenerSpec struct {
@@ -110,6 +123,16 @@ func (s *internalListenerSet) start(
 		if err := current.Start(); err != nil {
 			return err
 		}
+		if spec.network == N.NetworkUDP {
+			batchWriter, created := udpio.NewOOBPacketBatchWriter(current.UDPConn(), spec.ipv6)
+			if created {
+				if spec.ipv6 {
+					s.udp6Batch = batchWriter
+				} else {
+					s.udp4Batch = batchWriter
+				}
+			}
+		}
 		if s.port == 0 {
 			var address net.Addr
 			if spec.network == N.NetworkTCP {
@@ -130,12 +153,16 @@ func (s *internalListenerSet) start(
 }
 
 func (s *internalListenerSet) close() error {
+	s.access.Lock()
 	listeners := []*listener.Listener{s.tcp4, s.tcp6, s.udp4, s.udp6}
 	s.tcp4 = nil
 	s.tcp6 = nil
 	s.udp4 = nil
 	s.udp6 = nil
+	s.udp4Batch = nil
+	s.udp6Batch = nil
 	s.port = 0
+	s.access.Unlock()
 	var closeErr error
 	for _, current := range listeners {
 		if current != nil {
@@ -146,14 +173,24 @@ func (s *internalListenerSet) close() error {
 }
 
 func (s *internalListenerSet) isClosed() bool {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.isClosedLocked()
+}
+
+func (s *internalListenerSet) isClosedLocked() bool {
 	return s.tcp4 == nil && s.tcp6 == nil && s.udp4 == nil && s.udp6 == nil
 }
 
 func (s *internalListenerSet) selectedPort() uint16 {
+	s.access.RLock()
+	defer s.access.RUnlock()
 	return s.port
 }
 
 func (s *internalListenerSet) registerTCTCPListeners(backend *commonEBPF.TCBackend) error {
+	s.access.RLock()
+	defer s.access.RUnlock()
 	for _, registration := range []struct {
 		ipv6     bool
 		listener net.Listener
@@ -193,6 +230,8 @@ func listenerTCP(current *listener.Listener) net.Listener {
 }
 
 func (s *internalListenerSet) writeUDP(payload, packetInfo []byte, client netip.AddrPort, source netip.Addr) error {
+	s.access.RLock()
+	defer s.access.RUnlock()
 	current := s.udp4
 	if source.Is6() {
 		current = s.udp6
@@ -204,7 +243,57 @@ func (s *internalListenerSet) writeUDP(payload, packetInfo []byte, client netip.
 	return err
 }
 
+func (s *internalListenerSet) writeUDPBatch(buffers []*buf.Buffer, packetInfos [][]byte, client netip.AddrPort, sources []netip.Addr) error {
+	if len(buffers) == 0 || len(buffers) != len(packetInfos) || len(buffers) != len(sources) {
+		buf.ReleaseMulti(buffers)
+		return E.New("invalid eBPF UDP OOB batch")
+	}
+	s.access.RLock()
+	defer s.access.RUnlock()
+	type packetGroup struct {
+		buffers      []*buf.Buffer
+		packetInfos  [][]byte
+		destinations []M.Socksaddr
+	}
+	var ipv4Group, ipv6Group packetGroup
+	for index, source := range sources {
+		group := &ipv4Group
+		if source.Is6() {
+			group = &ipv6Group
+		}
+		group.buffers = append(group.buffers, buffers[index])
+		group.packetInfos = append(group.packetInfos, packetInfos[index])
+		group.destinations = append(group.destinations, M.SocksaddrFromNetIP(client))
+	}
+	writeGroup := func(group packetGroup, current *listener.Listener, batchWriter udpio.OOBPacketBatchWriter) error {
+		if len(group.buffers) == 0 {
+			return nil
+		}
+		if current == nil {
+			buf.ReleaseMulti(group.buffers)
+			return E.New("eBPF UDP redirect listener is unavailable for batch address family")
+		}
+		if batchWriter != nil {
+			return batchWriter.WriteOOBPacketBatch(group.buffers, group.packetInfos, group.destinations)
+		}
+		defer buf.ReleaseMulti(group.buffers)
+		for index, buffer := range group.buffers {
+			if _, _, err := current.UDPConn().WriteMsgUDPAddrPort(buffer.Bytes(), group.packetInfos[index], group.destinations[index].AddrPort()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := writeGroup(ipv4Group, s.udp4, s.udp4Batch); err != nil {
+		buf.ReleaseMulti(ipv6Group.buffers)
+		return err
+	}
+	return writeGroup(ipv6Group, s.udp6, s.udp6Batch)
+}
+
 func (s *internalListenerSet) String() string {
+	s.access.RLock()
+	defer s.access.RUnlock()
 	var listeners []string
 	if s.tcp4 != nil {
 		listeners = append(listeners, "tcp4="+s.tcp4.TCPListener().Addr().String())
