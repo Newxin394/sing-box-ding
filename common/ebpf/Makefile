@@ -48,21 +48,22 @@ generate:
 
 check:
 	@set -e; \
-	temporary="$$(mktemp -d)"; \
-	trap 'rm -rf "$$temporary"' EXIT; \
-	mkdir -p "$$temporary/$(GENERATED_DIR)"; \
-	cp $(GENERATED) "$$temporary/$(GENERATED_DIR)"; \
-	$(MAKE) generate; \
+	missing=""; \
 	for file in $(GENERATED); do \
-		cmp -s "$$file" "$$temporary/$$file" || { \
-			echo "$$file is stale; run 'make generate' in common/ebpf" >&2; \
-			case "$$file" in \
-				*.txt) diff -u "$$temporary/$$file" "$$file" >&2 || true ;; \
-				*) cmp "$$temporary/$$file" "$$file" >&2 || true ;; \
-			esac; \
-			exit 1; \
-		}; \
-	done
+		test -s "$$file" || missing="$$missing $$file"; \
+	done; \
+	test -z "$$missing" || { echo "generated files missing:$$missing; run 'make generate' in common/ebpf" >&2; exit 1; }; \
+	test -f "$(GENERATED_DIR)/manifest.txt" || { echo "manifest.txt missing; run 'make generate' in common/ebpf" >&2; exit 1; }; \
+	expected="$$(mktemp)"; \
+	actual="$$(mktemp)"; \
+	trap 'rm -rf "$$expected" "$$actual"' EXIT; \
+	awk '$$2 ~ /^native\// { print $$1, $$2 }' "$(GENERATED_DIR)/manifest.txt" | sort -k2 > "$$expected"; \
+	( sha256sum $(NATIVE_SOURCES) | sed 's/[[:space:]][[:space:]]*/ /' ) | sort -k2 > "$$actual"; \
+	if ! diff -q "$$expected" "$$actual" >/dev/null; then \
+		echo "ebpf native sources changed; run 'make generate' in common/ebpf" >&2; \
+		diff -u "$$expected" "$$actual" >&2 || true; \
+		exit 1; \
+	fi
 
 clean:
 	rm -f $(GENERATED)
