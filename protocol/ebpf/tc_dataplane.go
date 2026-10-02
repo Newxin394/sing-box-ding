@@ -78,6 +78,7 @@ type tcInterfaceAttachment struct {
 	localLink      link.Link
 	sharedLink     link.Link
 	attachmentType string
+	clsactLease    *tcClsactLease
 	// localICMPFilter/sharedICMPFilter/localICMPLink/sharedICMPLink are the
 	// fakeip_icmp reply filters, attached alongside localFilter/sharedFilter
 	// under the same role and only when backend.FakeIPICMPEnabled(); nil
@@ -97,6 +98,7 @@ type tcDeliveryLink struct {
 	redirect      netlink.Link
 	delivery      netlink.Link
 	filter        *netlink.BpfFilter
+	clsactLease   *tcClsactLease
 	sysctls       []tcSysctlState
 	globalSysctls []tcSysctlState
 }
@@ -934,7 +936,12 @@ func (d *tcDeliveryLink) repair(backend *commonEBPF.TCBackend, priority uint16) 
 		return changed, false, err
 	}
 	if !filterAttached {
-		if err = ensureTCClsact(delivery); err != nil {
+		if d.clsactLease == nil {
+			d.clsactLease, err = acquireTCClsactLease(delivery)
+			if err != nil {
+				return changed, false, err
+			}
+		} else if err = ensureTCClsact(delivery); err != nil {
 			return changed, false, err
 		}
 		d.filter, err = attachTCFilter(
@@ -1190,7 +1197,8 @@ func attachTCInterfaceWithLock(
 			}
 		}
 	}
-	if err = ensureTCClsact(link); err != nil {
+	attachment.clsactLease, err = acquireTCClsactLease(link)
+	if err != nil {
 		return cleanup(E.Cause(err, "ensure TC clsact on interface ", interfaceName))
 	}
 	attachment.attachmentType = "clsact"
@@ -1337,17 +1345,19 @@ func updateTCInterfaceAttachment(
 		sharedSourceMACPolicy,
 		priority,
 		tcInterfaceAttachmentOps{
-			ensureClsact: ensureTCClsact,
-			attachFilter: attachTCFilter,
-			detachFilter: detachTCFilter,
+			ensureClsact:           ensureTCClsact,
+			ensureAttachmentClsact: ensureTCAttachmentClsact,
+			attachFilter:           attachTCFilter,
+			detachFilter:           detachTCFilter,
 		},
 	)
 }
 
 type tcInterfaceAttachmentOps struct {
-	ensureClsact func(netlink.Link) error
-	attachFilter func(netlink.Link, uint32, int, string, uint16, uint16) (*netlink.BpfFilter, error)
-	detachFilter func(*netlink.BpfFilter) error
+	ensureClsact           func(netlink.Link) error
+	ensureAttachmentClsact func(netlink.Link, *tcInterfaceAttachment) error
+	attachFilter           func(netlink.Link, uint32, int, string, uint16, uint16) (*netlink.BpfFilter, error)
+	detachFilter           func(*netlink.BpfFilter) error
 }
 
 func updateTCInterfaceAttachmentWithOps(
@@ -1375,7 +1385,11 @@ func updateTCInterfaceAttachmentWithOps(
 	if attachment.localLink != nil || attachment.sharedLink != nil {
 		return E.New("TC eBPF interface has an inconsistent attachment type")
 	}
-	if err = ops.ensureClsact(link); err != nil {
+	if ops.ensureAttachmentClsact != nil {
+		if err = ops.ensureAttachmentClsact(link, attachment); err != nil {
+			return E.Cause(err, "ensure TC clsact on interface ", attachment.interfaceName)
+		}
+	} else if err = ops.ensureClsact(link); err != nil {
 		return E.Cause(err, "ensure TC clsact on interface ", attachment.interfaceName)
 	}
 	attachment.attachmentType = "clsact"
@@ -1654,6 +1668,9 @@ func (a *tcInterfaceAttachment) resetAttachment() error {
 		return nil
 	}
 	closeErr := E.Errors(a.closeFilters(), a.closeLinks())
+	if !a.hasAttachedResources() {
+		closeErr = E.Errors(closeErr, releaseTCClsactLease(&a.clsactLease))
+	}
 	if closeErr == nil {
 		a.attachmentType = ""
 	}
@@ -1681,7 +1698,7 @@ func (a *tcInterfaceAttachment) hasAttachedResources() bool {
 }
 
 func (a *tcInterfaceAttachment) HasOwnedResources() bool {
-	return a != nil && (a.hasAttachedResources() || a.lockOwned && a.lock != nil)
+	return a != nil && (a.hasAttachedResources() || a.clsactLease != nil || a.lockOwned && a.lock != nil)
 }
 
 func (a *tcInterfaceAttachment) IsClosed() bool { return !a.HasOwnedResources() }
@@ -1695,6 +1712,7 @@ func (a *tcInterfaceAttachment) Close() error {
 	if a.hasAttachedResources() {
 		return closeErr
 	}
+	closeErr = E.Errors(closeErr, releaseTCClsactLease(&a.clsactLease))
 	if a.lockOwned {
 		if err := closeOwned(&a.lock); err != nil {
 			return E.Errors(closeErr, err)
@@ -1844,7 +1862,8 @@ func (d *tcDataPlane) createTCDeliveryLink() (*tcDeliveryLink, error) {
 	if err != nil {
 		return cleanup(err)
 	}
-	if err = ensureTCClsact(delivery.delivery); err != nil {
+	delivery.clsactLease, err = acquireTCClsactLease(delivery.delivery)
+	if err != nil {
 		return cleanup(err)
 	}
 	delivery.filter, err = attachTCFilter(
@@ -2153,21 +2172,26 @@ func restoreTCSysctlStatesOwned(states *[]tcSysctlState) error {
 }
 
 func (d *tcDeliveryLink) IsClosed() bool {
-	return d == nil || d.filter == nil && d.redirect == nil && d.delivery == nil && len(d.sysctls) == 0 && len(d.globalSysctls) == 0
+	return d == nil || d.filter == nil && d.clsactLease == nil && d.redirect == nil && d.delivery == nil && len(d.sysctls) == 0 && len(d.globalSysctls) == 0
 }
 
 func (d *tcDeliveryLink) Close() error {
 	if d == nil {
 		return nil
 	}
-	if err := detachTCFilterOwned(&d.filter); err != nil {
-		return err
+	closeErr := detachTCFilterOwned(&d.filter)
+	if d.filter != nil {
+		return closeErr
+	}
+	closeErr = E.Errors(closeErr, releaseTCClsactLease(&d.clsactLease))
+	if d.clsactLease != nil {
+		return closeErr
 	}
 	if err := restoreTCSysctlStatesOwned(&d.sysctls); err != nil {
-		return err
+		return E.Errors(closeErr, err)
 	}
 	if err := restoreTCSysctlStatesOwned(&d.globalSysctls); err != nil {
-		return err
+		return E.Errors(closeErr, err)
 	}
 	owned := d.redirect
 	if owned == nil {

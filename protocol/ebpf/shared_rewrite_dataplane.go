@@ -82,6 +82,7 @@ type sharedRewriteAttachment struct {
 	egressLink      link.Link
 	restoreLocalnet bool
 	attachmentType  string
+	clsactLease     *tcClsactLease
 	// icmpFilter/icmpLink are the fakeip_icmp shared-reply filter, attached
 	// alongside ingressFilter/ingressLink (same interface, same direction)
 	// only when backend.FakeIPICMPEnabled(); nil whenever that feature is
@@ -455,7 +456,8 @@ func attachSharedRewriteInterfaceWithOptions(
 		}
 		tcxSupport.CompareAndSwap(tcxSupportUnknown, tcxSupportUnavailable)
 	}
-	if err = ensureTCClsact(device); err != nil {
+	attachment.clsactLease, err = acquireTCClsactLease(device)
+	if err != nil {
 		return cleanup(err)
 	}
 	attachment.egressFilter, err = attachTCFilter(device, netlink.HANDLE_MIN_EGRESS, backend.EgressProgramFD(), attachment.egressName, attachment.egressHandle, priority)
@@ -527,15 +529,16 @@ func (a *sharedRewriteAttachment) Close() error {
 	if a == nil {
 		return nil
 	}
-	closeErr := E.Errors(
-		a.closeLinks(),
-		detachTCFilter(a.ingressFilter),
-		detachTCFilter(a.egressFilter),
-		detachTCFilter(a.icmpFilter),
+	closeErr := a.closeLinks()
+	closeErr = E.Errors(closeErr,
+		detachTCFilterOwned(&a.ingressFilter),
+		detachTCFilterOwned(&a.egressFilter),
+		detachTCFilterOwned(&a.icmpFilter),
 	)
-	a.ingressFilter = nil
-	a.egressFilter = nil
-	a.icmpFilter = nil
+	if a.ingressFilter != nil || a.egressFilter != nil || a.icmpFilter != nil {
+		return closeErr
+	}
+	closeErr = E.Errors(closeErr, releaseTCClsactLease(&a.clsactLease))
 	if a.restoreLocalnet {
 		closeErr = E.Errors(closeErr, restoreSharedRewriteLocalnet(a.interfaceName))
 		a.restoreLocalnet = false
