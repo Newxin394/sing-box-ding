@@ -813,7 +813,7 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 					defer b.healthCheckLimiter.Release()
 				}
 				testResult := b.session.test(b.ctx, urlTestSessionKey{tag: tag, link: link}, func() urlTestResult {
-					testCtx, cancel := context.WithTimeout(b.ctx, C.TCPTimeout)
+					testCtx, cancel := context.WithTimeout(b.ctx, C.TCPConnectTimeout)
 					defer cancel()
 					testChan := make(chan urlTestResult, 1)
 					go func() {

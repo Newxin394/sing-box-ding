@@ -28,10 +28,40 @@ type ebpfDiagnosticsProvider interface {
 	DiagnosticsJSON() any
 }
 
+// ebpfMapOccupancyProvider is the optional, on-demand half of the same
+// interface. It is separate from ebpfDiagnosticsProvider on purpose: this
+// request iterates real map entries, so it must never be folded into the
+// cheap status payload that every /ebpf call returns.
+type ebpfMapOccupancyProvider interface {
+	MapOccupancyJSON() any
+}
+
 func ebpfRouter(manager adapter.InboundManager) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getEBPFDiagnostics(manager))
+	r.Get("/maps", getEBPFMapOccupancy(manager))
 	return r
+}
+
+func getEBPFMapOccupancy(manager adapter.InboundManager) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if manager == nil {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, newError("inbound manager unavailable"))
+			return
+		}
+		occupancy := make([]any, 0)
+		for _, inbound := range manager.Inbounds() {
+			provider, ok := inbound.(ebpfMapOccupancyProvider)
+			if !ok {
+				continue
+			}
+			occupancy = append(occupancy, provider.MapOccupancyJSON())
+		}
+		render.JSON(w, r, render.M{
+			"ebpf": occupancy,
+		})
+	}
 }
 
 func getEBPFDiagnostics(manager adapter.InboundManager) func(w http.ResponseWriter, r *http.Request) {

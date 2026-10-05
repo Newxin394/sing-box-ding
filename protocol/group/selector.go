@@ -161,7 +161,7 @@ func (s *Selector) Start() error {
 			s.providers[tag] = provider
 		}
 	}
-	tags := slices.Clone(s.Dependencies())
+	tags := s.visibleDependencyTags()
 	if len(tags)+len(s.providerTags) == 0 {
 		return E.New("missing outbound and provider tags")
 	}
@@ -486,7 +486,7 @@ func (s *Selector) onProviderUpdated(tag string) error {
 	s.providerAccess.Lock()
 	tags, outbounds, outboundsCache, err := collectProviderOutbounds(
 		tag,
-		s.Dependencies(),
+		s.visibleDependencyTags(),
 		s.outbound,
 		s.providers,
 		s.providerTags,
@@ -522,12 +522,23 @@ func (s *Selector) onProviderUpdated(tag string) error {
 	return nil
 }
 
+func (s *Selector) visibleDependencyTags() []string {
+	tags := slices.Clone(s.Dependencies())
+	return slices.DeleteFunc(tags, func(tag string) bool {
+		return tag == s.udpOutboundTag || tag == s.udpFallbackTag
+	})
+}
+
+func (s *Selector) cacheSelectionVisible(selected string) bool {
+	return selected != "" && selected != s.udpOutboundTag && selected != s.udpFallbackTag
+}
+
 func (s *Selector) outboundSelect(outbounds map[string]adapter.Outbound, tags []string) (adapter.Outbound, error) {
 	if s.Tag() != "" {
 		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
 		if cacheFile != nil {
 			selected := cacheFile.LoadSelected(s.Tag())
-			if selected != "" {
+			if s.cacheSelectionVisible(selected) {
 				detour, loaded := outbounds[selected]
 				if loaded {
 					return detour, nil

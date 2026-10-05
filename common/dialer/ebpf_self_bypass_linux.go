@@ -3,14 +3,18 @@
 package dialer
 
 import (
+	"net"
+	"sync"
 	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
+	N "github.com/sagernet/sing/common/network"
 )
 
 func PrepareEBPFSelfBypass(networkManager adapter.NetworkManager, inbounds []option.Inbound) error {
@@ -78,6 +82,124 @@ func AppendEBPFSelfBypass(networkManager adapter.NetworkManager, controlFunc con
 		return tracker.RegisterSocket(rawConn)
 	}
 	return control.Append(controlFunc, selfBypassFunc)
+}
+
+func EBPFSelfBypassCleanup(networkManager adapter.NetworkManager, rawConn syscall.RawConn) func() {
+	provider, loaded := networkManager.(interface {
+		EBPFSelfBypass() *commonEBPF.SelfBypass
+	})
+	if !loaded {
+		return nil
+	}
+	tracker := provider.EBPFSelfBypass()
+	if tracker == nil || tracker.HasSocketReleaseHook() {
+		return nil
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() { _ = tracker.UnregisterSocket(rawConn) })
+	}
+}
+
+func bindEBPFSelfBypassConnLifecycle(networkManager adapter.NetworkManager, conn net.Conn) net.Conn {
+	if lazy, loaded := conn.(*slowOpenConn); loaded {
+		if cleanup := ebpfSelfBypassCleanupForLazyConn(networkManager, lazy); cleanup != nil {
+			lazy.setCloseHandler(cleanup)
+		}
+		return conn
+	}
+	syscallConn, loaded := conn.(syscall.Conn)
+	if !loaded {
+		return conn
+	}
+	rawConn, err := syscallConn.SyscallConn()
+	if err != nil {
+		return conn
+	}
+	cleanup := EBPFSelfBypassCleanup(networkManager, rawConn)
+	if cleanup == nil {
+		return conn
+	}
+	return &selfBypassConn{Conn: conn, cleanup: cleanup, rawConn: rawConn}
+}
+
+func ebpfSelfBypassCleanupForLazyConn(networkManager adapter.NetworkManager, conn *slowOpenConn) func(*net.TCPConn) {
+	provider, loaded := networkManager.(interface {
+		EBPFSelfBypass() *commonEBPF.SelfBypass
+	})
+	if !loaded {
+		return nil
+	}
+	tracker := provider.EBPFSelfBypass()
+	if tracker == nil || tracker.HasSocketReleaseHook() {
+		return nil
+	}
+	var once sync.Once
+	return func(tcpConn *net.TCPConn) {
+		once.Do(func() {
+			rawConn, err := tcpConn.SyscallConn()
+			if err == nil {
+				_ = tracker.UnregisterSocket(rawConn)
+			}
+		})
+	}
+}
+
+type selfBypassConn struct {
+	net.Conn
+	cleanup func()
+	rawConn syscall.RawConn
+}
+
+func (c *selfBypassConn) Close() error {
+	if c.cleanup != nil {
+		c.cleanup()
+	}
+	return c.Conn.Close()
+}
+
+func (c *selfBypassConn) SyscallConn() (syscall.RawConn, error) { return c.rawConn, nil }
+func (c *selfBypassConn) Upstream() any                         { return c.Conn }
+func (c *selfBypassConn) ReaderReplaceable() bool               { return true }
+func (c *selfBypassConn) WriterReplaceable() bool               { return true }
+
+type selfBypassPacketConn struct {
+	N.NetPacketConn
+	cleanup func()
+	rawConn syscall.RawConn
+}
+
+func newSelfBypassPacketConn(conn net.PacketConn, cleanup func(), rawConn syscall.RawConn) *selfBypassPacketConn {
+	packetConn, loaded := conn.(N.NetPacketConn)
+	if !loaded {
+		packetConn = bufio.NewPacketConn(conn)
+	}
+	return &selfBypassPacketConn{NetPacketConn: packetConn, cleanup: cleanup, rawConn: rawConn}
+}
+
+func (c *selfBypassPacketConn) Close() error {
+	if c.cleanup != nil {
+		c.cleanup()
+	}
+	return c.NetPacketConn.Close()
+}
+
+func (c *selfBypassPacketConn) SyscallConn() (syscall.RawConn, error) { return c.rawConn, nil }
+
+func bindEBPFSelfBypassPacketConnLifecycle(networkManager adapter.NetworkManager, conn net.PacketConn) net.PacketConn {
+	syscallConn, loaded := conn.(syscall.Conn)
+	if !loaded {
+		return conn
+	}
+	rawConn, err := syscallConn.SyscallConn()
+	if err != nil {
+		return conn
+	}
+	cleanup := EBPFSelfBypassCleanup(networkManager, rawConn)
+	if cleanup == nil {
+		return conn
+	}
+	return newSelfBypassPacketConn(conn, cleanup, rawConn)
 }
 
 func appendEBPFSelfBypass(networkManager adapter.NetworkManager, dialerControl, listenerControl control.Func) (control.Func, control.Func) {

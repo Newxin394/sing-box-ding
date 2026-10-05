@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -143,6 +144,12 @@ func (b *SelfBypass) AttachCgroup(config SelfBypassCgroupConfig) error {
 
 func (b *SelfBypass) CgroupAttached() bool {
 	return b != nil && b.mode.Load() != uint32(SelfBypassUserspace)
+}
+
+// HasSocketReleaseHook reports whether the attached cgroup program set
+// includes a sock_release hook, which owns map cleanup in kernel.
+func (b *SelfBypass) HasSocketReleaseHook() bool {
+	return b != nil && SelfBypassMode(b.mode.Load()) == SelfBypassCgroupSocket
 }
 
 func (b *SelfBypass) Mode() SelfBypassMode {
@@ -358,12 +365,7 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 	if b.sockets == nil || b.CgroupAttached() {
 		return nil
 	}
-	var cookie uint64
-	err := control.Raw(rawConn, func(fd uintptr) error {
-		var err error
-		cookie, err = unix.GetsockoptUint64(int(fd), unix.SOL_SOCKET, unix.SO_COOKIE)
-		return err
-	})
+	cookie, err := socketCookie(rawConn)
 	if err != nil {
 		return E.Cause(err, "read socket cookie for eBPF self-bypass")
 	}
@@ -375,6 +377,39 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 		return E.Cause(err, "register eBPF self-bypass socket")
 	}
 	return nil
+}
+
+// UnregisterSocket removes a userspace-fallback self-bypass registration.
+// Only the cookie-hook mode has a kernel release hook that owns cleanup; the
+// connect/sendmsg mode still needs explicit deletion from userspace.
+func (b *SelfBypass) UnregisterSocket(rawConn syscall.RawConn) error {
+	if b == nil {
+		return nil
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.sockets == nil || b.HasSocketReleaseHook() {
+		return nil
+	}
+	cookie, err := socketCookie(rawConn)
+	if err != nil || cookie == 0 {
+		return err
+	}
+	err = b.sockets.Delete(&cookie)
+	if errors.Is(err, CiliumEBPF.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	return err
+}
+
+func socketCookie(rawConn syscall.RawConn) (uint64, error) {
+	var cookie uint64
+	err := control.Raw(rawConn, func(fd uintptr) error {
+		var err error
+		cookie, err = unix.GetsockoptUint64(int(fd), unix.SOL_SOCKET, unix.SO_COOKIE)
+		return err
+	})
+	return cookie, err
 }
 
 func processCgroupExclusive(path string) (bool, error) {

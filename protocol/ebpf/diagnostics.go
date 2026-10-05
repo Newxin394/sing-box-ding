@@ -296,6 +296,112 @@ func (i *Inbound) recordTCUpdateOutcome(outcome tcUpdateOutcome) {
 	i.diagnostics.haveOutcome = true
 }
 
+// MapOccupancyJSON answers an explicit map-occupancy request for this process.
+func (i *Inbound) MapOccupancyJSON() any {
+	report := commonEBPF.InspectMapOccupancy()
+	return EBPFMapOccupancyResponse{
+		Status: report.Status,
+		Error:  report.Error,
+		Maps:   report.Maps,
+		Flow:   i.flowUsageDiagnostics(),
+		UDP:    i.udpStateDiagnostics(),
+	}
+}
+
+// EBPFMapOccupancyResponse pairs the process-wide map walk with this inbound's
+// own userspace accounting, which the map walk cannot see: flow handles and
+// reply sockets retained by userspace are not kernel entries yet.
+type EBPFMapOccupancyResponse struct {
+	Status string                    `json:"status"`
+	Error  string                    `json:"error,omitempty"`
+	Maps   []commonEBPF.MapOccupancy `json:"maps"`
+	Flow   *EBPFFlowUsageDiagnostics `json:"flow,omitempty"`
+	UDP    *EBPFUDPStateDiagnostics  `json:"udp,omitempty"`
+}
+
+// EBPFFlowUsageDiagnostics reports shared-packet-rewrite flow pressure.
+type EBPFFlowUsageDiagnostics struct {
+	Entries      uint32 `json:"entries"`
+	Capacity     uint32 `json:"capacity"`
+	Pressure     string `json:"pressure"`
+	FlowPressure bool   `json:"flow_pressure"`
+}
+
+func (i *Inbound) flowUsageDiagnostics() *EBPFFlowUsageDiagnostics {
+	shared := i.sharedRewriteInstance()
+	if shared == nil {
+		return nil
+	}
+	backend := shared.sharedBackendInstance()
+	if backend == nil {
+		return nil
+	}
+	usage := backend.KnownFlowUsage()
+	if usage.Capacity == 0 {
+		return nil
+	}
+	return &EBPFFlowUsageDiagnostics{
+		Entries:      usage.Entries,
+		Capacity:     usage.Capacity,
+		Pressure:     commonEBPF.MapPressureLevel(usage.Entries, usage.Capacity),
+		FlowPressure: flowUsagePressure(false, usage),
+	}
+}
+
+// EBPFUDPStateDiagnostics reports this inbound's live UDP forwarding state.
+type EBPFUDPStateDiagnostics struct {
+	DataPlane             string `json:"data_plane"`
+	ClientCount           int    `json:"client_count"`
+	ReplySocketCount      int64  `json:"reply_socket_count"`
+	ReplySocketCapacity   int64  `json:"reply_socket_capacity"`
+	ReplySocketPeak       int64  `json:"reply_socket_peak"`
+	ReplySocketEvicted    int64  `json:"reply_socket_evicted"`
+	ReplySocketRejected   int64  `json:"reply_socket_capacity_rejected"`
+	ReplySocketPressure   string `json:"reply_socket_pressure"`
+	CgroupCleanupMode     string `json:"cgroup_cleanup_mode,omitempty"`
+	CgroupStorageMode     string `json:"cgroup_storage_mode,omitempty"`
+	CgroupTimeMode        string `json:"cgroup_time_mode,omitempty"`
+	SocketReleaseAttached bool   `json:"socket_release_attached"`
+}
+
+func (i *Inbound) udpStateDiagnostics() *EBPFUDPStateDiagnostics {
+	snapshot := i.udpReplySockets.snapshot()
+	state := &EBPFUDPStateDiagnostics{
+		DataPlane:           i.udpDataPlaneName(),
+		ClientCount:         i.udpClientTable.count(),
+		ReplySocketCount:    snapshot.Count,
+		ReplySocketCapacity: i.udpReplySockets.socketCapacity(),
+		ReplySocketPeak:     snapshot.Peak,
+		ReplySocketEvicted:  snapshot.Evicted,
+		ReplySocketRejected: snapshot.CapacityRejected,
+		ReplySocketPressure: commonEBPF.MapPressureInt64(snapshot.Count, i.udpReplySockets.socketCapacity()),
+	}
+	backend := i.cgroupBackendInstance()
+	if backend != nil && !backend.IsClosed() {
+		state.CgroupCleanupMode = backend.UDPCleanupMode()
+		state.CgroupStorageMode = backend.UDPStorageMode()
+		state.CgroupTimeMode = backend.UDPTimeMode()
+		state.SocketReleaseAttached = state.CgroupCleanupMode == commonEBPF.CgroupUDPCleanupSocketRelease
+	}
+	return state
+}
+
+func (i *Inbound) udpDataPlaneName() string {
+	if i.sharedRewriteInstance() != nil {
+		return sharedDataPlanePacketRewrite
+	}
+	if i.localCgroupEnabled() {
+		return "cgroup"
+	}
+	if i.localTCEnabled() {
+		return "tc"
+	}
+	if i.sharedEnabled {
+		return i.sharedDataPlane
+	}
+	return "disabled"
+}
+
 // DiagnosticsJSON satisfies experimental/clashapi's duck-typed
 // ebpfDiagnosticsProvider interface, so the running Clash API server (when
 // configured) can report this inbound's status without importing this
