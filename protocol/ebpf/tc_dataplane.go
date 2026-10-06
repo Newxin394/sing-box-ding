@@ -2234,18 +2234,6 @@ func (d *tcDataPlane) IsClosed() bool {
 		d.routing == nil && d.delivery == nil && len(d.retiredDeliveries) == 0
 }
 
-// Backend returns the current TC backend, or nil once Close has released it.
-// Reading goes through d.access because Close clears d.backend under the same
-// lock, and cleanup paths must not observe a half-closed backend.
-func (d *tcDataPlane) Backend() *commonEBPF.TCBackend {
-	if d == nil {
-		return nil
-	}
-	d.access.Lock()
-	defer d.access.Unlock()
-	return d.backend
-}
-
 func (d *tcDataPlane) Close() error {
 	if d == nil {
 		return nil

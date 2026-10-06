@@ -87,6 +87,10 @@ type udpClientState struct {
 	closed          bool
 	cgroupDataPlane bool
 	cgroupOriginals map[netip.Addr]commonEBPF.OriginalDestination
+	// tcBackend is the TC backend that created this session's assignments.
+	// Session cleanup uses it directly instead of the data-plane lock, which
+	// interface reconcile holds while every UDP session is being purged.
+	tcBackend *commonEBPF.TCBackend
 }
 
 type udpRedirectBinding struct {
@@ -108,6 +112,7 @@ type tcAssignmentCleanup struct {
 type udpSessionCleanup struct {
 	cgroupRedirects []netip.Addr
 	tcAssignments   []tcAssignmentCleanup
+	tcBackend       *commonEBPF.TCBackend
 }
 
 func (t *udpClientTable) load(key udpSessionKey) (*udpClientState, bool) {
@@ -291,10 +296,12 @@ func (t *udpClientTable) setDirectAssignmentBinding(
 	sourceMAC net.HardwareAddr,
 	assignmentKeyInterfaceIndex uint32,
 	assignment commonEBPF.TCAssignment,
+	backend *commonEBPF.TCBackend,
 ) {
 	state := t.loadOrCreate(key)
 	state.access.Lock()
 	defer state.access.Unlock()
+	state.tcBackend = backend
 	if len(sourceMAC) > 0 {
 		state.sourceMAC = append(state.sourceMAC[:0], sourceMAC...)
 	}
@@ -360,6 +367,8 @@ func (t *udpClientTable) deleteWithCleanup(key udpSessionKey, expected *udpClien
 			})
 		}
 	}
+	backend := expected.tcBackend
+	expected.tcBackend = nil
 	expected.closed = true
 	clear(expected.bindings)
 	clear(expected.cgroupOriginals)
@@ -374,7 +383,7 @@ func (t *udpClientTable) deleteWithCleanup(key udpSessionKey, expected *udpClien
 		}
 	}
 	t.redirectAccess.Unlock()
-	return udpSessionCleanup{cgroupRedirects: redirects, tcAssignments: assignments}
+	return udpSessionCleanup{cgroupRedirects: redirects, tcAssignments: assignments, tcBackend: backend}
 }
 
 func (s *udpClientState) isCgroupDataPlane() bool {

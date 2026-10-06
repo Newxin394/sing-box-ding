@@ -94,7 +94,7 @@ func (i *Inbound) newTCPacket(
 		SocketCookie:   assignment.SocketCookie,
 		InterfaceIndex: assignment.InterfaceIndex,
 	}
-	i.udpClientTable.setDirectAssignmentBinding(key, destination, sourceMAC, assignmentKeyInterfaceIndex, assignment)
+	i.udpClientTable.setDirectAssignmentBinding(key, destination, sourceMAC, assignmentKeyInterfaceIndex, assignment, backend)
 	if takeOwnership {
 		i.udpNat.NewPacketBuffer(key, buffer, source, M.SocksaddrFromNetIP(destination), nil)
 		return true
@@ -145,21 +145,16 @@ func (i *Inbound) prepareTCPacketConnection(
 	return true, ctx, writer, func(error) {
 		cleanup := i.udpClientTable.deleteWithCleanup(key, clientState)
 		i.deleteCgroupUDPRedirects(cleanup.cgroupRedirects)
-		i.deleteTCAssignments(key, cleanup.tcAssignments)
+		i.deleteTCAssignments(key, cleanup.tcBackend, cleanup.tcAssignments)
 	}
 }
 
-func (i *Inbound) deleteTCAssignments(key udpSessionKey, assignments []tcAssignmentCleanup) {
+func (i *Inbound) deleteTCAssignments(key udpSessionKey, backend *commonEBPF.TCBackend, assignments []tcAssignmentCleanup) {
 	if len(assignments) == 0 || (key.Scope != udpSessionScopeLocalTC && key.Scope != udpSessionScopeSharedTC) {
 		return
 	}
-	i.tcDataPlaneAccess.RLock()
-	dataPlane := i.tcDataPlane
-	i.tcDataPlaneAccess.RUnlock()
-	if dataPlane == nil {
-		return
-	}
-	backend := dataPlane.Backend()
+	// A rebuilt data plane closes the old backend; its entries died with its
+	// maps, so a closed backend needs no cleanup.
 	if backend == nil || backend.IsClosed() {
 		return
 	}
