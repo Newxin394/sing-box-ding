@@ -26,7 +26,7 @@ func (i *Inbound) selectRedirectPrefixes() error {
 		loopback.Attrs().Index,
 		unix.AF_INET,
 		redirectIPv4Candidates,
-		i.fakeIPPrefixes(),
+		i.forceInterceptPrefixes(),
 	)
 	if err != nil {
 		return E.Cause(err, "select internal IPv4 redirect prefix")
@@ -36,7 +36,7 @@ func (i *Inbound) selectRedirectPrefixes() error {
 			loopback.Attrs().Index,
 			unix.AF_INET6,
 			redirectIPv6Candidates,
-			i.fakeIPPrefixes(),
+			i.forceInterceptPrefixes(),
 		)
 		if err != nil {
 			return E.Cause(err, "select internal IPv6 redirect prefix")
@@ -65,7 +65,7 @@ func selectRedirectPrefix(
 		if excludedConflict.IsValid() {
 			conflictErr = E.Errors(conflictErr, E.New(
 				"eBPF redirect address ", candidate,
-				" conflicts with FakeIP range ", excludedConflict,
+				" conflicts with force-intercept range ", excludedConflict,
 			))
 			continue
 		}

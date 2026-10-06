@@ -304,6 +304,19 @@ traffic bypasses this inbound.
 
 Bypass private and special-use destinations. Default is `true`.
 
+#### local.bypass_exclude
+
+Destination prefixes force-intercepted before every local bypass decision
+(private address, port, DNS mode, UID and bypass rule-set), for example a
+Tailscale/CGNAT range `100.64.0.0/10`.
+
+At most one IPv4 and one IPv6 prefix is accepted because the kernel keeps one
+force-intercept slot per family. FakeIP uses the same slot: configuring a
+FakeIP range and `bypass_exclude` for the same family is rejected at startup.
+Prefixes overlapping mandatory safety ranges (loopback, `0.0.0.0/8`,
+multicast) are rejected. When local and shared are both enabled, their
+prefixes for one family must be identical.
+
 #### local.bypass_selector
 
 Dynamically enables `bypass_rule_set` for the local TC data plane according to a selector. It requires `local.data_plane: "tc"`; every `bypass_when` member must be a direct outbound contained by the referenced selector.
@@ -416,6 +429,10 @@ does not affect shared IPv4.
 #### shared.bypass_private_address
 
 Bypass private and special-use destinations. Default is `true`.
+
+#### shared.bypass_exclude
+
+Same as `local.bypass_exclude`, for the shared data plane.
 
 #### shared.include_source_cidr
 

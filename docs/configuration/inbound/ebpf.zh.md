@@ -265,6 +265,16 @@ DoT 流量。
 
 绕过私有和特殊用途目标地址，默认 `true`。
 
+#### local.bypass_exclude
+
+这些目标前缀会在所有 local 绕过判断（私有地址、端口、DNS 模式、UID、bypass
+规则集）之前被强制接管，例如 Tailscale/CGNAT 网段 `100.64.0.0/10`。
+
+由于内核每个地址族只有一个强制接管槽，每个地址族最多接受一个前缀。FakeIP 使用
+同一个槽：同一地址族同时配置 FakeIP 范围与 `bypass_exclude` 会在启动时报错。
+与强制安全范围（回环、`0.0.0.0/8`、组播）重叠的前缀会被拒绝。local 与 shared
+同时启用时，同一地址族的前缀必须一致。
+
 #### local.bypass_selector
 
 根据 selector 动态启用 local TC 数据面的 `bypass_rule_set`。该功能要求 `local.data_plane: "tc"`；`bypass_when` 中每个成员都必须是被引用 selector 直接包含的 direct 出站。
@@ -361,6 +371,10 @@ IPv6 连通性可能丢失，而 link-local 通信仍可能可用。启用 `shar
 #### shared.bypass_private_address
 
 绕过私有和特殊用途目标地址，默认 `true`。
+
+#### shared.bypass_exclude
+
+与 `local.bypass_exclude` 相同，作用于 shared 数据面。
 
 #### shared.include_source_cidr
 

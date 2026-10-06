@@ -180,6 +180,9 @@ func validateLocalOptions(enabled bool, options option.EBPFLocalOptions) error {
 	if options.BypassSelector != nil {
 		return E.New("local.bypass_selector requires local interception")
 	}
+	if len(options.BypassExclude) > 0 {
+		return E.New("local.bypass_exclude requires local interception")
+	}
 	if len(options.IncludeUID) > 0 || len(options.IncludeUIDRange) > 0 ||
 		len(options.ExcludeUID) > 0 || len(options.ExcludeUIDRange) > 0 ||
 		len(options.IncludeAndroidUser) > 0 || len(options.IncludePackage) > 0 ||
@@ -392,7 +395,7 @@ func validateSharedOptions(enabled bool, options option.EBPFSharedOptions) error
 
 func hasAnySharedOption(options option.EBPFSharedOptions) bool {
 	return options.DataPlane != "" || options.DNSMode != "" || len(options.Interface) > 0 ||
-		options.IPv6 != nil || options.BypassPrivateAddress != nil ||
+		options.IPv6 != nil || options.BypassPrivateAddress != nil || len(options.BypassExclude) > 0 ||
 		len(options.IncludeSourceCIDR) > 0 || len(options.ExcludeSourceCIDR) > 0 ||
 		len(options.IncludeMACAddress) > 0 || len(options.ExcludeMACAddress) > 0 ||
 		len(options.BypassPort) > 0 || len(options.BypassPortRange) > 0
@@ -438,6 +441,90 @@ func parsePortRanges(name string, ports []uint16, ranges []string) ([]commonEBPF
 		}
 	}
 	return merged, nil
+}
+
+// normalizeBypassExclude masks bypass_exclude prefixes and enforces the kernel
+// layout: one force-intercept slot per address family. IPv4-mapped IPv6 input
+// is converted to IPv4. Prefixes touching mandatory safety ranges are refused
+// because the TC classifier checks force-intercept before those safety paths.
+func normalizeBypassExclude(name string, prefixes []netip.Prefix) (ipv4, ipv6 netip.Prefix, err error) {
+	for _, prefix := range prefixes {
+		if !prefix.IsValid() {
+			return netip.Prefix{}, netip.Prefix{}, E.New("invalid ", name, " prefix")
+		}
+		prefix = prefix.Masked()
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < 96 {
+				return netip.Prefix{}, netip.Prefix{}, E.New(name, " IPv4-mapped prefix is wider than ::ffff:0:0/96: ", prefix)
+			}
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96).Masked()
+		}
+		safety := fakeIPSafetyIPv6Prefixes
+		target := &ipv6
+		family := "IPv6"
+		if prefix.Addr().Is4() {
+			safety = fakeIPSafetyIPv4Prefixes
+			target = &ipv4
+			family = "IPv4"
+		}
+		for _, safetyPrefix := range safety {
+			if prefixesOverlap(prefix, safetyPrefix) {
+				return netip.Prefix{}, netip.Prefix{}, E.New(name, " prefix ", prefix, " overlaps mandatory eBPF safety bypass ", safetyPrefix)
+			}
+		}
+		if target.IsValid() && *target != prefix {
+			return netip.Prefix{}, netip.Prefix{}, E.New(name, " accepts at most one ", family, " prefix; got both ", *target, " and ", prefix)
+		}
+		*target = prefix
+	}
+	return ipv4, ipv6, nil
+}
+
+// resolveBypassExclude merges local and shared bypass_exclude into the shared
+// kernel force-intercept slots. TC socket_assign carries local and shared
+// policy in one control struct, so differing prefixes in one family cannot be
+// represented safely.
+func resolveBypassExclude(localEnabled bool, local []netip.Prefix, sharedEnabled bool, shared []netip.Prefix) (ipv4, ipv6 netip.Prefix, err error) {
+	var localIPv4, localIPv6, sharedIPv4, sharedIPv6 netip.Prefix
+	if localEnabled {
+		localIPv4, localIPv6, err = normalizeBypassExclude("local.bypass_exclude", local)
+		if err != nil {
+			return netip.Prefix{}, netip.Prefix{}, err
+		}
+	}
+	if sharedEnabled {
+		sharedIPv4, sharedIPv6, err = normalizeBypassExclude("shared.bypass_exclude", shared)
+		if err != nil {
+			return netip.Prefix{}, netip.Prefix{}, err
+		}
+	}
+	if localIPv4.IsValid() && sharedIPv4.IsValid() && localIPv4 != sharedIPv4 {
+		return netip.Prefix{}, netip.Prefix{}, E.New("local and shared IPv4 bypass_exclude prefixes differ: ", localIPv4, " vs ", sharedIPv4)
+	}
+	if localIPv6.IsValid() && sharedIPv6.IsValid() && localIPv6 != sharedIPv6 {
+		return netip.Prefix{}, netip.Prefix{}, E.New("local and shared IPv6 bypass_exclude prefixes differ: ", localIPv6, " vs ", sharedIPv6)
+	}
+	ipv4 = localIPv4
+	if !ipv4.IsValid() {
+		ipv4 = sharedIPv4
+	}
+	ipv6 = localIPv6
+	if !ipv6.IsValid() {
+		ipv6 = sharedIPv6
+	}
+	return ipv4, ipv6, nil
+}
+
+func validateBypassExcludeFakeIP(bypassIPv4, bypassIPv6, fakeIPv4, fakeIPv6 netip.Prefix) error {
+	if bypassIPv4.IsValid() && fakeIPv4.IsValid() {
+		return E.New("IPv4 bypass_exclude ", bypassIPv4, " conflicts with the FakeIP force-intercept prefix ", fakeIPv4,
+			"; use redir-host DNS or remove one of them")
+	}
+	if bypassIPv6.IsValid() && fakeIPv6.IsValid() {
+		return E.New("IPv6 bypass_exclude ", bypassIPv6, " conflicts with the FakeIP force-intercept prefix ", fakeIPv6,
+			"; use redir-host DNS or remove one of them")
+	}
+	return nil
 }
 
 func normalizeSharedOptions(options option.EBPFSharedOptions) (option.EBPFSharedOptions, error) {

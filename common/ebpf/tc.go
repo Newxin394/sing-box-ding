@@ -203,6 +203,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	uidEntries := policy.uidEntries
 	fakeIPIPv4 := policy.fakeIPIPv4
 	fakeIPIPv6 := policy.fakeIPIPv6
+	forceInterceptIPv4 := policy.forceInterceptIPv4
+	forceInterceptIPv6 := policy.forceInterceptIPv6
 	includeIPv4, includeIPv6 := policy.includeSource.ipv4, policy.includeSource.ipv6
 	excludeIPv4, excludeIPv6 := policy.excludeSource.ipv4, policy.excludeSource.ipv6
 	if err = checkLPMTriePolicyCompatibility(
@@ -269,15 +271,15 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if len(policy.excludeSourceMAC) > 0 {
 		controlValue.Flags |= 1 << 15
 	}
-	if fakeIPIPv4.IsValid() {
+	if forceInterceptIPv4.IsValid() {
 		controlValue.Flags |= 1 << 10
-		controlValue.FakeIPIPv4Prefix = fakeIPIPv4.Addr().As4()
-		controlValue.FakeIPIPv4Mask = prefixMask4(fakeIPIPv4.Bits())
+		controlValue.FakeIPIPv4Prefix = forceInterceptIPv4.Addr().As4()
+		controlValue.FakeIPIPv4Mask = prefixMask4(forceInterceptIPv4.Bits())
 	}
-	if fakeIPIPv6.IsValid() {
+	if forceInterceptIPv6.IsValid() {
 		controlValue.Flags |= 1 << 11
-		controlValue.FakeIPIPv6Prefix = fakeIPIPv6.Addr().As16()
-		controlValue.FakeIPIPv6Mask = prefixMask16(fakeIPIPv6.Bits())
+		controlValue.FakeIPIPv6Prefix = forceInterceptIPv6.Addr().As16()
+		controlValue.FakeIPIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
 	}
 	backend := &TCBackend{
 		runtime:         &tcRuntime{maps: maps, programs: loadedPrograms},
@@ -432,8 +434,8 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		SharedBypassPrivate: policy.sharedBypassPrivate,
 		LocalBypassPort:     len(policy.localBypassPortEntries) > 0,
 		SharedBypassPort:    len(policy.sharedBypassPortEntries) > 0,
-		FakeIPIPv4:          policy.fakeIPIPv4.IsValid(),
-		FakeIPIPv6:          policy.fakeIPIPv6.IsValid(),
+		FakeIPIPv4:          policy.forceInterceptIPv4.IsValid(),
+		FakeIPIPv6:          policy.forceInterceptIPv6.IsValid(),
 		IncludeSource:       len(policy.includeSource.ipv4)+len(policy.includeSource.ipv6) > 0,
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,

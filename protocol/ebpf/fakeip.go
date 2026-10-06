@@ -62,3 +62,17 @@ func (i *Inbound) fakeIPPrefixes() []netip.Prefix {
 	}
 	return prefixes
 }
+
+// forceInterceptPrefixes are destinations the kernel force-intercept slot will
+// capture (FakeIP or bypass_exclude). Internal redirect prefixes must not
+// overlap them, or redirected traffic could be captured again.
+func (i *Inbound) forceInterceptPrefixes() []netip.Prefix {
+	prefixes := i.fakeIPPrefixes()
+	if i.bypassExcludeIPv4.IsValid() {
+		prefixes = append(prefixes, i.bypassExcludeIPv4)
+	}
+	if i.bypassExcludeIPv6.IsValid() {
+		prefixes = append(prefixes, i.bypassExcludeIPv6)
+	}
+	return prefixes
+}

@@ -17,12 +17,18 @@ type PolicyConfig struct {
 	SharedBypassPrivate bool
 	FakeIPIPv4          netip.Prefix
 	FakeIPIPv6          netip.Prefix
-	IncludeSourceCIDR   []netip.Prefix
-	ExcludeSourceCIDR   []netip.Prefix
-	IncludeSourceMAC    []MACAddress
-	ExcludeSourceMAC    []MACAddress
-	LocalBypassPort     []PortRange
-	SharedBypassPort    []PortRange
+	// ForceInterceptIPv4/IPv6 are non-FakeIP destinations that must be
+	// intercepted before every bypass decision (bypass_exclude). The kernel has
+	// one force-intercept slot per family, shared with FakeIP, so a valid
+	// ForceIntercept prefix may only be set where that family has no FakeIP.
+	ForceInterceptIPv4 netip.Prefix
+	ForceInterceptIPv6 netip.Prefix
+	IncludeSourceCIDR  []netip.Prefix
+	ExcludeSourceCIDR  []netip.Prefix
+	IncludeSourceMAC   []MACAddress
+	ExcludeSourceMAC   []MACAddress
+	LocalBypassPort    []PortRange
+	SharedBypassPort   []PortRange
 }
 
 // CompiledPolicy is an immutable policy snapshot shared by all eBPF data
@@ -35,6 +41,8 @@ type CompiledPolicy struct {
 	sharedBypassPrivate     bool
 	fakeIPIPv4              netip.Prefix
 	fakeIPIPv6              netip.Prefix
+	forceInterceptIPv4      netip.Prefix
+	forceInterceptIPv6      netip.Prefix
 	includeSource           dualStackCIDRPrefixes
 	excludeSource           dualStackCIDRPrefixes
 	includeSourceMAC        []MACAddress
@@ -53,6 +61,14 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 		return CompiledPolicy{}, err
 	}
 	fakeIPIPv6, err := normalizeAddressPrefix("IPv6 FakeIP range", config.FakeIPIPv6, false)
+	if err != nil {
+		return CompiledPolicy{}, err
+	}
+	forceInterceptIPv4, err := compileForceInterceptPrefix("IPv4", fakeIPIPv4, config.ForceInterceptIPv4, true)
+	if err != nil {
+		return CompiledPolicy{}, err
+	}
+	forceInterceptIPv6, err := compileForceInterceptPrefix("IPv6", fakeIPIPv6, config.ForceInterceptIPv6, false)
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
@@ -91,6 +107,8 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 		sharedBypassPrivate:     config.SharedBypassPrivate,
 		fakeIPIPv4:              fakeIPIPv4,
 		fakeIPIPv6:              fakeIPIPv6,
+		forceInterceptIPv4:      forceInterceptIPv4,
+		forceInterceptIPv6:      forceInterceptIPv6,
 		includeSource:           dualStackCIDRPrefixes{ipv4: includeIPv4, ipv6: includeIPv6},
 		excludeSource:           dualStackCIDRPrefixes{ipv4: excludeIPv4, ipv6: excludeIPv6},
 		includeSourceMAC:        slices.Clone(config.IncludeSourceMAC),
@@ -98,6 +116,23 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 		localBypassPortEntries:  localBypassPortEntries,
 		sharedBypassPortEntries: sharedBypassPortEntries,
 	}, nil
+}
+
+// compileForceInterceptPrefix resolves the single kernel force-intercept slot
+// for one address family. FakeIP owns the slot when configured; otherwise an
+// explicit bypass_exclude prefix may use it.
+func compileForceInterceptPrefix(family string, fakeIP, explicit netip.Prefix, ipv4 bool) (netip.Prefix, error) {
+	explicit, err := normalizeAddressPrefix(family+" force-intercept prefix", explicit, ipv4)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	if fakeIP.IsValid() && explicit.IsValid() {
+		return netip.Prefix{}, E.New(family, " force-intercept prefix ", explicit, " conflicts with FakeIP range ", fakeIP)
+	}
+	if explicit.IsValid() {
+		return explicit, nil
+	}
+	return fakeIP, nil
 }
 
 func compilePortPolicy(ranges []PortRange, enableTCP, enableUDP bool) ([]tcPortKey, error) {

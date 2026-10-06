@@ -87,6 +87,8 @@ func PrepareSharedNetwork(cgroupBackend *CgroupBackend, config SharedNetworkConf
 	policy := config.Policy
 	fakeIPIPv4 := policy.fakeIPIPv4
 	fakeIPIPv6 := policy.fakeIPIPv6
+	forceInterceptIPv4 := policy.forceInterceptIPv4
+	forceInterceptIPv6 := policy.forceInterceptIPv6
 	for name, capacity := range map[string]uint32{
 		"shared-network proxy":  config.MapCapacity.Proxy,
 		"shared-network bypass": config.MapCapacity.Bypass,
@@ -209,8 +211,8 @@ func PrepareSharedNetwork(cgroupBackend *CgroupBackend, config SharedNetworkConf
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
 		ExcludeSourceMAC:    len(policy.excludeSourceMAC) > 0,
-		FakeIPIPv4:          fakeIPIPv4.IsValid(),
-		FakeIPIPv6:          fakeIPIPv6.IsValid(),
+		FakeIPIPv4:          forceInterceptIPv4.IsValid(),
+		FakeIPIPv6:          forceInterceptIPv6.IsValid(),
 	}).sharedFlags()
 	if redirectIPv4.IsValid() {
 		backend.control.TokenIPv4Prefix = redirectIPv4.Addr().As4()
@@ -220,13 +222,13 @@ func PrepareSharedNetwork(cgroupBackend *CgroupBackend, config SharedNetworkConf
 		backend.control.TokenIPv6Prefix = redirectIPv6.Addr().As16()
 		backend.control.TokenIPv6PrefixBits = uint8(redirectIPv6.Bits())
 	}
-	if fakeIPIPv4.IsValid() {
-		backend.control.FakeIPIPv4Prefix = fakeIPIPv4.Addr().As4()
-		backend.control.FakeIPIPv4Mask = prefixMask4(fakeIPIPv4.Bits())
+	if forceInterceptIPv4.IsValid() {
+		backend.control.FakeIPIPv4Prefix = forceInterceptIPv4.Addr().As4()
+		backend.control.FakeIPIPv4Mask = prefixMask4(forceInterceptIPv4.Bits())
 	}
-	if fakeIPIPv6.IsValid() {
-		backend.control.FakeIPIPv6Prefix = fakeIPIPv6.Addr().As16()
-		backend.control.FakeIPIPv6Mask = prefixMask16(fakeIPIPv6.Bits())
+	if forceInterceptIPv6.IsValid() {
+		backend.control.FakeIPIPv6Prefix = forceInterceptIPv6.Addr().As16()
+		backend.control.FakeIPIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
 	}
 	if err = backend.initializeSourceCIDRPolicy(policy.includeSource, policy.excludeSource); err != nil {
 		_ = backend.Close()

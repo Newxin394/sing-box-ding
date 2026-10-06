@@ -102,6 +102,8 @@ type Inbound struct {
 	preMatchHostAddresses    []netip.Addr
 	fakeIPIPv4Prefix         netip.Prefix
 	fakeIPIPv6Prefix         netip.Prefix
+	bypassExcludeIPv4        netip.Prefix
+	bypassExcludeIPv6        netip.Prefix
 	fakeIPICMPReply          bool
 	flowMapCapacity          commonEBPF.FlowMapCapacities
 	cgroupMapCapacity        commonEBPF.CgroupMapCapacity
@@ -265,6 +267,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
+	bypassExcludeIPv4, bypassExcludeIPv6, err := resolveBypassExclude(
+		localEnabled, options.Local.BypassExclude,
+		sharedEnabled, options.Shared.BypassExclude,
+	)
+	if err != nil {
+		return nil, err
+	}
 	sharedIncludeMAC, err := parseSharedMACAddresses(
 		"include_mac_address",
 		sharedOptions.IncludeMACAddress,
@@ -340,6 +349,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		androidUIDOptions:     newAndroidUIDOptions(options.Local),
 		bypassSelectorOptions: bypassSelectorOptions,
 		fakeIPICMPReply:       fakeIPICMPReply,
+		bypassExcludeIPv4:     bypassExcludeIPv4,
+		bypassExcludeIPv6:     bypassExcludeIPv6,
 		flowMapCapacity:       flowMapCapacity,
 		cgroupMapCapacity:     cgroupMapCapacity,
 	}
@@ -354,6 +365,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 	}
 	if err = inbound.normalizeFakeIPPrefixes(); err != nil {
+		return nil, err
+	}
+	if err = validateBypassExcludeFakeIP(
+		inbound.bypassExcludeIPv4, inbound.bypassExcludeIPv6,
+		inbound.fakeIPIPv4Prefix, inbound.fakeIPIPv6Prefix,
+	); err != nil {
 		return nil, err
 	}
 	if err = validateFakeIPICMP(

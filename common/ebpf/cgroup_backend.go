@@ -127,8 +127,10 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 	mapCapacity := config.MapCapacity
 	policy := config.Policy
 	var err error
-	fakeIPIPv4 := policy.fakeIPIPv4
-	fakeIPIPv6 := policy.fakeIPIPv6
+	// The cgroup control's FakeIP slot is the kernel force-intercept slot;
+	// it carries bypass_exclude when FakeIP is absent for that family.
+	fakeIPIPv4 := policy.forceInterceptIPv4
+	fakeIPIPv6 := policy.forceInterceptIPv6
 	if err := validateCgroupMapCapacity(mapCapacity); err != nil {
 		return nil, err
 	}

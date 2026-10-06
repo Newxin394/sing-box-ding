@@ -61,6 +61,8 @@ func (i *Inbound) startInbound() error {
 		SharedBypassPrivate: i.sharedBypassPrivate,
 		FakeIPIPv4:          i.fakeIPIPv4Prefix,
 		FakeIPIPv6:          i.fakeIPIPv6Prefix,
+		ForceInterceptIPv4:  i.bypassExcludeIPv4,
+		ForceInterceptIPv6:  i.bypassExcludeIPv6,
 		IncludeSourceCIDR:   i.sharedOptions.IncludeSourceCIDR,
 		ExcludeSourceCIDR:   i.sharedOptions.ExcludeSourceCIDR,
 		IncludeSourceMAC:    i.sharedIncludeMAC,
