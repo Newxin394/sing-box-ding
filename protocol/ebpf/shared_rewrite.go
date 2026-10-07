@@ -112,19 +112,17 @@ func (s *sharedRewrite) prepareBackend() (*ECommon.SharedNetworkBackend, error) 
 		return nil, err
 	}
 	s.inbound.bypassRuleSetAccess.Lock()
-	if cgroupBackend != nil {
-		ipv4Count, ipv6Count := cgroupBackend.BypassCIDRCount()
-		err = backend.SetBypassCIDRState(ipv4Count, ipv6Count)
-	} else {
-		_, err = backend.UpdateCompiledBypassCIDR(s.inbound.bypassRuleSetPolicy)
-	}
-	if err == nil {
-		s.setSharedBackend(backend)
-	}
+	// Hotspot/tethering traffic always stays inside the kernel — the shared
+	// path never bypasses anything. A bypassed hotspot packet would leave
+	// without NAT (its source is the private client address) and be dropped
+	// upstream, killing client connectivity, so the local bypass_selector is
+	// intentionally not mirrored here.
+	_, err = backend.UpdateCompiledBypassCIDR(s.inbound.sharedBypassRuleSetEmptyPolicy)
 	s.inbound.bypassRuleSetAccess.Unlock()
 	if err != nil {
 		return nil, E.Errors(err, backend.Close())
 	}
+	s.setSharedBackend(backend)
 	return backend, nil
 }
 

@@ -114,13 +114,17 @@ type Inbound struct {
 	lifecycleAccess          sync.Mutex
 	interfaceMonitor         tcInterfaceMonitor
 
-	bypassRuleSetAccess       sync.Mutex
-	bypassRuleSet             []adapter.RuleSet
-	bypassRuleSetCallbacks    []*list.Element[adapter.RuleSetUpdateCallback]
-	bypassRuleSetStarted      bool
-	bypassRuleSetPolicy       commonEBPF.BypassCIDRPolicy
-	bypassRuleSetNeedsRetry   bool
-	bypassRuleSetInconsistent bool
+	bypassRuleSetAccess sync.Mutex
+	bypassRuleSet       []adapter.RuleSet
+	// sharedBypassRuleSetEmptyPolicy is the empty CIDR policy always applied
+	// to the shared (hotspot/tethering) path. The shared path never bypasses
+	// anything — see the comment in NewInbound — so this policy never changes.
+	sharedBypassRuleSetEmptyPolicy commonEBPF.BypassCIDRPolicy
+	bypassRuleSetCallbacks         []*list.Element[adapter.RuleSetUpdateCallback]
+	bypassRuleSetStarted           bool
+	bypassRuleSetPolicy            commonEBPF.BypassCIDRPolicy
+	bypassRuleSetNeedsRetry        bool
+	bypassRuleSetInconsistent      bool
 	// bypassRuleSetExpectedPolicy is the content applyBypassCIDRPolicyLocked
 	// most recently attempted, successful or not -- see
 	// bypassRuleSetExpectedVersion's doc comment below for why a version
@@ -388,6 +392,17 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 		inbound.bypassRuleSet = append(inbound.bypassRuleSet, ruleSet)
 	}
+	// The shared (hotspot/tethering) path never bypasses anything: every
+	// client packet must be proxied through the routing rules. A bypassed
+	// hotspot packet would leave without NAT (its source is the private
+	// client address) and be dropped upstream, so the local bypass_selector
+	// is intentionally not applied to this path. Compile the empty policy
+	// once; it is written on every apply.
+	emptyPolicy, err := inbound.compileBypassCIDRPolicy(nil)
+	if err != nil {
+		return nil, err
+	}
+	inbound.sharedBypassRuleSetEmptyPolicy = emptyPolicy
 	udpTimeout := C.UDPTimeout
 	if options.UDPTimeout != 0 {
 		udpTimeout = time.Duration(options.UDPTimeout)

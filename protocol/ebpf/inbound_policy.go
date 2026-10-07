@@ -332,47 +332,35 @@ func (i *Inbound) applyBypassCIDRPolicyLocked(policy commonEBPF.BypassCIDRPolicy
 	}
 	if shared := i.sharedRewriteInstance(); shared != nil {
 		if backend := shared.sharedBackendInstance(); backend != nil {
-			if cgroupBackend := i.cgroupBackendInstance(); cgroupBackend != nil {
-				ipv4Count, ipv6Count := cgroupBackend.BypassCIDRCount()
-				if err = backend.SetBypassCIDRState(ipv4Count, ipv6Count); err != nil {
-					return fail(err)
-				}
-				i.bypassRuleSetShared = bypassRuleSetBackendVersion{version: version, known: true}
-				previousIPv4Count, previousIPv6Count := previous.Counts()
-				applied = append(applied, bypassCIDRAppliedBackend{
-					name: "shared",
-					revert: func() error {
-						revertErr := backend.SetBypassCIDRState(previousIPv4Count, previousIPv6Count)
-						if revertErr == nil {
-							i.bypassRuleSetShared = bypassRuleSetBackendVersion{version: previousVersion, known: true}
-						} else {
-							i.bypassRuleSetShared.known = false
-						}
-						return revertErr
-					},
-				})
-			} else if _, err = backend.UpdateCompiledBypassCIDR(policy); err != nil {
-				// Same reasoning as TC's own case above.
+			// Hotspot/tethering traffic always stays inside the kernel: the
+			// shared path never bypasses anything, so every client packet is
+			// proxied through the routing rules regardless of how the local
+			// bypass_selector is currently set. This is deliberate — a
+			// bypassed hotspot packet leaves without NAT (its source is the
+			// private client address), so it is dropped upstream and the
+			// clients simply lose connectivity. bypass_selector therefore
+			// governs the local (TC/cgroup) path only.
+			emptyPolicy := i.sharedBypassRuleSetEmptyPolicy
+			if _, err = backend.UpdateCompiledBypassCIDR(emptyPolicy); err != nil {
 				if backend.RequiresRebuild() {
 					i.bypassRuleSetShared.known = false
 					i.bypassRuleSetInconsistent = true
 				}
 				return fail(err)
-			} else {
-				i.bypassRuleSetShared = bypassRuleSetBackendVersion{version: version, known: true}
-				applied = append(applied, bypassCIDRAppliedBackend{
-					name: "shared",
-					revert: func() error {
-						_, revertErr := backend.UpdateCompiledBypassCIDR(previous)
-						if revertErr == nil {
-							i.bypassRuleSetShared = bypassRuleSetBackendVersion{version: previousVersion, known: true}
-						} else {
-							i.bypassRuleSetShared.known = false
-						}
-						return revertErr
-					},
-				})
 			}
+			i.bypassRuleSetShared = bypassRuleSetBackendVersion{version: version, known: true}
+			applied = append(applied, bypassCIDRAppliedBackend{
+				name: "shared",
+				revert: func() error {
+					_, revertErr := backend.UpdateCompiledBypassCIDR(emptyPolicy)
+					if revertErr == nil {
+						i.bypassRuleSetShared = bypassRuleSetBackendVersion{version: previousVersion, known: true}
+					} else {
+						i.bypassRuleSetShared.known = false
+					}
+					return revertErr
+				},
+			})
 		}
 	}
 	i.bypassRuleSetPolicy = policy
