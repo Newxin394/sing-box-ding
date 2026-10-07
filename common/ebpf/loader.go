@@ -32,6 +32,28 @@ func attachProgramRaw(target int, program *CiliumEBPF.Program, attachType Cilium
 	if err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: target, Program: program, Attach: attachType, Flags: 2}); err == nil {
 		return nil
 	}
+	// BPF_PROG_QUERY retain the historical fallback because there is no safe
+	// way to distinguish an empty hook from an unqueryable one.
+	if result, queryErr := queryCgroupPrograms(link.QueryOptions{Target: target, Attach: attachType}); queryErr == nil && len(result.Programs) > 0 {
+		if _, cleanupErr := detachOwnedCgroupProgramsForAttach(target, attachType); cleanupErr != nil {
+			return E.Cause(cleanupErr, "clean stale eBPF cgroup program")
+		}
+		result, queryErr = queryCgroupPrograms(link.QueryOptions{Target: target, Attach: attachType})
+		if queryErr != nil {
+			return queryErr
+		}
+		if len(result.Programs) > 0 {
+			owners, namesErr := cgroupProgramOwnerNames(result)
+			if namesErr != nil {
+				return E.Cause(namesErr, "refusing to replace existing cgroup program owner")
+			}
+			return E.New("refusing to replace existing cgroup program owner: ", owners)
+		}
+	}
+	// Keep the legacy fallback used before multi-only attachment was adopted.
+	// Some vendor kernels reject ALLOW_MULTI for otherwise usable hooks. An
+	// attach that tries ALLOW_MULTI first and drops it on EINVAL ensures
+	// correctness across that split.
 	return link.RawAttachProgram(link.RawAttachProgramOptions{Target: target, Program: program, Attach: attachType})
 }
 

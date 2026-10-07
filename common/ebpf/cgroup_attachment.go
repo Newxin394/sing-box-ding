@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -39,46 +40,62 @@ func lockCgroupFile(cgroupFile *os.File) error {
 
 func detachOwnedCgroupPrograms(cgroupFD int) error {
 	for _, definition := range cgroupProgramDefinitions {
-		first, err := queryCgroupProgramIDs(cgroupFD, definition.attachType)
-		if err != nil {
+		if _, err := detachOwnedCgroupProgramsForAttach(cgroupFD, definition.attachType); err != nil {
 			if definition.attachType == CiliumEBPF.AttachCgroupInetSockRelease && socketReleaseUnavailable(err) {
 				continue
 			}
 			return err
 		}
-		second, err := queryCgroupProgramIDs(cgroupFD, definition.attachType)
-		if err != nil {
-			return err
-		}
-		if !sameProgramIDs(first, second) {
-			return unix.ESTALE
-		}
-		for _, programID := range first {
-			program, openErr := CiliumEBPF.NewProgramFromID(programID)
-			if openErr != nil {
-				return openErr
-			}
-			info, infoErr := program.Info()
-			if infoErr != nil {
-				_ = program.Close()
-				return infoErr
-			}
-			if strings.HasPrefix(info.Name, "sb_ebpf_") {
-				if detachErr := rawDetachProgram(cgroupFD, program, definition.attachType); detachErr != nil {
-					_ = program.Close()
-					return detachErr
-				}
-			}
-			if closeErr := program.Close(); closeErr != nil {
-				return closeErr
-			}
-		}
 	}
 	return nil
 }
 
+// detachOwnedCgroupProgramsForAttach removes only programs that belong to a
+// sing-box eBPF generation. Older releases used the sing_ebpf_ prefix, while
+// the current diagnostic names use sb_ebpf_. Never detach an unknown owner: the
+// caller may be sharing the host cgroup with netd or another eBPF service.
+func detachOwnedCgroupProgramsForAttach(cgroupFD int, attachType CiliumEBPF.AttachType) (bool, error) {
+	first, err := queryCgroupProgramIDs(cgroupFD, attachType)
+	if err != nil {
+		return false, err
+	}
+	second, err := queryCgroupProgramIDs(cgroupFD, attachType)
+	if err != nil {
+		return false, err
+	}
+	if !sameProgramIDs(first, second) {
+		return false, unix.ESTALE
+	}
+	var detached bool
+	for _, programID := range first {
+		name, nameErr := programNameByID(programID)
+		if nameErr != nil {
+			return detached, nameErr
+		}
+		if ownedCgroupProgramName(name) {
+			program, openErr := newProgramFromID(programID)
+			if openErr != nil {
+				return detached, openErr
+			}
+			if detachErr := rawDetachProgram(cgroupFD, program, attachType); detachErr != nil {
+				_ = program.Close()
+				return detached, detachErr
+			}
+			detached = true
+			if closeErr := program.Close(); closeErr != nil {
+				return detached, closeErr
+			}
+		}
+	}
+	return detached, nil
+}
+
+func ownedCgroupProgramName(name string) bool {
+	return strings.HasPrefix(name, "sb_ebpf_") || strings.HasPrefix(name, "sing_ebpf_")
+}
+
 func queryCgroupProgramIDs(cgroupFD int, attachType CiliumEBPF.AttachType) ([]CiliumEBPF.ProgramID, error) {
-	result, err := link.QueryPrograms(link.QueryOptions{Target: cgroupFD, Attach: attachType})
+	result, err := queryCgroupPrograms(link.QueryOptions{Target: cgroupFD, Attach: attachType})
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +104,41 @@ func queryCgroupProgramIDs(cgroupFD int, attachType CiliumEBPF.AttachType) ([]Ci
 		ids[index] = result.Programs[index].ID
 	}
 	return ids, nil
+}
+
+var queryCgroupPrograms = link.QueryPrograms
+
+var newProgramFromID = CiliumEBPF.NewProgramFromID
+
+var programNameByID = func(programID CiliumEBPF.ProgramID) (string, error) {
+	program, err := newProgramFromID(programID)
+	if err != nil {
+		return "", err
+	}
+	info, infoErr := program.Info()
+	closeErr := program.Close()
+	if infoErr != nil {
+		return "", infoErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return info.Name, nil
+}
+
+func cgroupProgramOwnerNames(result *link.QueryResult) ([]string, error) {
+	owners := make([]string, 0, len(result.Programs))
+	for _, attached := range result.Programs {
+		name, err := programNameByID(attached.ID)
+		if err != nil {
+			return nil, err
+		}
+		if name == "" {
+			name = fmt.Sprintf("program-%d", attached.ID)
+		}
+		owners = append(owners, name)
+	}
+	return owners, nil
 }
 
 func (b *CgroupBackend) Attach() error {
