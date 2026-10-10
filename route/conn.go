@@ -36,6 +36,11 @@ type ConnectionManager struct {
 	logger      logger.ContextLogger
 	access      sync.Mutex
 	connections list.List[io.Closer]
+
+	asyncCloseAccess   sync.Mutex
+	asyncCloseQueue    []io.Closer
+	asyncCloseRunning  bool
+	asyncCloseComplete chan struct{}
 }
 
 func NewConnectionManager(logger logger.ContextLogger) *ConnectionManager {
@@ -54,8 +59,9 @@ func (m *ConnectionManager) Count() int {
 	return m.connections.Len()
 }
 
-func (m *ConnectionManager) CloseAll() {
+func (m *ConnectionManager) takeConnections() []io.Closer {
 	m.access.Lock()
+	defer m.access.Unlock()
 	var closers []io.Closer
 	for element := m.connections.Front(); element != nil; {
 		nextElement := element.Next()
@@ -63,14 +69,66 @@ func (m *ConnectionManager) CloseAll() {
 		m.connections.Remove(element)
 		element = nextElement
 	}
-	m.access.Unlock()
-	for _, closer := range closers {
+	return closers
+}
+
+func (m *ConnectionManager) CloseAll() {
+	for _, closer := range m.takeConnections() {
 		common.Close(closer)
+	}
+}
+
+// CloseAllAsync removes tracked connections immediately and closes them on one
+// serialized worker. Network changes can otherwise block while thousands of
+// QUIC and proxy connections synchronously tear down.
+func (m *ConnectionManager) CloseAllAsync() {
+	closers := m.takeConnections()
+	if len(closers) == 0 {
+		return
+	}
+	m.asyncCloseAccess.Lock()
+	m.asyncCloseQueue = append(m.asyncCloseQueue, closers...)
+	if !m.asyncCloseRunning {
+		m.asyncCloseRunning = true
+		m.asyncCloseComplete = make(chan struct{})
+		go m.runAsyncClose()
+	}
+	m.asyncCloseAccess.Unlock()
+}
+
+func (m *ConnectionManager) runAsyncClose() {
+	for {
+		m.asyncCloseAccess.Lock()
+		if len(m.asyncCloseQueue) == 0 {
+			m.asyncCloseRunning = false
+			close(m.asyncCloseComplete)
+			m.asyncCloseComplete = nil
+			m.asyncCloseAccess.Unlock()
+			return
+		}
+		closer := m.asyncCloseQueue[0]
+		m.asyncCloseQueue = m.asyncCloseQueue[1:]
+		m.asyncCloseAccess.Unlock()
+		common.Close(closer)
+	}
+}
+
+func (m *ConnectionManager) waitAsyncClose() {
+	for {
+		m.asyncCloseAccess.Lock()
+		if !m.asyncCloseRunning {
+			m.asyncCloseAccess.Unlock()
+			return
+		}
+		complete := m.asyncCloseComplete
+		m.asyncCloseAccess.Unlock()
+		<-complete
 	}
 }
 
 func (m *ConnectionManager) Close() error {
 	m.CloseAll()
+	m.waitAsyncClose()
 	return nil
 }
 

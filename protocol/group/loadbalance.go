@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -235,11 +236,19 @@ func (s *LoadBalance) urlTest(ctx context.Context, force bool) (map[string]uint1
 	return s.group.urlTest(ctx, force)
 }
 
+func (s *LoadBalance) urlTestWithPolicy(ctx context.Context, force bool, policy *urlTestProbePolicy) (map[string]uint16, error) {
+	return s.group.urlTestWithPolicy(ctx, force, policy)
+}
+
 func (s *LoadBalance) CheckOutbounds() {
 	s.group.CheckOutbounds(true)
 }
 
 func (s *LoadBalance) InterfaceUpdated(context.Context) {
+	s.networkChanged()
+}
+
+func (s *LoadBalance) networkChanged() {
 	group := s.group
 	if group == nil {
 		return
@@ -247,7 +256,7 @@ func (s *LoadBalance) InterfaceUpdated(context.Context) {
 	if group.pause.IsDevicePaused() || group.pause.IsNetworkPaused() {
 		return
 	}
-	go group.CheckOutbounds(true)
+	go group.networkChanged()
 }
 
 func (s *LoadBalance) isGroupActive() bool {
@@ -269,10 +278,13 @@ func (s *LoadBalance) DialContext(ctx context.Context, network string, destinati
 	}
 	conn, err := outbound.DialContext(ctx, network, destination)
 	if err == nil {
+		s.group.dialFailures.success(RealTag(outbound, network))
 		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
 	}
+	if ctx.Err() == nil {
+		s.group.reportDialFailure(outbound, network)
+	}
 	s.logger.ErrorContext(ctx, err)
-	go s.group.CheckOutbounds(true)
 	return nil, err
 }
 
@@ -288,10 +300,13 @@ func (s *LoadBalance) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	}
 	conn, err := outbound.ListenPacket(ctx, destination)
 	if err == nil {
+		s.group.dialFailures.success(RealTag(outbound, N.NetworkUDP))
 		return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsProviderConnectionFromContext(ctx)), nil
 	}
+	if ctx.Err() == nil {
+		s.group.reportDialFailure(outbound, N.NetworkUDP)
+	}
 	s.logger.ErrorContext(ctx, err)
-	go s.group.CheckOutbounds(true)
 	return nil, err
 }
 
@@ -369,6 +384,8 @@ type LoadBalanceGroup struct {
 	started         atomic.Bool
 	lastActive      common.TypedValue[time.Time]
 	strategyFn      strategyFn
+	health          urlTestHealthState
+	dialFailures    urlTestDialFailures
 }
 
 func NewLoadBalanceGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, idleTimeout time.Duration, ttl time.Duration, strategy string) (*LoadBalanceGroup, error) {
@@ -484,11 +501,18 @@ func (g *LoadBalanceGroup) URLTest(ctx context.Context) (map[string]uint16, erro
 }
 
 func (g *LoadBalanceGroup) urlTest(ctx context.Context, force bool) (map[string]uint16, error) {
+	return g.urlTestWithPolicy(ctx, force, nil)
+}
+
+func (g *LoadBalanceGroup) urlTestWithPolicy(ctx context.Context, force bool, policy *urlTestProbePolicy) (map[string]uint16, error) {
 	if !g.checking.TryLock() {
 		return make(map[string]uint16), nil
 	}
 	defer g.checking.Unlock()
-	return g.urlTestLocked(ctx, force)
+	if policy == nil && !force {
+		policy = g.scheduledProbePolicy()
+	}
+	return g.urlTestLockedPolicy(ctx, force, policy)
 }
 
 func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[string]uint16, error) {
@@ -498,12 +522,111 @@ func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[str
 }
 
 func (g *LoadBalanceGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
+	var policy *urlTestProbePolicy
+	if !force {
+		policy = g.scheduledProbePolicy()
+	}
+	return g.urlTestLockedPolicy(ctx, force, policy)
+}
+
+func (g *LoadBalanceGroup) urlTestLockedPolicy(ctx context.Context, force bool, policy *urlTestProbePolicy) (map[string]uint16, error) {
 	outbounds := g.loadOutbounds()
-	result := URLTestOutbounds(ctx, g.outbound, g.history, g.logger, outbounds, g.link, g.interval, force)
+	result := URLTestOutboundsWithPolicy(ctx, g.outbound, g.history, g.logger, outbounds, g.link, g.interval, force, policy)
 	if g.tag != "" {
 		updateLoadBalanceURLTestHistory(g.outbound, g.history, g.tag, outbounds)
 	}
 	return result, nil
+}
+
+func (g *LoadBalanceGroup) scheduledProbePolicy() *urlTestProbePolicy {
+	return &urlTestProbePolicy{
+		preserveHistory: true,
+		onResult:        g.health.record,
+		shouldProbe: func(tag string, history *adapter.URLTestHistory, now time.Time) bool {
+			health := g.health.get(tag)
+			lastProbe := health.lastProbe
+			if history != nil && history.Time.After(lastProbe) {
+				lastProbe = history.Time
+			}
+			if lastProbe.IsZero() {
+				return true
+			}
+			period := g.interval
+			if health.failures > 0 {
+				period = health.backoff(g.interval)
+			} else {
+				period *= urlTestColdRefreshIntervals
+			}
+			return now.Sub(lastProbe) >= period-g.interval/2
+		},
+	}
+}
+
+func (g *LoadBalanceGroup) networkChanged() {
+	g.health.forgiveFailures()
+	g.dialFailures.reset()
+	if !g.health.allowNetworkProbe(time.Now()) {
+		return
+	}
+	type candidate struct {
+		tag   string
+		delay uint16
+	}
+	var candidates []candidate
+	for _, outbound := range g.loadOutbounds() {
+		if history := g.history.LoadURLTestHistory(RealTag(outbound, N.NetworkTCP)); history != nil {
+			candidates = append(candidates, candidate{outbound.Tag(), history.Delay})
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].delay < candidates[j].delay })
+	forceTags := make(map[string]struct{}, min(len(candidates), urlTestHotCandidates)*3)
+	for _, candidate := range candidates[:min(len(candidates), urlTestHotCandidates)] {
+		forceTags[candidate.tag] = struct{}{}
+		if outbound, loaded := g.outbound.Outbound(candidate.tag); loaded {
+			forceTags[RealTag(outbound, N.NetworkTCP)] = struct{}{}
+			forceTags[RealTag(outbound, N.NetworkUDP)] = struct{}{}
+		}
+	}
+	if len(forceTags) == 0 {
+		return
+	}
+	policy := &urlTestProbePolicy{
+		forceTags:       forceTags,
+		onlyForced:      true,
+		networkChanged:  true,
+		preserveHistory: true,
+		onResult:        g.health.record,
+	}
+	g.checking.Lock()
+	defer g.checking.Unlock()
+	_, _ = g.urlTestLockedPolicy(g.ctx, false, policy)
+}
+
+func (g *LoadBalanceGroup) reportDialFailure(outbound adapter.Outbound, network string) {
+	if outbound == nil {
+		return
+	}
+	tag := RealTag(outbound, network)
+	if tag == "" || !g.dialFailures.failure(tag, g.interval) {
+		return
+	}
+	forceTags := map[string]struct{}{tag: {}}
+	if outbound.Tag() != tag {
+		forceTags[outbound.Tag()] = struct{}{}
+	}
+	policy := &urlTestProbePolicy{
+		forceTags:       forceTags,
+		onlyForced:      true,
+		preserveHistory: true,
+		onResult:        g.health.record,
+	}
+	go func() {
+		defer g.dialFailures.release()
+		if g.checking.TryLock() {
+			defer g.checking.Unlock()
+			_, _ = g.urlTestLockedPolicy(g.ctx, false, policy)
+		}
+	}()
 }
 
 func updateLoadBalanceURLTestHistory(outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, tag string, outbounds []adapter.Outbound) *adapter.URLTestHistory {
@@ -598,6 +721,9 @@ func (g *LoadBalanceGroup) aliveForTestURL(proxy adapter.Outbound, checked map[s
 		return false
 	}
 	checked[proxy.Tag()] = true
+	if g.health.excessive(RealTag(proxy, N.NetworkTCP)) || g.dialFailures.excessive(RealTag(proxy, N.NetworkTCP)) {
+		return false
+	}
 	if nested, isLoadBalance := proxy.(adapter.LoadBalanceGroup); isLoadBalance {
 		for _, memberTag := range nested.All() {
 			member, loaded := g.outbound.Outbound(memberTag)

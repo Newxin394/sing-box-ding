@@ -70,6 +70,8 @@ type NetworkManager struct {
 	captureListeners        []adapter.InterfaceUpdateListener
 	captureListenerAccess   sync.RWMutex
 	networkResetPending     bool
+	networkResetTimer       *time.Timer
+	networkResetGeneration  uint64
 	resetRunAccess          sync.Mutex
 	interfaceRecheckAccess  sync.Mutex
 	interfaceRecheckTimer   *time.Timer
@@ -253,6 +255,24 @@ func (r *NetworkManager) Close() error {
 		r.interfaceMonitor.UnregisterCallback(r.interfaceUpdateElement)
 		r.interfaceUpdateElement = nil
 	}
+	waitNetworkReset := r.startedCancel != nil
+	if waitNetworkReset {
+		r.startedCancel()
+		monitor.Start("wait network reset")
+	}
+	r.resetRunAccess.Lock()
+	if waitNetworkReset {
+		monitor.Finish()
+	}
+	r.interfaceUpdateAccess.Lock()
+	if r.networkResetTimer != nil {
+		r.networkResetTimer.Stop()
+		r.networkResetTimer = nil
+	}
+	r.networkResetGeneration++
+	r.networkResetPending = false
+	r.interfaceUpdateAccess.Unlock()
+	r.resetRunAccess.Unlock()
 	r.cancelInterfaceMonitorRecheck()
 	if r.powerListener != nil {
 		monitor.Start("close power listener")
@@ -260,13 +280,6 @@ func (r *NetworkManager) Close() error {
 			return E.Cause(err, "close power listener")
 		})
 		monitor.Finish()
-	}
-	if r.startedCancel != nil {
-		r.startedCancel()
-		monitor.Start("wait network reset")
-		r.resetRunAccess.Lock()
-		monitor.Finish()
-		defer r.resetRunAccess.Unlock()
 	}
 	if r.packageManager != nil {
 		monitor.Start("close package manager")
@@ -532,7 +545,15 @@ func (r *NetworkManager) UpdateWIFIState(ctx context.Context) {
 
 func (r *NetworkManager) ResetNetwork(ctx context.Context) {
 	if r.connectionManager != nil {
-		r.connectionManager.CloseAll()
+		if C.IsAndroid {
+			if closer, ok := r.connectionManager.(interface{ CloseAllAsync() }); ok {
+				closer.CloseAllAsync()
+			} else {
+				r.connectionManager.CloseAll()
+			}
+		} else {
+			r.connectionManager.CloseAll()
+		}
 	}
 
 	for _, endpoint := range r.endpoint.Endpoints() {
@@ -569,27 +590,64 @@ func (r *NetworkManager) ReleaseMemory(ctx context.Context) {
 	}
 }
 
+// networkResetCoalesceDelay is the quiet window after the last Android
+// interface callback before the expensive reset/capture teardown runs.
+const networkResetCoalesceDelay = 1500 * time.Millisecond
+
 func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interface, _ int) {
 	r.interfaceUpdateAccess.Lock()
 	defer r.interfaceUpdateAccess.Unlock()
 	// The default interface can disappear without any link change: Android
 	// withdraws a Wi-Fi network's default route when its connectivity check
 	// fails, and re-adds it when the check later succeeds, leaving the
-	// interface itself untouched the whole time. The new monitor only re-runs
-	// on a network update and latches noRoute, so without re-arming it here
-	// every outbound bound to the default interface keeps failing until the
-	// process is restarted. Re-arm while nothing is reported; cancel on return.
-	// Judge on the callback's interface so this stays safe when the monitor is
-	// absent (unit tests, platform-less builds); the recheck helpers no-op then.
+	// interface itself untouched the whole time. Re-arm while nothing is
+	// reported; cancel on return.
 	if defaultInterface == nil {
 		r.scheduleInterfaceMonitorRecheck()
 	} else {
 		r.cancelInterfaceMonitorRecheck()
 	}
 	r.networkResetPending = true
+	if C.IsAndroid {
+		r.networkResetGeneration++
+		generation := r.networkResetGeneration
+		if r.networkResetTimer != nil {
+			r.networkResetTimer.Stop()
+		}
+		r.networkResetTimer = time.AfterFunc(networkResetCoalesceDelay, func() {
+			r.runCoalescedNetworkReset(generation)
+		})
+	}
 	if r.startedCtx != nil {
 		r.dispatchInterfaceUpdateLocked()
 	}
+}
+
+func (r *NetworkManager) runCoalescedNetworkReset(generation uint64) {
+	// Keep the same lock order as updateInterface: resetRunAccess before
+	// interfaceUpdateAccess. The callback may overlap the last in-flight update.
+	r.resetRunAccess.Lock()
+	defer r.resetRunAccess.Unlock()
+	r.interfaceUpdateAccess.Lock()
+	if generation != r.networkResetGeneration || !r.networkResetPending {
+		r.interfaceUpdateAccess.Unlock()
+		return
+	}
+	r.networkResetTimer = nil
+	r.networkResetPending = false
+	ctx := r.startedCtx
+	r.interfaceUpdateAccess.Unlock()
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	if r.interfaceMonitor != nil && r.interfaceMonitor.DefaultInterface() == nil {
+		if r.pauseManager != nil {
+			r.pauseManager.NetworkPause()
+		}
+		return
+	}
+	r.ResetNetwork(ctx)
+	r.notifyCaptureListeners(ctx)
 }
 
 // defaultInterfaceRecheckInterval is how long to wait before asking the default
@@ -696,15 +754,17 @@ func (r *NetworkManager) updateInterface(ctx context.Context, defaultInterface *
 	}
 	r.updateNetworkEnvironment()
 	r.interfaceUpdateAccess.Lock()
-	resetNetwork := ctx.Err() == nil && r.networkResetPending
+	resetNetwork := ctx.Err() == nil && r.networkResetPending && !C.IsAndroid
 	if resetNetwork {
 		r.networkResetPending = false
 	}
 	r.interfaceUpdateAccess.Unlock()
 	if resetNetwork {
 		r.ResetNetwork(ctx)
+		r.notifyCaptureListeners(ctx)
+	} else if !C.IsAndroid {
+		r.notifyCaptureListeners(ctx)
 	}
-	r.notifyCaptureListeners(ctx)
 }
 
 func (r *NetworkManager) notifyWindowsPowerEvent(event int) {
