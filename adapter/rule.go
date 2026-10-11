@@ -18,6 +18,7 @@ type Rule interface {
 	HeadlessRule
 	SimpleLifecycle
 	Disabled() bool
+	SetDisabled(disabled bool)
 	UUID() string
 	ChangeStatus()
 	Type() string

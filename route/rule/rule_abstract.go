@@ -20,6 +20,13 @@ func (r *abstractRule) Disabled() bool {
 	return r.disabled.Load()
 }
 
+// SetDisabled implements mihomo-style explicit disable state for Clash API.
+// It is intentionally side-effect free here because ding rules are not wired
+// to the URLTest history that upstream uses to notify selection changes.
+func (r *abstractRule) SetDisabled(disabled bool) {
+	r.disabled.Store(disabled)
+}
+
 func (r *abstractRule) UUID() string {
 	return r.uuid
 }
