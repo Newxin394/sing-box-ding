@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -12,8 +13,12 @@ import (
 )
 
 type abstractRule struct {
-	disabled atomic.Bool
-	uuid     string
+	disabled  atomic.Bool
+	uuid      string
+	hitCount  atomic.Uint64
+	hitAt     atomicTime
+	missCount atomic.Uint64
+	missAt    atomicTime
 }
 
 func (r *abstractRule) Disabled() bool {
@@ -21,10 +26,49 @@ func (r *abstractRule) Disabled() bool {
 }
 
 // SetDisabled implements mihomo-style explicit disable state for Clash API.
-// It is intentionally side-effect free here because ding rules are not wired
-// to the URLTest history that upstream uses to notify selection changes.
 func (r *abstractRule) SetDisabled(disabled bool) {
 	r.disabled.Store(disabled)
+}
+
+func (r *abstractRule) Hit() {
+	r.hitCount.Add(1)
+	r.hitAt.Store(time.Now())
+}
+
+func (r *abstractRule) Miss() {
+	r.missCount.Add(1)
+	r.missAt.Store(time.Now())
+}
+
+func (r *abstractRule) HitCount() uint64 {
+	return r.hitCount.Load()
+}
+
+func (r *abstractRule) HitAt() time.Time {
+	return r.hitAt.Load()
+}
+
+func (r *abstractRule) MissCount() uint64 {
+	return r.missCount.Load()
+}
+
+func (r *abstractRule) MissAt() time.Time {
+	return r.missAt.Load()
+}
+
+// atomicTime mirrors mihomo rules/wrapper: it stores only UnixNano so the hot
+// write path never escapes a time.Time to the heap; an unset value reads back
+// as the Unix epoch, matching mihomo.
+type atomicTime struct {
+	nanos atomic.Int64
+}
+
+func (t *atomicTime) Load() time.Time {
+	return time.Unix(0, t.nanos.Load())
+}
+
+func (t *atomicTime) Store(value time.Time) {
+	t.nanos.Store(value.UnixNano())
 }
 
 func (r *abstractRule) UUID() string {

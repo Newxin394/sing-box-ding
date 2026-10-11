@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -212,6 +213,14 @@ func (r *testL3Rule) Match(*adapter.InboundContext) bool {
 func (r *testL3Rule) Disabled() bool {
 	return false
 }
+
+func (r *testL3Rule) SetDisabled(bool)  {}
+func (r *testL3Rule) Hit()              {}
+func (r *testL3Rule) Miss()             {}
+func (r *testL3Rule) HitCount() uint64  { return 0 }
+func (r *testL3Rule) HitAt() time.Time  { return time.Time{} }
+func (r *testL3Rule) MissCount() uint64 { return 0 }
+func (r *testL3Rule) MissAt() time.Time { return time.Time{} }
 
 func (r *testL3Rule) String() string {
 	return ""

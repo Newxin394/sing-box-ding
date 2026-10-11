@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -42,6 +43,31 @@ func (r *legacyAliasRule) Close() error {
 
 func (r *legacyAliasRule) Disabled() bool {
 	return false
+}
+
+func (r *legacyAliasRule) SetDisabled(bool) {
+}
+
+func (r *legacyAliasRule) Hit() {
+}
+
+func (r *legacyAliasRule) Miss() {
+}
+
+func (r *legacyAliasRule) HitCount() uint64 {
+	return 0
+}
+
+func (r *legacyAliasRule) HitAt() time.Time {
+	return time.Time{}
+}
+
+func (r *legacyAliasRule) MissCount() uint64 {
+	return 0
+}
+
+func (r *legacyAliasRule) MissAt() time.Time {
+	return time.Time{}
 }
 
 func (r *legacyAliasRule) UUID() string {

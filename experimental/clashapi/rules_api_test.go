@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 
@@ -26,6 +27,12 @@ func (r *testClashRule) String() string            { return r.payload }
 func (r *testClashRule) UUID() string              { return r.uuid }
 func (r *testClashRule) Disabled() bool            { return r.disabled }
 func (r *testClashRule) SetDisabled(disabled bool) { r.disabled = disabled }
+func (r *testClashRule) Hit()                      {}
+func (r *testClashRule) Miss()                     {}
+func (r *testClashRule) HitCount() uint64          { return 0 }
+func (r *testClashRule) HitAt() time.Time          { return time.Time{} }
+func (r *testClashRule) MissCount() uint64         { return 0 }
+func (r *testClashRule) MissAt() time.Time         { return time.Time{} }
 func (r *testClashRule) Action() adapter.RuleAction {
 	return &testClashRuleAction{proxy: r.proxy}
 }
@@ -70,6 +77,8 @@ func TestGetRulesIndexed(t *testing.T) {
 	require.Contains(t, body, `"payload":"domain_suffix=example.com"`)
 	require.Contains(t, body, `"proxy":"proxy"`)
 	require.Contains(t, body, `"size":-1`)
+	require.Contains(t, body, `"extra"`)
+	require.Contains(t, body, `"hitCount"`)
 }
 
 func TestDisableRulesByIndex(t *testing.T) {

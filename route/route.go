@@ -369,7 +369,62 @@ func (r *Router) wrapQUICSniffIdleCache(metadata adapter.InboundContext, onClose
 	}
 }
 
+// preMatchRuleEvaluations records the hit/miss outcome of each top-level rule
+// evaluated during PreMatch. The common rule count stays on the inline array,
+// so no allocation happens per flow.
+type preMatchRuleEvaluations struct {
+	inline   [64]preMatchRuleEvaluation
+	overflow []preMatchRuleEvaluation
+	length   int
+}
+
+type preMatchRuleEvaluation struct {
+	index   int
+	matched bool
+}
+
+func (e *preMatchRuleEvaluations) add(index int, matched bool) {
+	evaluation := preMatchRuleEvaluation{index: index, matched: matched}
+	if e.length < len(e.inline) {
+		e.inline[e.length] = evaluation
+	} else {
+		e.overflow = append(e.overflow, evaluation)
+	}
+	e.length++
+}
+
+func (e *preMatchRuleEvaluations) commit(rules []adapter.Rule) {
+	for i := 0; i < e.length; i++ {
+		var evaluation preMatchRuleEvaluation
+		if i < len(e.inline) {
+			evaluation = e.inline[i]
+		} else {
+			evaluation = e.overflow[i-len(e.inline)]
+		}
+		if evaluation.index >= len(rules) {
+			continue
+		}
+		if evaluation.matched {
+			rules[evaluation.index].Hit()
+		} else {
+			rules[evaluation.index].Miss()
+		}
+	}
+}
+
 func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
+	var evaluations preMatchRuleEvaluations
+	result := r.preMatch(metadata, firstPacket, &evaluations)
+	// On PreMatchContinue the connection is evaluated again by matchRule and
+	// counted there; only a final PreMatch verdict (flow / bypass / reject /
+	// drop / hijack-dns) commits the hit statistics here.
+	if result.Action != adapter.PreMatchContinue {
+		evaluations.commit(r.rules)
+	}
+	return result
+}
+
+func (r *Router) preMatch(metadata adapter.InboundContext, firstPacket []byte, evaluations *preMatchRuleEvaluations) adapter.PreMatchResult {
 	ctx := log.ContextWithNewID(r.ctx)
 	metadata.PreMatch = true
 	continueResult := adapter.PreMatchResult{Action: adapter.PreMatchContinue}
@@ -380,7 +435,9 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 	}
 	for currentRuleIndex, currentRule := range r.rules {
 		metadata.ResetRuleCache()
-		if !currentRule.Match(&metadata) {
+		matched := currentRule.Match(&metadata)
+		evaluations.add(currentRuleIndex, matched)
+		if !matched {
 			continue
 		}
 		ruleDescription := currentRule.String()
@@ -710,8 +767,10 @@ match:
 		}
 		metadata.ResetRuleCache()
 		if !currentRule.Match(metadata) {
+			currentRule.Miss()
 			continue
 		}
+		currentRule.Hit()
 		ruleDescription := currentRule.String()
 		if ruleDescription != "" {
 			r.logger.DebugContext(ctx, "match[", currentRuleIndex, "] ", currentRule, " => ", currentRule.Action())

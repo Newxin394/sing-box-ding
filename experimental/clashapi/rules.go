@@ -3,6 +3,7 @@ package clashapi
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 
@@ -28,8 +29,19 @@ type Rule struct {
 	Proxy   string `json:"proxy"`
 	Size    int    `json:"size"`
 
+	// Extra matches mihomo RuleWrapper statistics fields.
+	Extra *RuleExtra `json:"extra,omitempty"`
+
 	Disabled bool   `json:"disabled,omitempty"`
 	UUID     string `json:"uuid,omitempty"`
+}
+
+type RuleExtra struct {
+	Disabled  bool      `json:"disabled"`
+	HitCount  uint64    `json:"hitCount"`
+	HitAt     time.Time `json:"hitAt"`
+	MissCount uint64    `json:"missCount"`
+	MissAt    time.Time `json:"missAt"`
 }
 
 // allRules returns route rules first and DNS rules second. The resulting
@@ -50,13 +62,21 @@ func getRules(router adapter.Router, dnsRouter adapter.DNSRouter) func(w http.Re
 		rawRules := allRules(router, dnsRouter)
 		rules := make([]Rule, 0, len(rawRules))
 		for index, rule := range rawRules {
+			disabled := rule.Disabled()
 			rules = append(rules, Rule{
-				Index:    index,
-				Type:     rule.Type(),
-				Payload:  rule.String(),
-				Proxy:    rule.Action().String(),
-				Size:     -1,
-				Disabled: rule.Disabled(),
+				Index:   index,
+				Type:    rule.Type(),
+				Payload: rule.String(),
+				Proxy:   rule.Action().String(),
+				Size:    -1,
+				Extra: &RuleExtra{
+					Disabled:  disabled,
+					HitCount:  rule.HitCount(),
+					HitAt:     rule.HitAt(),
+					MissCount: rule.MissCount(),
+					MissAt:    rule.MissAt(),
+				},
+				Disabled: disabled,
 				UUID:     rule.UUID(),
 			})
 		}
