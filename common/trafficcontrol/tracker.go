@@ -18,17 +18,50 @@ import (
 )
 
 type TrackerMetadata struct {
-	ID              uuid.UUID
-	Metadata        adapter.InboundContext
-	CreatedAt       time.Time
-	ClosedAt        time.Time
-	Upload          *atomic.Int64
-	Download        *atomic.Int64
-	Chain           []string
-	Rule            adapter.Rule
-	Outbound        string
-	OutboundType    string
+	ID           uuid.UUID
+	Metadata     adapter.InboundContext
+	CreatedAt    time.Time
+	ClosedAt     time.Time
+	Upload       *atomic.Int64
+	Download     *atomic.Int64
+	Chain        []string
+	Rule         adapter.Rule
+	Outbound     string
+	OutboundType string
+	// DialTrace completes Chain for connections routed to a group that
+	// picks its member while dialing (URLTest, LoadBalance, Selector);
+	// nil otherwise.
+	DialTrace       *adapter.OutboundDialTrace
 	outboundManager adapter.OutboundManager
+}
+
+// ResolvedOutboundChain returns the outbound chain in route order, extended
+// with the members dial-through groups actually dialed.
+func (t *TrackerMetadata) ResolvedOutboundChain() []adapter.Outbound {
+	return t.DialTrace.Resolve(t.Metadata.OutboundChain)
+}
+
+// ResolvedChain is Chain (final outbound first) extended with the members
+// dial-through groups actually dialed, so it ends at the real node.
+func (t *TrackerMetadata) ResolvedChain() []string {
+	resolved := t.ResolvedOutboundChain()
+	if len(resolved) == len(t.Metadata.OutboundChain) {
+		return t.Chain
+	}
+	chain := common.Map(resolved, adapter.Outbound.Tag)
+	slices.Reverse(chain)
+	return chain
+}
+
+// ResolvedOutbound returns the tag and type of the outbound that actually
+// carries the connection, looking through dial-through groups.
+func (t *TrackerMetadata) ResolvedOutbound() (string, string) {
+	resolved := t.ResolvedOutboundChain()
+	if len(resolved) == len(t.Metadata.OutboundChain) {
+		return t.Outbound, t.OutboundType
+	}
+	outbound := resolved[len(resolved)-1]
+	return outbound.Tag(), outbound.Type()
 }
 
 type Tracker interface {
@@ -75,13 +108,19 @@ func (t TrackerMetadata) Chains() []string {
 			copy(chains[len(subChain):], t.Chain)
 		}
 	}
+	if t.DialTrace != nil {
+		resolved := t.ResolvedChain()
+		if len(resolved) > 0 {
+			return resolved
+		}
+	}
 	return chains
 }
 
 func (m *Manager) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
 	upload := new(atomic.Int64)
 	download := new(atomic.Int64)
-	trackerMetadata := m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download)
+	trackerMetadata := m.newTrackerMetadata(ctx, metadata, matchedRule, matchOutbound, upload, download)
 	trafficCounters := m.trafficCounters(trackerMetadata)
 	uploadCounters := []*atomic.Int64{upload}
 	downloadCounters := []*atomic.Int64{download}
@@ -101,7 +140,7 @@ func (m *Manager) RoutedConnection(ctx context.Context, conn net.Conn, metadata 
 func (m *Manager) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
 	upload := new(atomic.Int64)
 	download := new(atomic.Int64)
-	trackerMetadata := m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download)
+	trackerMetadata := m.newTrackerMetadata(ctx, metadata, matchedRule, matchOutbound, upload, download)
 	trafficCounters := m.trafficCounters(trackerMetadata)
 	uploadCounters := []*atomic.Int64{upload}
 	downloadCounters := []*atomic.Int64{download}
@@ -119,7 +158,7 @@ func (m *Manager) RoutedPacketConnection(ctx context.Context, conn N.PacketConn,
 }
 
 func (m *Manager) RoutedFlow(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) tun.FlowTracker {
-	trackerMetadata := m.newTrackerMetadata(metadata, matchedRule, matchOutbound, new(atomic.Int64), new(atomic.Int64))
+	trackerMetadata := m.newTrackerMetadata(ctx, metadata, matchedRule, matchOutbound, new(atomic.Int64), new(atomic.Int64))
 	return &flowTracker{
 		metadata:        trackerMetadata,
 		manager:         m,
@@ -127,7 +166,7 @@ func (m *Manager) RoutedFlow(ctx context.Context, metadata adapter.InboundContex
 	}
 }
 
-func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound, upload *atomic.Int64, download *atomic.Int64) TrackerMetadata {
+func (m *Manager) newTrackerMetadata(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound, upload *atomic.Int64, download *atomic.Int64) TrackerMetadata {
 	id, _ := uuid.NewV4()
 	chain := common.Map(metadata.OutboundChain, adapter.Outbound.Tag)
 	slices.Reverse(chain)
@@ -142,6 +181,7 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 		Rule:         matchedRule,
 		Outbound:     outbound.Tag(),
 		OutboundType: outbound.Type(),
+		DialTrace:    adapter.OutboundDialTraceFromContext(ctx),
 	}
 }
 

@@ -162,6 +162,9 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	metadata.RouteOutbound = selectedOutbound.Tag()
 	metadata.OutboundChain = chain
 	metadata.InitExtended()
+	if adapter.NeedOutboundDialTrace(chain) {
+		ctx = adapter.ContextWithOutboundDialTrace(ctx, new(adapter.OutboundDialTrace))
+	}
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
@@ -329,6 +332,9 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	metadata.RouteOutbound = selectedOutbound.Tag()
 	metadata.OutboundChain = chain
 	metadata.InitExtended()
+	if adapter.NeedOutboundDialTrace(chain) {
+		ctx = adapter.ContextWithOutboundDialTrace(ctx, new(adapter.OutboundDialTrace))
+	}
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedPacketConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}

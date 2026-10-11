@@ -1067,6 +1067,7 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 			processInfo.ProcessPath = metadata.Metadata.ProcessInfo.ProcessPaths[0]
 		}
 	}
+	outbound, outboundType := metadata.ResolvedOutbound()
 	return &Connection{
 		Id:            metadata.ID.String(),
 		Inbound:       metadata.Metadata.Inbound,
@@ -1083,9 +1084,9 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 		UplinkTotal:   uplinkTotal,
 		DownlinkTotal: downlinkTotal,
 		Rule:          rule,
-		Outbound:      metadata.Outbound,
-		OutboundType:  metadata.OutboundType,
-		ChainList:     metadata.Chain,
+		Outbound:      outbound,
+		OutboundType:  outboundType,
+		ChainList:     metadata.ResolvedChain(),
 		ProcessInfo:   processInfo,
 	}
 }
