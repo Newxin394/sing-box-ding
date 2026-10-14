@@ -4,6 +4,22 @@ Provide a complete report from startup through one reproduction and shutdown.
 Startup-only logs rarely explain intermittent packet loss, attachment changes,
 or resource growth.
 
+## Triage by symptom
+
+| Symptom | First evidence | Common distinction |
+| --- | --- | --- |
+| Startup fails at object load | `tools ebpf status --json`, verifier log, full error | Missing helper/program/map support or security policy denial |
+| Startup fails at attach | startup log, target cgroup/interface, SELinux/LSM log | Object support exists, but the real hook is denied or already occupied |
+| Inbound starts but traffic bypasses | `api ebpf`, attachment list, filter counters, pass/fragment counters | Wrong path/interface or intentional policy/fragment bypass |
+| UDP intermittently fails | first warning, UDP NAT counters, map occupancy, network-change timestamps | Queue/map pressure, stale assignment, release notification loss, or upstream loss |
+| Traffic changes after Wi-Fi/mobile/hotspot switch | before/after runtime report, routes, links and TC filters | Waiting for a new interface, recovering managed state, or lost OS tethering state |
+| CPU or memory grows | pprof, active UDP sessions, reply-socket pool, map occupancy | Go heap/goroutines, userspace session churn, or kernel map allocation |
+| Device reboots or kernel panics | `/sys/fs/pstore`, kernel release, enabled policy | Kernel verifier/map/driver defect; userspace logs alone are insufficient |
+
+Do not infer the responsible data plane from the word “eBPF” alone. Local
+`cgroup`, local `tc`, shared `socket_assign`, and shared `packet_rewrite` use
+different hooks, maps, delivery paths, and cleanup mechanisms.
+
 ## Minimum report
 
 Include:
@@ -157,6 +173,23 @@ tc -statistics filter show dev sbdXXXXXXXX ingress
 Replace both interface names with those from the startup log. If the local
 filter count increases while the delivery filter does not, retain both filter
 outputs and the corresponding `ip -details link show` output.
+
+### Map occupancy and pressure states
+
+- UDP `capacity_evictions`, `queue_drops`, pending-release rejections, and lost
+  release notifications are different pressure signals; not all of them mean the
+  BPF assignment map is missing entries.
+- map occupancy is collected only on an explicit diagnostic request. A map with
+  `pressure: not_applicable` has a fixed layout that is not safely iterable;
+  `configured` means its capacity comes from the compiled policy and filling it
+  is expected; `recovery_failed` means key iteration itself failed. Do not
+  interpret any of these states as zero occupancy. A top-level `error` means
+  map enumeration or inspection was denied before all maps could be observed.
+
+program/map enumeration filters on the `sb_` naming convention, and other
+visible sing-ebpf processes in the same kernel can appear; each inbound's own
+attachment, policy state, userspace sessions and counters are the instance-level
+evidence.
 
 ## Privacy
 

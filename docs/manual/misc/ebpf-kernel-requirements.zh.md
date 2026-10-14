@@ -11,6 +11,52 @@ eBPF 入站的 local 接管默认使用 cgroup v2 socket-address 数据面，sha
 trie 安全检查是例外：受影响内核可能在探测动作本身执行时出错，因此需要保守地检查
 版本范围。若 TCX link 能力可用则优先使用，否则回退兼容的 `clsact` 挂载。
 
+## 平台部署要求
+
+实际部署分为两种场景。两者使用相同的 eBPF 对象，但内核资源所有权、权限和链路
+拓扑不同。
+
+### 标准 Linux 与 OpenWrt
+
+在普通 Linux 主机或 OpenWrt 路由器上，应以 root 运行 sing-box，或授予等价能力，通常
+需要 `CAP_BPF` 和 `CAP_NET_ADMIN`；旧内核还可能需要 `CAP_SYS_ADMIN`。目标配置必须
+提供所需的 BPF syscall、map、helper、TC classifier；只有 local TC 需要可用的 veth。
+local `cgroup` 还需要可见且可写的 cgroup v2 层级。如果发行版没有自动挂载，应在启动
+前挂载 cgroup2；只有使用 pinned netd 或其他 pin 集成时才需要 bpffs。
+
+OpenWrt 内核模块必须与正在运行的目标内核和架构完全匹配。根据数据面，固件通常需要
+BPF、TC/scheduler classifier 和 veth 模块，常见包名包括 `kmod-bpf`、`kmod-sched-core`、
+`kmod-veth`，或拆分出的 `cls_bpf`/`act_bpf` 包；实际名称随发行版和版本变化。运行时
+不需要 `bpftool`、`tc`、`ip`、libbpf 或 clang 可执行文件，sing-box 直接使用 BPF syscall
+和 netlink。请用与服务相同的接口、协议和数据面运行内置探测，再执行真实启动；非挂载
+探测不能证明路由、qdisc、sysctl 和 LSM 权限可用。
+
+### Root Android
+
+拥有 root 并不等于兼容。root service 必须能看到厂商 cgroup v2 层级；只有需要与 netd
+共存或恢复 hook 时才额外需要 bpffs 和 netd pin。Android SELinux 也必须允许所选 BPF、
+cgroup、TC、路由和 sysctl 操作。Android 15+ 及部分厂商内核可能在 cgroup hook 上放置
+netd 单程序 owner；运行时会报告并分别选择多程序、旧式挂载或严格识别的 netd 放行程序
+替换路径。可选的 socket-release 和进程追踪 hook 被拒绝时，会回退有界 LRU 清理或
+用户态进程查询，不会自动判定主数据面不可用。
+
+local TC 仍需要厂商 veth/TC 和策略路由能力；local cgroup 不需要 veth 或 TC。
+`packet_rewrite` 要求以太网帧，`socket_assign` 支持文档中列出的 raw-IP、PPP 和隧道链路。
+应使用 `sing-box tools ebpf status` 和真实启动验证设备，并记录内核版本/配置、build
+fingerprint、SELinux 拒绝日志、实际挂载/清理路径和接口帧类型。
+
+## 数据面能力概要
+
+| 数据面 | hook 与交付方式 | 链路要求 | 主要额外要求 |
+| --- | --- | --- | --- |
+| local `cgroup` | cgroup v2 socket-address hook 将目标改写为 token 地址 | 不挂载网络接口 | `CONFIG_CGROUP_BPF`、connect hook，以及启用地址族的 UDP sendmsg/recvmsg hook |
+| local `tc` | 默认接口 egress、delivery veth ingress 和 socket assignment | 以太网或受支持的 L3 帧 | TC classifier、veth、策略路由、socket lookup/assignment 与 redirect helper |
+| shared `socket_assign` | 下游 ingress 将报文分配给透明监听器 | 以太网、raw-IP、PPP/SLIP 或受支持隧道 | TC classifier、策略路由和 socket lookup/assignment helper |
+| shared `packet_rewrite` | 下游 ingress 改写请求，egress 恢复回复 | 仅以太网 | TC classifier、校验和/报文改写 helper 与逐 flow 状态 |
+
+这四条路径不是按内核版本递进的能力层级。厂商内核可能支持其中一条，却在另一条的
+对象加载或挂载阶段拒绝。应探测实际准备配置的路径，并以真实启动成功作为最终挂载验证。
+
 ## 内核配置
 
 必须启用以下选项或供应商内核中的等价能力：
@@ -59,6 +105,9 @@ connect4/connect6 和 UDP sendmsg/recvmsg 程序，并使用 `bpf_get_socket_coo
 map lookup/update/delete 与 current-UID helper。若 UDP socket-release hook 不可用，
 sing-box 会加载不引用该 hook 的有界 LRU 清理变体。所选对象会在开始接管前实际加载，
 因此缺少 helper 或程序类型会直接导致启动失败，而不依赖内核版本字符串。
+可选的 socket-release 能力探测只使用多程序挂载，不会回退到可能替换 Android/netd
+现有 owner 的无标志挂载。因此该探测被拒绝时只选择 LRU 清理变体，不会让必需的
+cgroup 数据面不可用。
 
 TCP listener 的 SOCKMAP 是可选能力。内核能够创建 `BPF_MAP_TYPE_SOCKMAP`
 且现代 TC section 能通过 verifier 时，优先使用它处理 wildcard listener；
@@ -80,6 +129,30 @@ hook 以及 `bpf_get_socket_cookie`、`bpf_get_current_uid_gid`。它们将 sock
 
 对象不依赖 BTF 或 CO-RE，同时生成 BPF 大端和小端版本，并避免使用有界循环，
 以降低供应商 verifier 差异。
+
+## 对象选择与挂载行为
+
+能力检查会在启用路径前选择完整对象变体：
+
+- TC TCP 先尝试支持 SOCKMAP 的对象，失败后回退到完全不引用 SOCKMAP 的 legacy
+  对象。现代对象加载失败并不能证明 legacy section 可用，因此回退对象仍会单独通过
+  verifier 验证。
+- local cgroup UDP 在程序和挂载均可用时使用 socket-release 通知变体；否则选择有界
+  LRU 清理变体。仅可选 release hook 被拒绝时，不应导致整个 cgroup 数据面不可用。
+- TC 仅在默认优先级下优先尝试 TCX；TCX 创建不受支持时回退到自有 `clsact` filter。
+  显式配置自定义优先级时直接选择 `clsact`。
+- cgroup 程序先请求多程序挂载；厂商内核返回兼容错误时可回退旧式独占挂载。独占
+  挂载可能替换已有单程序，也可能与 netd 后续的独占挂载冲突，因此启动诊断会明确
+  报告实际采用的方式。独立的 socket-release 能力探测只使用多程序挂载，不使用该
+  独占回退。
+
+预检对象加载只证明 verifier 接受对象且 map ABI 可用，并不能证明服务有权挂载到特定
+cgroup/接口、取得接口锁、安装路由、修改 sysctl 或与 Android netd 共存。这些操作只在
+真实启动时执行。
+
+所有内嵌对象均使用 Android NDK r29 Clang 21 生成，不含 BTF/CO-RE，同时提供大端与
+小端版本。普通构建不会编译 C，也不需要 NDK；修改 BPF C 或 C/Go ABI 后必须重新生成
+两种对象，并通过源码/对象 manifest 新鲜度检查。
 
 ## 已知 LPM trie 安全问题
 

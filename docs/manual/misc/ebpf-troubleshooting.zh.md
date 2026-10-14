@@ -3,6 +3,21 @@
 问题报告应覆盖进程启动、一次完整复现和停止过程。只有启动日志通常无法解释间歇性
 丢包、attachment 变化或资源持续增长。
 
+## 按现象快速定位
+
+| 现象 | 首要证据 | 主要区分方向 |
+| --- | --- | --- |
+| 启动在对象加载阶段失败 | `tools ebpf status --json`、verifier 日志、完整错误 | helper/program/map 能力缺失，或安全策略拒绝 |
+| 启动在挂载阶段失败 | 启动日志、目标 cgroup/接口、SELinux/LSM 日志 | 对象受支持，但真实 hook 无权限或已被占用 |
+| 启动成功但流量绕过 | `api ebpf`、attachment、filter 与放行/分片计数 | 路径/接口错误，或命中有意的策略/分片绕过 |
+| UDP 间歇异常 | 首条告警、UDP NAT 计数、map 占用、网络切换时间 | 队列/map 压力、assignment 过期、release 通知丢失或上游丢包 |
+| Wi-Fi/移动数据/热点切换后异常 | 切换前后运行报告、路由、链路和 TC filter | 等待新接口、受管状态恢复中，或系统热点状态已撤销 |
+| CPU 或内存持续增长 | pprof、活动 UDP 会话、回复 socket 池、map 占用 | Go heap/goroutine、用户态会话抖动或内核 map 分配 |
+| 设备重启或 kernel panic | `/sys/fs/pstore`、内核版本、已启用策略 | 内核 verifier/map/驱动问题，仅用户态日志不足以判断 |
+
+不要只凭"eBPF"一词推断责任路径。local `cgroup`、local `tc`、shared
+`socket_assign` 和 shared `packet_rewrite` 使用不同 hook、map、交付和清理机制。
+
 ## 最低限度材料
 
 请提供：
@@ -137,6 +152,18 @@ tc -statistics filter show dev sbdXXXXXXXX ingress
 
 请将两个接口名替换为启动日志中的实际值。如果 local filter 计数增长而 delivery
 filter 不增长，请同时保留两条 filter 输出和对应的 `ip -details link show` 输出。
+
+### map 占用与压力状态
+
+- UDP `capacity_evictions`、`queue_drops`、pending-release 拒绝和 release 通知丢失是
+  不同压力信号，并不都代表 BPF assignment map 缺项。
+- map occupancy 只在显式请求诊断时采集。map 的 `pressure: not_applicable` 表示其布局
+  固定，不能安全遍历；`configured` 表示容量来自已编译的策略，填满是预期状态；
+  `recovery_failed` 表示键遍历本身失败。上述状态都不表示占用为零。顶层 `error` 表示
+  在完成所有 map 检查前，map 枚举或检查权限被拒绝。
+
+program/map 枚举按 `sb_` 命名约定筛选，同一内核中其他可见的 sing-ebpf 进程也可能
+出现；每个入站自身的 attachment、策略状态、用户态会话和计数才是实例级证据。
 
 ## 隐私
 

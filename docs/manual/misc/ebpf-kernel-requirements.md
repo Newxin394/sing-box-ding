@@ -15,6 +15,65 @@ uses a conservative release check because affected kernels can fault while
 that capability is being probed. When TCX link creation is available it is
 preferred; otherwise sing-box uses the compatible `clsact` attachment.
 
+## Platform profiles
+
+There are two practical deployment profiles. They share the same eBPF objects,
+but their kernel ownership, permissions, and link topology are different.
+
+### Standard Linux and OpenWrt
+
+For a normal Linux host or OpenWrt router, run sing-box as root or grant the
+equivalent capabilities, normally `CAP_BPF` and `CAP_NET_ADMIN` (older kernels
+may also require `CAP_SYS_ADMIN`). The selected configuration must expose the
+required BPF syscall, maps, helpers, TC classifier, and—only for local TC—a
+usable veth. Local `cgroup` additionally needs a visible writable cgroup v2
+hierarchy. Mount cgroup2 before startup when the distribution does not mount it
+automatically; bpffs is only needed where pinned netd or other pin-based
+integration is used.
+
+OpenWrt modules must match the exact running kernel and target architecture.
+Depending on the selected data plane, the target image commonly needs the BPF,
+TC/scheduler classifier, and veth modules (often packaged as `kmod-bpf`,
+`kmod-sched-core`, `kmod-veth`, or split `cls_bpf`/`act_bpf` packages; names vary
+by release). No `bpftool`, `tc`, `ip`, libbpf, or clang executable is required at
+runtime: sing-box uses BPF syscalls and netlink directly. Use the built-in probe
+with the same interface and protocols as the service, then perform a real
+startup because route, qdisc, sysctl, and LSM permissions are not proven by the
+non-attaching probe.
+
+### Root Android
+
+Root access alone is not a compatibility guarantee. The root service must see
+the vendor cgroup v2 hierarchy; bpffs and netd pins are additionally required
+when netd coexistence or hook restoration is in use. Android SELinux must also
+allow the selected BPF, cgroup, TC, route, and sysctl operations. Android 15+
+and vendor kernels may place a single-program netd owner on cgroup hooks; the
+runtime reports and selects multi-program, legacy, or the narrowly recognized
+netd pass-through replacement path. Optional socket-release and process-tracking
+hooks can be denied and will fall back to bounded LRU cleanup or userspace
+process lookup without disabling the main data plane.
+
+Local TC still needs vendor veth/TC and policy-routing support; local cgroup does
+not need veth or TC. `packet_rewrite` needs Ethernet framing, while
+`socket_assign` supports the documented raw-IP, PPP, and tunnel links. Validate
+the actual device with `sing-box tools ebpf status` and a real start, recording
+the kernel release/configuration, build fingerprint, SELinux audit denials,
+selected attachment/cleanup paths, and interface framing.
+
+## Data-plane capability summary
+
+| Data plane | Hook and delivery | Link requirement | Main extra requirements |
+| --- | --- | --- | --- |
+| local `cgroup` | cgroup v2 socket-address hooks rewrite destinations to token addresses | No network-interface attachment | `CONFIG_CGROUP_BPF`, connect hooks, and UDP sendmsg/recvmsg hooks for enabled families |
+| local `tc` | default-interface egress, delivery veth ingress, socket assignment | Ethernet or supported L3 framing | TC classifiers, veth, policy routing, socket lookup/assignment and redirect helpers |
+| shared `socket_assign` | downstream ingress assigns packets to transparent listeners | Ethernet, raw-IP, PPP/SLIP, or supported tunnels | TC classifiers, policy routing and socket lookup/assignment helpers |
+| shared `packet_rewrite` | downstream ingress rewrites requests; egress restores replies | Ethernet only | TC classifiers, checksum/packet rewrite helpers and per-flow state |
+
+The four paths do not form a version ladder. A vendor kernel may support one
+path and reject another at object load or attachment time. Probe the exact path
+that will be configured and treat a successful real startup as the final
+attachment test.
+
 ## Kernel configuration
 
 The following options, or their vendor equivalents, are required:
@@ -71,6 +130,10 @@ When UDP socket-release attachment is unavailable, sing-box loads a bounded
 LRU cleanup variant that does not reference that hook. The selected object is
 loaded before interception is attached, so a missing helper or program type
 fails startup without relying on the kernel release.
+The optional socket-release capability probe is multi-only and never falls back
+to an unflagged attach that could replace an existing Android/netd owner. This
+probe denial therefore selects the LRU cleanup variant; it does not make the
+required cgroup data plane unavailable.
 
 TCP listener SOCKMAP support is optional. When `BPF_MAP_TYPE_SOCKMAP` can be
 created and the modern TC sections load successfully, it is used for wildcard
@@ -98,6 +161,38 @@ process searcher and does not prevent the inbound from starting.
 The object contains no BTF or CO-RE dependency. It is generated for both BPF
 endiannesses and avoids bounded loops so vendor verifier behavior remains
 predictable.
+
+## Object selection and attachment behavior
+
+Capability checks select complete object variants before any path is enabled:
+
+- TC TCP first attempts the SOCKMAP-capable object and falls back to a legacy
+  object that does not reference SOCKMAP. A failed modern load is not treated
+  as proof that the legacy section will load; the fallback is verified itself.
+- Local cgroup UDP uses the socket-release notification variant when its
+  program and attachment can be used. Otherwise it selects a bounded LRU
+  cleanup variant. Denial of the optional release hook alone must not make the
+  entire cgroup data plane unavailable.
+- TC attachment prefers TCX only with the default priority. Unsupported TCX
+  creation falls back to an owned `clsact` filter; an explicit custom priority
+  selects `clsact` directly.
+- cgroup programs first request multi-program attachment. Compatible vendor
+  failures can fall back to legacy exclusive attachment. Exclusive attachment
+  can replace an existing single program and can still conflict with a later
+  exclusive netd attach, so this fallback is observable in startup diagnostics.
+  The separate socket-release capability probe is multi-only and never uses
+  that exclusive fallback.
+
+Preflight object loading proves verifier acceptance and map ABI only. It does
+not prove that the service can attach to a specific cgroup or interface, acquire
+the per-interface lock, install routes, change sysctls, or coexist with Android
+netd. Those operations are deliberately performed only during real startup.
+
+All embedded objects are generated without BTF/CO-RE using Android NDK r29
+Clang 21 and include little- and big-endian variants. Ordinary builds do not
+compile C and do not require the NDK; changing BPF C or the C/Go ABI requires
+regenerating both variants and passing the source/object manifest freshness
+check.
 
 ## Known LPM trie safety issue
 
