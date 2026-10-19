@@ -14,6 +14,13 @@ type processPathWidener interface {
 	SetNeedProcessPath()
 }
 
+// processPathReporter is implemented by searchers that expose whether the
+// procfs walk is enabled. A searcher without it always reports paths, so the
+// router has to treat its lookups as full ones.
+type processPathReporter interface {
+	NeedProcessPath() bool
+}
+
 // processPathHook remembers one rule-set registration so it can be undone.
 type processPathHook struct {
 	ruleSet  adapter.RuleSet

@@ -100,14 +100,18 @@ type InboundContext struct {
 	SourceGeoIPCode                     string
 	GeoIPCode                           string
 	ProcessInfo                         *ConnectionOwner
-	SourceMACAddress                    net.HardwareAddr
-	SourceHostname                      string
-	QueryType                           uint16
-	QueryClientSubnet                   netip.Prefix
-	QueryDNSSEC                         bool
-	FakeIP                              bool
-	PreMatch                            bool
-	DestOverride                        bool
+	// ProcessInfoResolver holds a single lazy resolver, set by the router when
+	// the initial lookup only resolved the socket owner. Call it through
+	// ResolveProcessInfo rather than directly, so the result is memoized.
+	ProcessInfoResolver []func() *ConnectionOwner
+	SourceMACAddress    net.HardwareAddr
+	SourceHostname      string
+	QueryType           uint16
+	QueryClientSubnet   netip.Prefix
+	QueryDNSSEC         bool
+	FakeIP              bool
+	PreMatch            bool
+	DestOverride        bool
 
 	// rule cache
 
@@ -146,6 +150,28 @@ func (c *InboundContext) GetRealOutboundChain() []string {
 		return c.Extended.RealOutboundChain
 	}
 	return nil
+}
+
+// ResolveProcessInfo answers the connection's process details lazily.
+//
+// The router resolves the socket owner up front, which is cheap, and defers
+// the expensive procfs walk behind ProcessInfoResolver. A rule that needs the
+// executable path calls this; the answer is memoized on the context, so the
+// walk happens at most once per connection. It degrades to the plain
+// ProcessInfo when no resolver was installed.
+func (c *InboundContext) ResolveProcessInfo() *ConnectionOwner {
+	if len(c.ProcessInfoResolver) == 0 {
+		return c.ProcessInfo
+	}
+	resolver := c.ProcessInfoResolver[0]
+	if resolver == nil {
+		return c.ProcessInfo
+	}
+	if processInfo := resolver(); processInfo != nil {
+		c.ProcessInfo = processInfo
+		c.ProcessInfoResolver = nil
+	}
+	return c.ProcessInfo
 }
 
 func (c *InboundContext) ResetRuleCache() {

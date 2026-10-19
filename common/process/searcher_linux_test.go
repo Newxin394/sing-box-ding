@@ -38,7 +38,7 @@ func TestProcessPathSnapshotIsThrottled(t *testing.T) {
 	// would previously have forced a rebuild each time.
 	const absentInode = ^uint32(0)
 	selfUID := uint32(os.Getuid())
-	if _, err = linuxSearcher.findProcessPaths(absentInode, selfUID); err == nil {
+	if _, err = linuxSearcher.findProcessPaths(absentInode, selfUID, true); err == nil {
 		t.Fatal("expected an absent inode to be unresolved")
 	}
 	first, loaded := linuxSearcher.processPathCache.Get(processPathsAllUsers)
@@ -48,7 +48,7 @@ func TestProcessPathSnapshotIsThrottled(t *testing.T) {
 	if first.builtAt.IsZero() {
 		t.Fatal("snapshot carries no build timestamp")
 	}
-	if _, err = linuxSearcher.findProcessPaths(absentInode, selfUID); err == nil {
+	if _, err = linuxSearcher.findProcessPaths(absentInode, selfUID, true); err == nil {
 		t.Fatal("expected an absent inode to be unresolved")
 	}
 	second, loaded := linuxSearcher.processPathCache.Get(processPathsAllUsers)

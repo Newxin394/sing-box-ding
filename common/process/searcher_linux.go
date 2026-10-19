@@ -102,6 +102,28 @@ func (s *linuxSearcher) ResetCache() {
 	s.processPathCache.Purge()
 }
 
+// NeedProcessPath reports whether the procfs walk is currently enabled.
+func (s *linuxSearcher) NeedProcessPath() bool {
+	return s.needProcessPath.Load()
+}
+
+// cachedProcessPaths returns the paths already held by a live snapshot without
+// walking procfs. A cold cache reports no paths, which is the answer an
+// owner-only lookup gives up rather than paying for a full scan.
+func (s *linuxSearcher) cachedProcessPaths(inode, uid uint32) []string {
+	if cached, ok := s.processPathCache.Get(uid); ok {
+		if processPaths, found := cached.lookup(inode); found {
+			return processPaths
+		}
+	}
+	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
+		if processPaths, found := cached.lookup(inode); found {
+			return processPaths
+		}
+	}
+	return nil
+}
+
 // SetNeedProcessPath widens the procfs gate at runtime.
 //
 // Whether the walk is needed is decided once at start, from the static
@@ -143,12 +165,29 @@ func (s *linuxSearcher) FindProcessInfo(ctx context.Context, network string, sou
 	// above already answers package_name, user and user_id rules, so skip the
 	// walk entirely when no rule needs a path.
 	if s.needProcessPath.Load() {
-		processPaths, err := s.findProcessPaths(inode, uid)
+		processPaths, err := s.findProcessPaths(inode, uid, true)
 		if err != nil {
 			s.logger.DebugContext(ctx, "find process path: ", err)
 		} else {
 			processInfo.ProcessPaths = processPaths
 		}
+	}
+	completeProcessInfo(processInfo, s.packageManager)
+	return processInfo, nil
+}
+
+// FindProcessInfoByOwner resolves only the uid of the socket owner and never
+// walks procfs. Paths are answered from an existing snapshot when one holds the
+// inode, so process_path rules keep matching whatever the last walk saw without
+// a miss being able to start a walk of its own.
+func (s *linuxSearcher) FindProcessInfoByOwner(ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error) {
+	inode, uid, err := s.resolveSocketByNetlink(network, source, destination)
+	if err != nil {
+		return nil, err
+	}
+	processInfo := &adapter.ConnectionOwner{
+		UserId:       int32(uid),
+		ProcessPaths: s.cachedProcessPaths(inode, uid),
 	}
 	completeProcessInfo(processInfo, s.packageManager)
 	return processInfo, nil
@@ -199,23 +238,36 @@ func (s *linuxSearcher) resolveSocketByNetlink(network string, source netip.Addr
 // snapshot can contain and rebuilding per miss turns short-lived traffic (DNS
 // being the worst case) into a continuous procfs walk.
 //
+// strictly separates the two callers. An owner-only lookup (strictly false)
+// never walks procfs: an inode missing from the snapshots reports no path, which
+// is what a caller that only needs the uid should get. A process_path matcher
+// passes strictly true and still forces one rebuild per rescan interval, so a
+// path lookup can never answer from a stale snapshot.
+//
 // Rebuilds are serialized, so a burst of concurrent misses shares one walk
 // rather than starting one each, and the walk itself is cheap for the common
 // case: it fills the uid table first and abandons the rest of /proc as soon as
 // that table answers, which is the case whenever the socket belongs to the
 // process that created it.
-func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, error) {
+func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32, strictly bool) ([]string, error) {
 	// Consult the caller's uid snapshot first, then the all-users snapshot.
 	// The uid snapshot holds the owning process, and the all-users snapshot
 	// additionally holds processes sharing the same socket.
 	if cached, ok := s.processPathCache.Get(uid); ok {
 		if processPaths, found := cached.lookup(targetInode); found {
-			return processPaths, nil
+			if !strictly || time.Since(cached.builtAt) < processPathRescanInterval {
+				return processPaths, nil
+			}
 		}
+	}
+	if !strictly {
+		return s.cachedProcessPaths(targetInode, uid), nil
 	}
 	if cached, ok := s.processPathCache.Get(processPathsAllUsers); ok {
 		if processPaths, found := cached.lookup(targetInode); found {
-			return processPaths, nil
+			if time.Since(cached.builtAt) < processPathRescanInterval {
+				return processPaths, nil
+			}
 		}
 	}
 	s.rebuildAccess.Lock()

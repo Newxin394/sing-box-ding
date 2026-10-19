@@ -14,6 +14,7 @@ type processCacheKey struct {
 	Network     string
 	Source      netip.AddrPort
 	Destination netip.AddrPort
+	LookupMode  ProcessLookupMode
 }
 
 type processCacheEntry struct {
@@ -21,16 +22,23 @@ type processCacheEntry struct {
 	err    error
 }
 
-func (r *Router) findProcessInfoCached(ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error) {
+func (r *Router) findProcessInfoCached(ctx context.Context, mode ProcessLookupMode, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error) {
 	key := processCacheKey{
 		Network:     network,
 		Source:      source,
 		Destination: destination,
+		LookupMode:  mode,
 	}
 	if entry, ok := r.processCache.Get(key); ok {
 		return entry.result, entry.err
 	}
-	result, err := process.FindProcessInfo(r.processSearcher, ctx, network, source, destination)
+	var result *adapter.ConnectionOwner
+	var err error
+	if mode == ProcessLookupOwner && r.processSearcher != nil {
+		result, err = process.FindProcessInfoByOwner(r.processSearcher, ctx, network, source, destination)
+	} else {
+		result, err = process.FindProcessInfo(r.processSearcher, ctx, network, source, destination)
+	}
 	r.processCache.Add(key, processCacheEntry{result: result, err: err})
 	return result, err
 }
@@ -39,13 +47,25 @@ func (r *Router) searchProcessInfo(ctx context.Context, metadata *adapter.Inboun
 	if r.processSearcher == nil || metadata.ProcessInfo != nil || !r.isLocalSource(metadata.Source.Addr) {
 		return
 	}
+	mode := ProcessLookupOwner
+	if reporter, isReporter := r.processSearcher.(processPathReporter); !isReporter || reporter.NeedProcessPath() {
+		mode = ProcessLookupFull
+	}
+	if len(metadata.ProcessInfoResolver) == 0 {
+		metadata.ProcessInfoResolver = make([]func() *adapter.ConnectionOwner, 1)
+	}
+	if metadata.ProcessInfoResolver[0] == nil {
+		metadata.ProcessInfoResolver[0] = func() *adapter.ConnectionOwner {
+			return r.resolveProcessInfoFull(ctx, metadata, mode)
+		}
+	}
 	var originDestination netip.AddrPort
 	if metadata.OriginDestination.IsValid() {
 		originDestination = metadata.OriginDestination.AddrPort()
 	} else if metadata.Destination.IsIP() {
 		originDestination = metadata.Destination.AddrPort()
 	}
-	processInfo, err := r.findProcessInfoCached(ctx, metadata.Network, metadata.Source.AddrPort(), originDestination)
+	processInfo, err := r.findProcessInfoCached(ctx, mode, metadata.Network, metadata.Source.AddrPort(), originDestination)
 	if err != nil {
 		r.logger.InfoContext(ctx, "failed to search process: ", err)
 		return

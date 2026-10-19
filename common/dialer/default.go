@@ -374,7 +374,7 @@ func (d *DefaultDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 				return listenConfig.ListenPacket(ctx, N.NetworkUDP, d.udpAddr4)
 			}
 		})
-		return d.trackPacketConn(ctx, destination, packetConn, err)
+		return d.trackPacketConn(ctx, destination, newZeroReadAwarePacketConn(packetConn), err)
 	} else {
 		return d.ListenSerialInterfacePacket(ctx, destination, d.networkStrategy, d.networkType, d.fallbackNetworkType, d.networkFallbackDelay)
 	}
@@ -418,7 +418,7 @@ func (d *DefaultDialer) ListenSerialInterfacePacket(ctx context.Context, destina
 			return nil, err
 		}
 	}
-	return d.trackPacketConn(ctx, destination, packetConn, nil)
+	return d.trackPacketConn(ctx, destination, newZeroReadAwarePacketConn(packetConn), nil)
 }
 
 func (d *DefaultDialer) UDPListenerControl() (control.Func, bool) {

@@ -27,14 +27,15 @@ func NewProcessPathItem(processNameList []string) *ProcessPathItem {
 }
 
 func (r *ProcessPathItem) Match(metadata *adapter.InboundContext) bool {
-	if metadata.ProcessInfo == nil {
+	processInfo := metadata.ResolveProcessInfo()
+	if processInfo == nil {
 		return false
 	}
-	if slices.ContainsFunc(metadata.ProcessInfo.ProcessPaths, func(processPath string) bool { return r.processMap[processPath] }) {
+	if slices.ContainsFunc(processInfo.ProcessPaths, func(processPath string) bool { return r.processMap[processPath] }) {
 		return true
 	}
 	if C.IsAndroid {
-		return slices.ContainsFunc(metadata.ProcessInfo.PackageNames, func(packageName string) bool { return r.processMap[packageName] })
+		return slices.ContainsFunc(processInfo.PackageNames, func(packageName string) bool { return r.processMap[packageName] })
 	}
 	return false
 }

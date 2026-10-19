@@ -19,6 +19,24 @@ type Searcher interface {
 	Close() error
 }
 
+// OwnerSearcher resolves a socket to its owning uid without walking procfs.
+//
+// A searcher that can answer an owner-only question more cheaply than a full
+// lookup implements this, and its result is what feeds the lazy resolver. The
+// full lookup stays available for callers that need the executable path.
+type OwnerSearcher interface {
+	FindProcessInfoByOwner(ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error)
+}
+
+// FindProcessInfoByOwner resolves the socket owner through the cheapest path
+// the searcher offers.
+func FindProcessInfoByOwner(searcher Searcher, ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*adapter.ConnectionOwner, error) {
+	if ownerSearcher, isOwnerSearcher := searcher.(OwnerSearcher); isOwnerSearcher {
+		return ownerSearcher.FindProcessInfoByOwner(ctx, network, source, destination)
+	}
+	return FindProcessInfo(searcher, ctx, network, source, destination)
+}
+
 var ErrNotFound = E.New("process not found")
 
 type Config struct {
