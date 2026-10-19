@@ -30,3 +30,8 @@ AGENTS.md
 /sb-ding-final
 /sb-ding-stripped
 /sing-box-ding-android-arm64
+
+# local build artifacts (2026-10-19)
+/sing-box-v30
+/sing-box-a9-*
+/sing-box.singme.*.arm64

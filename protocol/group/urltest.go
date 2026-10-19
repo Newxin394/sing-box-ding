@@ -912,6 +912,8 @@ type urlTestBatch struct {
 	policy             *urlTestProbePolicy
 }
 
+const urlTestBatchConcurrency = 32
+
 func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool) map[string]uint16 {
 	return URLTestOutboundsWithPolicy(ctx, outboundManager, history, logger, outbounds, link, interval, force, nil)
 }
@@ -919,7 +921,7 @@ func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 func URLTestOutboundsWithPolicy(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool, policy *urlTestProbePolicy) map[string]uint16 {
 	ctx, session := urlTestSessionFromContext(ctx)
 	limiter := service.FromContext[healthCheckLimiter](ctx)
-	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](urlTestBatchConcurrency))
 	testBatch := &urlTestBatch{
 		ctx:                ctx,
 		outbound:           outboundManager,

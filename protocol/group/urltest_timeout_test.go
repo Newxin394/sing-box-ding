@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -34,6 +35,78 @@ func TestURLTestOutboundsPerNodeTimeoutContinuesBatch(t *testing.T) {
 	require.EqualValues(t, 1, following.dialCount.Load())
 	require.NotNil(t, history.LoadURLTestHistory(following.tag))
 	require.Contains(t, result, following.tag)
+}
+
+func TestURLTestOutboundsUsesConfiguredBatchConcurrency(t *testing.T) {
+	const count = urlTestBatchConcurrency
+	state := &batchConcurrencyProbeState{started: make(chan struct{}, count)}
+	manager := &recursiveURLTestOutboundManager{outbounds: make(map[string]adapter.Outbound, count)}
+	outbounds := make([]adapter.Outbound, 0, count)
+	for i := 0; i < count; i++ {
+		outbound := &batchConcurrencyProbeOutbound{state: state, tag: fmt.Sprintf("probe-%d", i)}
+		manager.outbounds[outbound.tag] = outbound
+		outbounds = append(outbounds, outbound)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() {
+		URLTestOutbounds(ctx, manager, urltest.NewHistoryStorage(), log.NewNOPFactory().Logger(), outbounds, "http://example.com", time.Hour, true)
+		close(finished)
+	}()
+
+	for i := 0; i < count; i++ {
+		select {
+		case <-state.started:
+		case <-time.After(2 * time.Second):
+			cancel()
+			select {
+			case <-finished:
+			case <-time.After(2 * time.Second):
+				t.Fatal("batch did not stop after cancellation")
+			}
+			t.Fatalf("only %d of %d probes started", i, count)
+		}
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch did not stop after cancellation")
+	}
+	require.EqualValues(t, count, state.maxActive.Load())
+}
+
+type batchConcurrencyProbeState struct {
+	started   chan struct{}
+	active    atomic.Int32
+	maxActive atomic.Int32
+}
+
+type batchConcurrencyProbeOutbound struct {
+	adapter.Outbound
+	state *batchConcurrencyProbeState
+	tag   string
+}
+
+func (o *batchConcurrencyProbeOutbound) Tag() string { return o.tag }
+
+func (o *batchConcurrencyProbeOutbound) Network() []string {
+	return []string{N.NetworkTCP, N.NetworkUDP}
+}
+
+func (o *batchConcurrencyProbeOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	active := o.state.active.Add(1)
+	for {
+		maxActive := o.state.maxActive.Load()
+		if active <= maxActive || o.state.maxActive.CompareAndSwap(maxActive, active) {
+			break
+		}
+	}
+	o.state.started <- struct{}{}
+	<-ctx.Done()
+	o.state.active.Add(-1)
+	return nil, ctx.Err()
 }
 
 type timeoutURLTestOutbound struct {
