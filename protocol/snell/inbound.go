@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/authuser"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/uot"
 	C "github.com/sagernet/sing-box/constant"
@@ -16,10 +17,9 @@ import (
 	snellprotocol "github.com/sagernet/sing-snell"
 	"github.com/sagernet/sing-snell/snellv5"
 	"github.com/sagernet/sing-snell/snellv6"
-	"github.com/sagernet/sing/common/auth"
+	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
-	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -33,27 +33,29 @@ var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
 
 type Inbound struct {
 	inbound.Adapter
-	ctx      context.Context
-	router   adapter.ConnectionRouterEx
-	logger   logger.ContextLogger
-	listener *listener.Listener
-	service  snellprotocol.Service
-	users    []option.SnellUser
-	version  int
-	obfsMode string
-	udpNat   *quicProxyNATService
-	quicAuth *quicProxyAuthenticationService
+	ctx       context.Context
+	router    adapter.ConnectionRouterEx
+	logger    logger.ContextLogger
+	listener  *listener.Listener
+	service   snellprotocol.Service
+	users     []option.SnellUser
+	userNames []string
+	version   int
+	obfsMode  string
+	udpNat    *quicProxyNATService
+	quicAuth  *quicProxyAuthenticationService
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SnellInboundOptions) (adapter.Inbound, error) {
 	inbound := &Inbound{
-		Adapter:  inbound.NewAdapter(C.TypeSnell, tag),
-		ctx:      ctx,
-		router:   uot.NewRouter(router, logger),
-		logger:   logger,
-		users:    options.Users,
-		version:  options.Version,
-		obfsMode: options.ObfsOptions.ObfsMode,
+		Adapter:   inbound.NewAdapter(C.TypeSnell, tag),
+		ctx:       ctx,
+		router:    uot.NewRouter(router, logger),
+		logger:    logger,
+		users:     options.Users,
+		userNames: common.Map(options.Users, func(it option.SnellUser) string { return it.Name }),
+		version:   options.Version,
+		obfsMode:  options.ObfsOptions.ObfsMode,
 	}
 	if err := validateSnellInboundObfs(options.Version, options.ObfsOptions.ObfsMode); err != nil {
 		return nil, err
@@ -225,16 +227,10 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
 	if len(h.users) > 0 {
-		userIndex, loaded := auth.UserFromContext[int](ctx)
+		user, loaded := authuser.ResolveUserName(ctx, &metadata, h.userNames)
 		if !loaded {
 			N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 			return
-		}
-		user := h.users[userIndex].Name
-		if user == "" {
-			user = F.ToString(userIndex)
-		} else {
-			metadata.User = user
 		}
 		h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 	} else {
@@ -247,16 +243,10 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
 	if len(h.users) > 0 {
-		userIndex, loaded := auth.UserFromContext[int](ctx)
+		user, loaded := authuser.ResolveUserName(ctx, &metadata, h.userNames)
 		if !loaded {
 			N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 			return
-		}
-		user := h.users[userIndex].Name
-		if user == "" {
-			user = F.ToString(userIndex)
-		} else {
-			metadata.User = user
 		}
 		h.logger.InfoContext(ctx, "[", user, "] inbound packet connection from ", metadata.Source)
 	} else {
