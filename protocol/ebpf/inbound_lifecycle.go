@@ -90,7 +90,7 @@ func (i *Inbound) startInbound() error {
 			i.logger.Warn("default interface unavailable; local TC eBPF interception is paused")
 		}
 	}
-	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, i.localEnabled)
+	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, i.sharedOptions.DefaultInterface)
 	tcSharedInterfaces := []string(nil)
 	if sharedSocketAssignEnabled {
 		tcSharedInterfaces = sharedInterfaces

@@ -37,7 +37,7 @@ func (i *Inbound) activateTCCapture() error {
 			return E.New("default TC interface unavailable")
 		}
 	}
-	shared := activeSharedInterfaces(i.sharedOptions.Interface, i.currentDefaultInterfaceName(), i.localEnabled)
+	shared := activeSharedInterfaces(i.sharedOptions.Interface, i.currentDefaultInterfaceName(), i.sharedOptions.DefaultInterface)
 	if i.sharedRewriteEnabled() {
 		shared = nil
 	}

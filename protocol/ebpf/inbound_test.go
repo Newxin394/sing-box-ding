@@ -97,6 +97,9 @@ func TestValidateScopedOptions(t *testing.T) {
 	if err := validateSharedOptions(false, option.EBPFSharedOptions{Interface: []string{"ap0"}}); err == nil {
 		t.Fatal("expected shared-only options to be rejected without explicit enablement")
 	}
+	if err := validateSharedOptions(false, option.EBPFSharedOptions{DefaultInterface: true}); err == nil {
+		t.Fatal("expected shared default-interface attachment to be rejected without explicit enablement")
+	}
 	if err := validateLocalOptions(false, option.EBPFLocalOptions{DataPlane: localDataPlaneCgroup}); err == nil {
 		t.Fatal("expected a local data plane to be rejected when local interception is disabled")
 	}

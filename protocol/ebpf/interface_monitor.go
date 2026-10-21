@@ -569,7 +569,7 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 	if localTCEnabled && localInterface == "" {
 		i.interfaceWarnings.defaultInterface.warn(i.logger, "default interface unavailable; retaining previous local TC attachment")
 	}
-	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, i.localEnabled)
+	sharedInterfaces := activeSharedInterfaces(i.sharedOptions.Interface, defaultInterface, i.sharedOptions.DefaultInterface)
 	tcSharedInterfaces := sharedInterfaces
 	if i.sharedRewriteEnabled() {
 		tcSharedInterfaces = nil
@@ -683,8 +683,8 @@ func availableLocalTCInterface(enabled bool, interfaceName string) (string, erro
 	return interfaceName, nil
 }
 
-func activeSharedInterfaces(configured []string, defaultInterface string, localEnabled bool) []string {
-	if !localEnabled {
+func activeSharedInterfaces(configured []string, defaultInterface string, includeDefaultInterface bool) []string {
+	if includeDefaultInterface {
 		return slices.Clone(configured)
 	}
 	return slices.DeleteFunc(slices.Clone(configured), func(interfaceName string) bool {
