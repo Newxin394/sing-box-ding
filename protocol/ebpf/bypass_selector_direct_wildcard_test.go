@@ -34,7 +34,7 @@ func TestBypassSelectorMemberTriggersExplicit(t *testing.T) {
 	}{
 		{"直连", true},    // listed explicitly
 		{"国内免流", false}, // not listed
-		{"", false},      // empty selection never bypasses
+		{"", false},     // empty selection never bypasses
 	}
 	for _, c := range cases {
 		if got := i.bypassSelectorMemberTriggers(c.selected); got != c.want {

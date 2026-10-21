@@ -31,15 +31,15 @@ var _ adapter.Outbound = (*Outbound)(nil)
 
 type Outbound struct {
 	outbound.Adapter
-	ctx      context.Context
-	logger   logger.ContextLogger
-	dialer   N.Dialer
+	ctx       context.Context
+	logger    logger.ContextLogger
+	dialer    N.Dialer
 	serverddr M.Socksaddr
-	key      string
-	password string
-	flag     string
-	headers  map[string]string
-	udp      bool
+	key       string
+	password  string
+	flag      string
+	headers   map[string]string
+	udp       bool
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CNSOutboundOptions) (adapter.Outbound, error) {
