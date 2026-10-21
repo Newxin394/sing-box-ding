@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/service/internal/relay"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/ntp"
@@ -61,7 +62,7 @@ func isForwardableResponseHeader(key string) bool {
 }
 
 func isForwardableWebSocketRequestHeader(key string) bool {
-	if isHopByHopHeader(key) {
+	if relay.IsHopByHopHeader(key) {
 		return false
 	}
 

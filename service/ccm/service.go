@@ -10,7 +10,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +22,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/service/internal/relay"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -71,34 +71,13 @@ func writeJSONError(w http.ResponseWriter, r *http.Request, statusCode int, erro
 	})
 }
 
-func isHopByHopHeader(header string) bool {
-	switch strings.ToLower(header) {
-	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade", "host":
-		return true
-	default:
-		return false
-	}
-}
-
 const (
 	weeklyWindowSeconds = 604800
 	weeklyWindowMinutes = weeklyWindowSeconds / 60
 )
 
-func parseInt64Header(headers http.Header, headerName string) (int64, bool) {
-	headerValue := strings.TrimSpace(headers.Get(headerName))
-	if headerValue == "" {
-		return 0, false
-	}
-	parsedValue, parseError := strconv.ParseInt(headerValue, 10, 64)
-	if parseError != nil {
-		return 0, false
-	}
-	return parsedValue, true
-}
-
 func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
-	resetAtUnix, hasResetAt := parseInt64Header(headers, "anthropic-ratelimit-unified-7d-reset")
+	resetAtUnix, hasResetAt := relay.ParseInt64Header(headers, "anthropic-ratelimit-unified-7d-reset")
 	if !hasResetAt || resetAtUnix <= 0 {
 		return nil
 	}
@@ -358,11 +337,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for key, values := range r.Header {
-		if !isHopByHopHeader(key) && key != "Authorization" {
-			proxyRequest.Header[key] = values
-		}
-	}
+	relay.CopyRequestHeaders(proxyRequest, r.Header)
 
 	serviceOverridesAcceptEncoding := len(s.httpHeaders.Values("Accept-Encoding")) > 0
 	if s.usageTracker != nil && !serviceOverridesAcceptEncoding {
@@ -378,10 +353,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyRequest.Header.Set("anthropic-beta", anthropicBetaOAuthValue)
 	}
 
-	for key, values := range s.httpHeaders {
-		proxyRequest.Header.Del(key)
-		proxyRequest.Header[key] = values
-	}
+	relay.ApplyServiceHeaders(proxyRequest, s.httpHeaders)
 
 	proxyRequest.Header.Set("Authorization", "Bearer "+accessToken)
 
@@ -392,41 +364,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer response.Body.Close()
 
-	for key, values := range response.Header {
-		if !isHopByHopHeader(key) {
-			w.Header()[key] = values
-		}
-	}
+	relay.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 
 	if s.usageTracker != nil && response.StatusCode == http.StatusOK {
 		s.handleResponseWithTracking(w, response, requestModel, anthropicBetaHeader, messagesCount, username)
 	} else {
-		mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-		if err == nil && mediaType != "text/event-stream" {
-			_, _ = io.Copy(w, response.Body)
-			return
-		}
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			s.logger.Error("streaming not supported")
-			return
-		}
-		buffer := make([]byte, buf.BufferSize)
-		for {
-			n, err := response.Body.Read(buffer)
-			if n > 0 {
-				_, writeError := w.Write(buffer[:n])
-				if writeError != nil {
-					s.logger.Error("write streaming response: ", writeError)
-					return
-				}
-				flusher.Flush()
-			}
-			if err != nil {
-				return
-			}
-		}
+		relay.WriteUntrackedResponse(s.logger, w, response)
 	}
 }
 
