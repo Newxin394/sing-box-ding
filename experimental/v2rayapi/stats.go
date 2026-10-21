@@ -61,91 +61,55 @@ func NewStatsService(options option.V2RayStatsServiceOptions) *StatsService {
 	}
 }
 
-func (s *StatsService) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
-	inbound := metadata.Inbound
-	user := metadata.User
-	outbound := matchOutbound.Tag()
-	var readCounter []*atomic.Int64
-	var writeCounter []*atomic.Int64
+// trafficCounters resolves the configured uplink/downlink counters for one
+// routed connection. It holds access while creating counters so concurrent
+// routed connections do not race with QueryStats/GetStats resets.
+func (s *StatsService) trafficCounters(inbound, outbound, user string) (uplink []*atomic.Int64, downlink []*atomic.Int64) {
 	countInbound := inbound != "" && s.inbounds[inbound]
 	countOutbound := outbound != "" && s.outbounds[outbound]
 	countUser := user != "" && s.users[user]
 	if !countInbound && !countOutbound && !countUser {
-		return conn
+		return
 	}
 	s.access.Lock()
+	defer s.access.Unlock()
 	if countInbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
+		uplink = append(uplink, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
+		downlink = append(downlink, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
 	}
 	if countOutbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
+		uplink = append(uplink, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
+		downlink = append(downlink, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
 	}
 	if countUser {
-		readCounter = append(readCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
+		uplink = append(uplink, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
+		downlink = append(downlink, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
 	}
-	s.access.Unlock()
-	return bufio.NewInt64CounterConn(conn, readCounter, writeCounter)
+	return
+}
+
+func (s *StatsService) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
+	uplink, downlink := s.trafficCounters(metadata.Inbound, matchOutbound.Tag(), metadata.User)
+	if len(uplink) == 0 {
+		return conn
+	}
+	return bufio.NewInt64CounterConn(conn, uplink, downlink)
 }
 
 func (s *StatsService) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
-	inbound := metadata.Inbound
-	user := metadata.User
-	outbound := matchOutbound.Tag()
-	var readCounter []*atomic.Int64
-	var writeCounter []*atomic.Int64
-	countInbound := inbound != "" && s.inbounds[inbound]
-	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
-	if !countInbound && !countOutbound && !countUser {
+	uplink, downlink := s.trafficCounters(metadata.Inbound, matchOutbound.Tag(), metadata.User)
+	if len(uplink) == 0 {
 		return conn
 	}
-	s.access.Lock()
-	if countInbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
-	}
-	if countOutbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
-	}
-	if countUser {
-		readCounter = append(readCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
-	}
-	s.access.Unlock()
-	return bufio.NewInt64CounterPacketConn(conn, readCounter, nil, writeCounter, nil)
+	return bufio.NewInt64CounterPacketConn(conn, uplink, nil, downlink, nil)
 }
 
 func (s *StatsService) RoutedFlow(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) tun.FlowTracker {
-	inbound := metadata.Inbound
-	user := metadata.User
-	outbound := matchOutbound.Tag()
-	var uplinkCounter []*atomic.Int64
-	var downlinkCounter []*atomic.Int64
-	countInbound := inbound != "" && s.inbounds[inbound]
-	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
-	if !countInbound && !countOutbound && !countUser {
+	uplink, downlink := s.trafficCounters(metadata.Inbound, matchOutbound.Tag(), metadata.User)
+	if len(uplink) == 0 {
 		return nil
 	}
-	s.access.Lock()
-	if countInbound {
-		uplinkCounter = append(uplinkCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
-		downlinkCounter = append(downlinkCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
-	}
-	if countOutbound {
-		uplinkCounter = append(uplinkCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
-		downlinkCounter = append(downlinkCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
-	}
-	if countUser {
-		uplinkCounter = append(uplinkCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
-		downlinkCounter = append(downlinkCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
-	}
-	s.access.Unlock()
-	return &statsFlowTracker{uplinkCounter: uplinkCounter, downlinkCounter: downlinkCounter}
+	return &statsFlowTracker{uplinkCounter: uplink, downlinkCounter: downlink}
 }
 
 var _ tun.FlowTracker = (*statsFlowTracker)(nil)
