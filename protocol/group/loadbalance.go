@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -540,28 +539,16 @@ func (g *LoadBalanceGroup) urlTestLockedPolicy(ctx context.Context, force bool, 
 	return result, nil
 }
 
-func (g *LoadBalanceGroup) scheduledProbePolicy() *urlTestProbePolicy {
-	return &urlTestProbePolicy{
-		preserveHistory: true,
-		onResult:        g.health.record,
-		shouldProbe: func(tag string, history *adapter.URLTestHistory, now time.Time) bool {
-			health := g.health.get(tag)
-			lastProbe := health.lastProbe
-			if history != nil && history.Time.After(lastProbe) {
-				lastProbe = history.Time
-			}
-			if lastProbe.IsZero() {
-				return true
-			}
-			period := g.interval
-			if health.failures > 0 {
-				period = health.backoff(g.interval)
-			} else {
-				period *= urlTestColdRefreshIntervals
-			}
-			return now.Sub(lastProbe) >= period-g.interval/2
-		},
+func (g *LoadBalanceGroup) scheduler() urlTestProbeScheduler {
+	return urlTestProbeScheduler{
+		interval:     g.interval,
+		health:       &g.health,
+		dialFailures: &g.dialFailures,
 	}
+}
+
+func (g *LoadBalanceGroup) scheduledProbePolicy() *urlTestProbePolicy {
+	return g.scheduler().scheduledPolicy(func() map[string]struct{} { return nil })
 }
 
 func (g *LoadBalanceGroup) networkChanged() {
@@ -570,38 +557,13 @@ func (g *LoadBalanceGroup) networkChanged() {
 	if !g.health.allowNetworkProbe(time.Now()) {
 		return
 	}
-	type candidate struct {
-		tag   string
-		delay uint16
-	}
-	var candidates []candidate
-	for _, outbound := range g.loadOutbounds() {
-		if history := g.history.LoadURLTestHistory(RealTag(outbound, N.NetworkTCP)); history != nil {
-			candidates = append(candidates, candidate{outbound.Tag(), history.Delay})
-		}
-	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].delay < candidates[j].delay })
-	forceTags := make(map[string]struct{}, min(len(candidates), urlTestHotCandidates)*3)
-	for _, candidate := range candidates[:min(len(candidates), urlTestHotCandidates)] {
-		forceTags[candidate.tag] = struct{}{}
-		if outbound, loaded := g.outbound.Outbound(candidate.tag); loaded {
-			forceTags[RealTag(outbound, N.NetworkTCP)] = struct{}{}
-			forceTags[RealTag(outbound, N.NetworkUDP)] = struct{}{}
-		}
-	}
+	forceTags := urlTestTopTags(g.outbound, g.history, g.loadOutbounds())
 	if len(forceTags) == 0 {
 		return
 	}
-	policy := &urlTestProbePolicy{
-		forceTags:       forceTags,
-		onlyForced:      true,
-		networkChanged:  true,
-		preserveHistory: true,
-		onResult:        g.health.record,
-	}
 	g.checking.Lock()
 	defer g.checking.Unlock()
-	_, _ = g.urlTestLockedPolicy(g.ctx, false, policy)
+	_, _ = g.urlTestLockedPolicy(g.ctx, false, g.scheduler().networkChangedPolicy(forceTags))
 }
 
 func (g *LoadBalanceGroup) reportDialFailure(outbound adapter.Outbound, network string) {
@@ -616,17 +578,11 @@ func (g *LoadBalanceGroup) reportDialFailure(outbound adapter.Outbound, network 
 	if outbound.Tag() != tag {
 		forceTags[outbound.Tag()] = struct{}{}
 	}
-	policy := &urlTestProbePolicy{
-		forceTags:       forceTags,
-		onlyForced:      true,
-		preserveHistory: true,
-		onResult:        g.health.record,
-	}
 	go func() {
 		defer g.dialFailures.release()
 		if g.checking.TryLock() {
 			defer g.checking.Unlock()
-			_, _ = g.urlTestLockedPolicy(g.ctx, false, policy)
+			_, _ = g.urlTestLockedPolicy(g.ctx, false, g.scheduler().dialFailurePolicy(forceTags))
 		}
 	}()
 }

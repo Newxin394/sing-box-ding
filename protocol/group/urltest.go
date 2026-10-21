@@ -7,7 +7,6 @@ import (
 	"net"
 	"regexp"
 	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -354,15 +353,9 @@ func (g *URLTestGroup) reportDialFailure(outbound adapter.Outbound, network stri
 	if outbound.Tag() != tag {
 		forceTags[outbound.Tag()] = struct{}{}
 	}
-	policy := &urlTestProbePolicy{
-		forceTags:       forceTags,
-		onlyForced:      true,
-		preserveHistory: true,
-		onResult:        g.health.record,
-	}
 	go func() {
 		defer g.dialFailures.release()
-		g.checkOutboundsPolicy(g.ctx, policy)
+		g.checkOutboundsPolicy(g.ctx, g.scheduler().dialFailurePolicy(forceTags))
 	}()
 }
 
@@ -735,39 +728,19 @@ func (g *URLTestGroup) networkChanged() {
 	if len(forceTags) == 0 || !g.health.allowNetworkProbe(time.Now()) {
 		return
 	}
-	policy := &urlTestProbePolicy{
-		forceTags:       forceTags,
-		onlyForced:      true,
-		networkChanged:  true,
-		preserveHistory: true,
-		onResult:        g.health.record,
+	g.checkOutboundsPolicy(g.ctx, g.scheduler().networkChangedPolicy(forceTags))
+}
+
+func (g *URLTestGroup) scheduler() urlTestProbeScheduler {
+	return urlTestProbeScheduler{
+		interval:     g.interval,
+		health:       &g.health,
+		dialFailures: &g.dialFailures,
 	}
-	g.checkOutboundsPolicy(g.ctx, policy)
 }
 
 func (g *URLTestGroup) scheduledProbePolicy() *urlTestProbePolicy {
-	return &urlTestProbePolicy{
-		preserveHistory: true,
-		onResult:        g.health.record,
-		shouldProbe: func(tag string, history *adapter.URLTestHistory, now time.Time) bool {
-			health := g.health.get(tag)
-			lastProbe := health.lastProbe
-			if history != nil && history.Time.After(lastProbe) {
-				lastProbe = history.Time
-			}
-			if lastProbe.IsZero() {
-				return true
-			}
-			period := g.interval
-			if _, hot := g.hotTags()[tag]; !hot {
-				period = urlTestColdRefreshIntervals * g.interval
-				if health.failures > 0 {
-					period = health.backoff(g.interval)
-				}
-			}
-			return now.Sub(lastProbe) >= period-g.interval/2
-		},
-	}
+	return g.scheduler().scheduledPolicy(g.hotTags)
 }
 
 func (g *URLTestGroup) memberExcessive(outbound adapter.Outbound, network string) bool {
@@ -791,24 +764,8 @@ func (g *URLTestGroup) hotTags() map[string]struct{} {
 			hot[RealTag(selected, N.NetworkUDP)] = struct{}{}
 		}
 	}
-	outbounds := g.loadOutbounds()
-	type candidate struct {
-		tag   string
-		delay uint16
-	}
-	candidates := make([]candidate, 0, len(outbounds))
-	for _, outbound := range outbounds {
-		if history := g.history.LoadURLTestHistory(RealTag(outbound, N.NetworkTCP)); history != nil {
-			candidates = append(candidates, candidate{outbound.Tag(), history.Delay})
-		}
-	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].delay < candidates[j].delay })
-	for _, candidate := range candidates[:min(len(candidates), urlTestHotCandidates)] {
-		hot[candidate.tag] = struct{}{}
-		if outbound, loaded := g.outbound.Outbound(candidate.tag); loaded {
-			hot[RealTag(outbound, N.NetworkTCP)] = struct{}{}
-			hot[RealTag(outbound, N.NetworkUDP)] = struct{}{}
-		}
+	for tag := range urlTestTopTags(g.outbound, g.history, g.loadOutbounds()) {
+		hot[tag] = struct{}{}
 	}
 	return hot
 }
