@@ -100,6 +100,9 @@ func loadObjectMaps(
 			delete(spec.Maps, name)
 			continue
 		}
+		if err = validateKernelObjectName(override.name); err != nil {
+			return nil, E.Cause(err, "invalid eBPF map override for ", name)
+		}
 		if override.name == "" || override.mapType == CiliumEBPF.UnspecifiedMap ||
 			(override.maxEntries == 0 && override.mapType != CiliumEBPF.SkStorage) {
 			return nil, E.New("invalid eBPF map override for ", name)
