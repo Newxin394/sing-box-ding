@@ -551,6 +551,12 @@ func (r *Router) runDNSRulesFrom(ctx context.Context, rules []adapter.DNSRule, m
 	return result
 }
 
+// dnsFallbackTimeout is the budget a fallback query gets on its own. The
+// primary query usually fails by consuming the caller's deadline, so reusing
+// that context would fail the fallback instantly (or leave it a few
+// milliseconds) -- which defeats the purpose of having one.
+const dnsFallbackTimeout = 3 * time.Second
+
 func (r *Router) applyDNSFallback(ctx context.Context, message *mDNS.Msg, result exchangeWithRulesResult, allowFakeIP bool) exchangeWithRulesResult {
 	if result.rule == nil || result.rejectAction != nil {
 		return result
@@ -558,6 +564,9 @@ func (r *Router) applyDNSFallback(ctx context.Context, message *mDNS.Msg, result
 	if len(result.rule.FallbackRules()) == 0 {
 		return result
 	}
+	fallbackCtx, cancelFallback := context.WithTimeout(context.WithoutCancel(ctx), dnsFallbackTimeout)
+	defer cancelFallback()
+	ctx = fallbackCtx
 	// Fallback rules always evaluate against the last response returned by a
 	// matched DNS rule transport, so a failing fallback transport does not
 	// shift the match basis. When the primary query errored there is no such
@@ -1131,7 +1140,17 @@ func (r *Router) finishPendingExchange(ctx context.Context, message *mDNS.Msg, s
 		select {
 		case <-pending.future.done:
 		case <-ctx.Done():
-			return exchangeWithRulesResult{err: ctx.Err()}
+			// Keep the matched rule and its index. applyDNSFallback needs the
+			// rule to find the fallback servers, and the caller's deadline
+			// expiring here is precisely the case a fallback exists for.
+			// Returning a bare result without the rule made every fallback
+			// silently unreachable whenever the primary query was slow.
+			return exchangeWithRulesResult{
+				rule:      pending.rule,
+				ruleIndex: pending.ruleIndex,
+				options:   pending.options,
+				err:       ctx.Err(),
+			}
 		}
 		return exchangeWithRulesResult{
 			response:  pending.future.view(),
