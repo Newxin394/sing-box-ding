@@ -24,14 +24,8 @@
 CLAUDE.md
 AGENTS.md
 /.claude/
-# local build artifacts (never commit; large binaries and build logs)
+# 本地构建产物：核心二进制与日志，一律不入库
 /sing-box.tc
+/sing-box-*
 /build2.log
-/sb-ding-final
-/sb-ding-stripped
-/sing-box-ding-android-arm64
-
-# local build artifacts (2026-10-19)
-/sing-box-v30
-/sing-box-a9-*
-/sing-box.singme.*.arm64
+/sb-ding-*
