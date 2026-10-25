@@ -76,6 +76,7 @@ type Inbound struct {
 	captureDeferred          bool
 	captureDeferredState     atomic.Bool
 	udpTimeout               time.Duration
+	udpNatSessions           uint32
 	udpFragment              bool
 	enableTCP                bool
 	enableUDP                bool
@@ -412,7 +413,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if udpTimeout < 5*time.Second {
 		return nil, E.New("eBPF UDP timeout must be at least 5s: ", udpTimeout)
 	}
-	inbound.udpNat = newUDPNATService(inbound, inbound.preparePacketConnection, udpTimeout)
+	udpNatSessions, err := resolveUDPSessionCapacity(options.MapCapacity)
+	if err != nil {
+		return nil, E.Cause(err, "parse map_capacity")
+	}
+	inbound.udpNatSessions = udpNatSessions
+	inbound.udpNat = newUDPNATServiceWithCapacity(inbound, inbound.preparePacketConnection, udpTimeout, inbound.udpNatSessions)
 	return inbound, nil
 }
 

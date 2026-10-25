@@ -50,16 +50,30 @@ type udpNATService struct {
 	closeOnce                      sync.Once
 }
 
+// newUDPNATService keeps the historical signature for tests and for callers
+// with no capacity preference.
 func newUDPNATService(
 	handler N.UDPConnectionHandlerEx,
 	prepare udpNATPrepareFunc,
 	timeout time.Duration,
 ) *udpNATService {
+	return newUDPNATServiceWithCapacity(handler, prepare, timeout, defaultUDPNATSessions)
+}
+
+func newUDPNATServiceWithCapacity(
+	handler N.UDPConnectionHandlerEx,
+	prepare udpNATPrepareFunc,
+	timeout time.Duration,
+	sessions uint32,
+) *udpNATService {
 	if timeout == 0 {
 		panic("invalid timeout")
 	}
+	if sessions == 0 {
+		panic("invalid udp session capacity")
+	}
 	cache := common.Must1(freelru.New[udpSessionKey, *udpNATConn](
-		1024,
+		sessions,
 		maphash.NewHasher[udpSessionKey]().Hash32,
 		false,
 	))

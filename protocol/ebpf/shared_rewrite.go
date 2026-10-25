@@ -59,7 +59,14 @@ func newSharedRewrite(inbound *Inbound, options option.EBPFSharedOptions) *share
 		mapCapacity: mapCapacity,
 		tcPriority:  inbound.tcPriority,
 	}
-	shared.udpNat = newUDPNATService(shared, shared.preparePacketConnection, inbound.udpTimeout)
+	// Share the session budget with the local data plane: both are driven by
+	// the same udp_timeout, and a shared-only setup never runs the local one,
+	// so falling back to the default keeps a zero value harmless.
+	udpNatSessions := inbound.udpNatSessions
+	if udpNatSessions == 0 {
+		udpNatSessions = defaultUDPNATSessions
+	}
+	shared.udpNat = newUDPNATServiceWithCapacity(shared, shared.preparePacketConnection, inbound.udpTimeout, udpNatSessions)
 	return shared
 }
 

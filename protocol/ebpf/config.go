@@ -286,6 +286,27 @@ func resolveMapCapacities(overrides *option.EBPFMapCapacityOptions) (commonEBPF.
 	return flow, cgroup, nil
 }
 
+// defaultUDPNATSessions is the userspace UDP NAT session table size. It was
+// hardcoded to 1024, which is far too small on Android: session keys carry the
+// source port, so ordinary DNS traffic produces thousands of short-lived
+// sessions inside one udp_timeout window (five minutes by default). Once the
+// table is full, LRU eviction closes the reply socket of sessions that are
+// still active, and the next datagram on that flow has to rebuild it -- which
+// reads as intermittent UDP loss rather than a clean failure.
+const defaultUDPNATSessions = 8192
+
+func resolveUDPSessionCapacity(overrides *option.EBPFMapCapacityOptions) (uint32, error) {
+	capacity := uint32(defaultUDPNATSessions)
+	if overrides != nil && overrides.UDPSessions != 0 {
+		capacity = overrides.UDPSessions
+	}
+	if capacity == 0 || capacity > commonEBPF.MaxConfigurableMapCapacity {
+		return 0, E.New("invalid eBPF map_capacity.udp_sessions: ", capacity,
+			" (must be between 1 and ", commonEBPF.MaxConfigurableMapCapacity, ")")
+	}
+	return capacity, nil
+}
+
 // validateFakeIPICMP is the second half of fakeip_icmp validation, run once
 // the FakeIP prefixes are resolved and normalized and the local/shared data
 // planes are known. fakeip_icmp=reply needs something to match against and

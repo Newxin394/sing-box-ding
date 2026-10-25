@@ -49,6 +49,19 @@ type EBPFMapCapacityOptions struct {
 	// ProcessOwner is the cgroup table that carries a socket's owning process to
 	// the TC data path (default 65536, roughly 1.0 MB).
 	ProcessOwner uint32 `json:"process_owner,omitempty"`
+	// UDPSessions is the userspace UDP NAT session table (default 8192). Unlike
+	// the tables above it lives in Go memory rather than locked kernel memory,
+	// so it is not preallocated and costs nothing until traffic arrives.
+	//
+	// It is listed here because it has the same failure mode: session keys
+	// include the source port, so a device that resolves a lot of names (every
+	// query from a fresh port is a new session, each living for udp_timeout,
+	// five minutes by default) fills a small table quickly. LRU eviction then
+	// closes sockets for sessions that are still active, which surfaces as
+	// intermittent UDP loss rather than a hard failure. Raise this if UDP is
+	// unstable; the reply socket pool is capped independently, so growing this
+	// table does not exhaust file descriptors.
+	UDPSessions uint32 `json:"udp_sessions,omitempty"`
 	// Cgroup overrides the cgroup local data plane's own tables.
 	Cgroup *EBPFCgroupMapCapacityOptions `json:"cgroup,omitempty"`
 }
