@@ -2,6 +2,7 @@ package clashapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -92,19 +93,47 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 			result = group.URLTestOutbounds(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url, 0, true)
 		}
 
+		// 整组测速受调用方 timeout 约束(面板固定发 5000ms)，超时后没跑完的成员
+		// 会留着上一次的延时，面板就把旧数字当成了这次的结果。只有真的被 timeout
+		// 截断时才清空这些成员，让它们显示为无数据(黑)；锁竞争那种"一个探测都
+		// 没发出去"的空结果不清，否则会把整组误判成黑。
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			dropHistoryForSkippedMembers(server.urlTestHistory, collectDelayTags(server, outboundGroup), result)
+		}
+
 		if err != nil && len(result) == 0 {
 			render.Status(r, http.StatusGatewayTimeout)
 			render.JSON(w, r, newError(err.Error()))
 			return
 		}
 
-		// 整组测速受调用方 timeout 约束(面板固定发 5000ms)，慢成员会被跳过。
-		// 跳过的成员如果留着上一次的延时，面板会把它当成新测出来的数字；
-		// 清掉历史后它们才真正显示为无数据(黑)，和"超时就跳过"保持一致。
-		dropHistoryForSkippedMembers(server.urlTestHistory, outboundGroup.All(), result)
-
 		render.JSON(w, r, result)
 	}
+}
+
+// collectDelayTags 递归展开组，返回这次测速会触及的全部 tag。
+// 组的成员常常是另一个组(例如 国内出口 -> 国内免流 -> 一堆节点)，
+// 只取 All() 会漏掉嵌套里的叶子节点，那些节点被跳过后仍然留着旧延时。
+func collectDelayTags(server *Server, outboundGroup adapter.OutboundGroup) []string {
+	var tags []string
+	visited := make(map[string]bool)
+	var walk func(current adapter.OutboundGroup)
+	walk = func(current adapter.OutboundGroup) {
+		for _, tag := range current.All() {
+			if visited[tag] {
+				continue
+			}
+			visited[tag] = true
+			tags = append(tags, tag)
+			if member, _ := server.outbound.Outbound(tag); member != nil {
+				if nested, isGroup := member.(adapter.OutboundGroup); isGroup {
+					walk(nested)
+				}
+			}
+		}
+	}
+	walk(outboundGroup)
+	return tags
 }
 
 // dropHistoryForSkippedMembers 删除本次测速没有返回结果的成员的历史延时。
