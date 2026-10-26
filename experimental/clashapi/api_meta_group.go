@@ -90,7 +90,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 				itOutbound, _ := server.outbound.Outbound(it)
 				return itOutbound
 			}))
-			result = group.URLTestOutbounds(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url, 0, true)
+			result = group.URLTestOutboundsConcurrent(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url)
 		}
 
 		// 整组测速受调用方 timeout 约束(面板固定发 5000ms)，超时后没跑完的成员

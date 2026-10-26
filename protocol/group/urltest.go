@@ -871,14 +871,61 @@ type urlTestBatch struct {
 
 const urlTestBatchConcurrency = 32
 
+// outboundProbeConcurrencyLimit 是面板手动测速时允许的最大并发。
+// 面板固定发 timeout=5000，32 路排队的话 280 个节点只能轮到十几个，
+// 其余全被超时砍掉；一次全发出去，快的先回，慢的照旧超时跳过。
+const outboundProbeConcurrencyLimit = 256
+
+type outboundProbeOptions struct {
+	link        string
+	interval    time.Duration
+	force       bool
+	policy      *urlTestProbePolicy
+	concurrency int
+	skipLimiter bool
+}
+
 func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool) map[string]uint16 {
 	return URLTestOutboundsWithPolicy(ctx, outboundManager, history, logger, outbounds, link, interval, force, nil)
 }
 
 func URLTestOutboundsWithPolicy(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool, policy *urlTestProbePolicy) map[string]uint16 {
+	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, outboundProbeOptions{
+		link:     link,
+		interval: interval,
+		force:    force,
+		policy:   policy,
+	})
+}
+
+// URLTestOutboundsConcurrent 供面板手动测速使用：成员的探测全部并发发出。
+// 与定时健康检查不同，手动测速只跑一次且受调用方的 timeout 约束(面板 5000ms)，
+// 排队等待会让排到后面的节点永远测不到；全并发时快节点在超时前返回，
+// 慢节点被调用方超时砍掉，正好对应面板上"超时就是没数据"的表现。
+func URLTestOutboundsConcurrent(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string) map[string]uint16 {
+	concurrency := len(outbounds)
+	if concurrency > outboundProbeConcurrencyLimit {
+		concurrency = outboundProbeConcurrencyLimit
+	}
+	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, outboundProbeOptions{
+		link:        link,
+		force:       true,
+		concurrency: concurrency,
+		skipLimiter: true,
+	})
+}
+
+func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, options outboundProbeOptions) map[string]uint16 {
+	concurrency := options.concurrency
+	if concurrency <= 0 {
+		concurrency = urlTestBatchConcurrency
+	}
 	ctx, session := urlTestSessionFromContext(ctx)
-	limiter := service.FromContext[healthCheckLimiter](ctx)
-	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](urlTestBatchConcurrency))
+	var limiter healthCheckLimiter
+	if !options.skipLimiter {
+		limiter = service.FromContext[healthCheckLimiter](ctx)
+	}
+	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](concurrency))
 	testBatch := &urlTestBatch{
 		ctx:                ctx,
 		outbound:           outboundManager,
@@ -889,9 +936,9 @@ func URLTestOutboundsWithPolicy(ctx context.Context, outboundManager adapter.Out
 		healthCheckLimiter: limiter,
 		checked:            make(map[string]bool),
 		result:             make(map[string]uint16),
-		policy:             policy,
+		policy:             options.policy,
 	}
-	testBatch.test(outbounds, link, interval, force)
+	testBatch.test(outbounds, options.link, options.interval, options.force)
 	b.Wait()
 	for _, outboundGroup := range testBatch.groups {
 		historyTag := RealTag(outboundGroup, N.NetworkTCP)
