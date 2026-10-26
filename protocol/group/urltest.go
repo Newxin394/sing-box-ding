@@ -902,29 +902,47 @@ func URLTestOutboundsWithPolicy(ctx context.Context, outboundManager adapter.Out
 // 与定时健康检查不同，手动测速只跑一次且受调用方的 timeout 约束(面板 5000ms)，
 // 排队等待会让排到后面的节点永远测不到；全并发时快节点在超时前返回，
 // 慢节点被调用方超时砍掉，正好对应面板上"超时就是没数据"的表现。
+//
+// 预算挂在 context 上而不是按 len(outbounds) 算：组的成员常常是另一个组，
+// 排在最外层的可能只有两三个，真正的叶子在嵌套里，而每层都会新建自己的 batch。
 func URLTestOutboundsConcurrent(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string) map[string]uint16 {
-	concurrency := len(outbounds)
-	if concurrency > outboundProbeConcurrencyLimit {
-		concurrency = outboundProbeConcurrencyLimit
+	if _, loaded := ctx.Value(manualProbeKey{}).(*manualProbeBudget); !loaded {
+		ctx = context.WithValue(ctx, manualProbeKey{}, &manualProbeBudget{
+			concurrency: outboundProbeConcurrencyLimit,
+			limiter: &semaphoreHealthCheckLimiter{
+				semaphore: make(chan struct{}, outboundProbeConcurrencyLimit),
+			},
+		})
 	}
 	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, outboundProbeOptions{
-		link:        link,
-		force:       true,
-		concurrency: concurrency,
-		skipLimiter: true,
+		link:  link,
+		force: true,
 	})
 }
 
+// manualProbeBudget 是手动测速的全局并发预算，随 context 传给每一层嵌套组。
+type manualProbeBudget struct {
+	concurrency int
+	limiter     healthCheckLimiter
+}
+
+type manualProbeKey struct{}
+
 func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, options outboundProbeOptions) map[string]uint16 {
 	concurrency := options.concurrency
+	var limiter healthCheckLimiter
+	if budget, loaded := ctx.Value(manualProbeKey{}).(*manualProbeBudget); loaded && budget != nil {
+		limiter = budget.limiter
+		if concurrency <= 0 {
+			concurrency = budget.concurrency
+		}
+	} else if !options.skipLimiter {
+		limiter = service.FromContext[healthCheckLimiter](ctx)
+	}
 	if concurrency <= 0 {
 		concurrency = urlTestBatchConcurrency
 	}
 	ctx, session := urlTestSessionFromContext(ctx)
-	var limiter healthCheckLimiter
-	if !options.skipLimiter {
-		limiter = service.FromContext[healthCheckLimiter](ctx)
-	}
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](concurrency))
 	testBatch := &urlTestBatch{
 		ctx:                ctx,
