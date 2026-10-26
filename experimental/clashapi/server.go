@@ -86,6 +86,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		return nil, E.New("missing clash mode manager")
 	}
 	chiRouter := chi.NewRouter()
+	chiRouter.Use(routeOnEscapedPath)
 	updateInterval := max(time.Duration(options.ExternalUIUpdateInterval), 0)
 	if updateInterval > 0 && updateInterval < time.Hour {
 		updateInterval = time.Hour
