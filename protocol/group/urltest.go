@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"errors"
 	"io"
 	"maps"
 	"net"
@@ -867,6 +868,9 @@ type urlTestBatch struct {
 	access             sync.Mutex
 	result             map[string]uint16
 	policy             *urlTestProbePolicy
+	// probed 记录本次真正发出去的探测(叶子节点 tag)，用来在调用方 timeout
+	// 砍断整组之后，把没跑完的成员的历史延时清掉。
+	probed []string
 }
 
 const urlTestBatchConcurrency = 32
@@ -906,17 +910,26 @@ func URLTestOutboundsWithPolicy(ctx context.Context, outboundManager adapter.Out
 // 预算挂在 context 上而不是按 len(outbounds) 算：组的成员常常是另一个组，
 // 排在最外层的可能只有两三个，真正的叶子在嵌套里，而每层都会新建自己的 batch。
 func URLTestOutboundsConcurrent(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string) map[string]uint16 {
-	if _, loaded := ctx.Value(manualProbeKey{}).(*manualProbeBudget); !loaded {
-		ctx = context.WithValue(ctx, manualProbeKey{}, &manualProbeBudget{
-			concurrency: outboundProbeConcurrencyLimit,
-			limiter: &semaphoreHealthCheckLimiter{
-				semaphore: make(chan struct{}, outboundProbeConcurrencyLimit),
-			},
-		})
-	}
+	ctx = WithManualProbeBudget(ctx)
 	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, outboundProbeOptions{
 		link:  link,
 		force: true,
+	})
+}
+
+// WithManualProbeBudget 把面板手动测速的并发预算挂到 context 上。
+// 只给 URLTestOutboundsConcurrent 自己用不够：面板测 URLTest/Fallback 类型的组
+// 时走的是 URLTestGroup.URLTest，那条路默认只有 32 路，447 个成员的组 5 秒里
+// 只能轮到十几个，所以处理器里统一挂一次，让所有类型的组都全并发。
+func WithManualProbeBudget(ctx context.Context) context.Context {
+	if _, loaded := ctx.Value(manualProbeKey{}).(*manualProbeBudget); loaded {
+		return ctx
+	}
+	return context.WithValue(ctx, manualProbeKey{}, &manualProbeBudget{
+		concurrency: outboundProbeConcurrencyLimit,
+		limiter: &semaphoreHealthCheckLimiter{
+			semaphore: make(chan struct{}, outboundProbeConcurrencyLimit),
+		},
 	})
 }
 
@@ -958,6 +971,14 @@ func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 	}
 	testBatch.test(outbounds, options.link, options.interval, options.force)
 	b.Wait()
+	// 调用方的 timeout(面板固定 5000ms) 把整组砍断时，没跑完的成员会留着上一次
+	// 的延时，面板就把旧数字当成这次的结果，一直显示那个节点还能用 —— 实际连不上，
+	// 表现为"卡在节点"。用户定的语义是超时=没数据，所以这里直接把这些成员的历史
+	// 清空(面板显示黑)。只清真正发出去过的探测：锁竞争那种一个探测都没发的情况
+	// 不走这里，否则会把整组误判成黑。
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		testBatch.dropCutOffProbes()
+	}
 	for _, outboundGroup := range testBatch.groups {
 		historyTag := RealTag(outboundGroup, N.NetworkTCP)
 		if outboundGroup.Type() == C.TypeLoadBalance {
@@ -969,6 +990,22 @@ func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 		}
 	}
 	return testBatch.result
+}
+
+// dropCutOffProbes 清掉被调用方 timeout 砍断、这次没测出结果的成员的历史延时。
+// 结果里没有的成员，要么探测失败(失败路径自己已经清过)，要么超时前没跑完，
+// 两种情况都不该继续展示旧值。preserveHistory 的策略(定时健康检查里对失败
+// 成员保留上一次结果)不动，避免影响自动选路。
+func (b *urlTestBatch) dropCutOffProbes() {
+	if b.history == nil || (b.policy != nil && b.policy.preserveHistory) {
+		return
+	}
+	for _, tag := range b.probed {
+		if _, tested := b.result[tag]; tested {
+			continue
+		}
+		b.history.DeleteURLTestHistory(tag)
+	}
 }
 
 func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval time.Duration, force bool) {
@@ -1025,6 +1062,7 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 				continue
 			}
 			b.checked[tag] = true
+			b.probed = append(b.probed, tag)
 			b.batch.Go(tag, func() (any, error) {
 				if b.healthCheckLimiter != nil {
 					if err := b.healthCheckLimiter.Acquire(b.ctx); err != nil {
