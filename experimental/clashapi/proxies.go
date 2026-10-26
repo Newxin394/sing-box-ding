@@ -233,7 +233,9 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 		delay, err := urltest.URLTest(ctx, url, proxy)
 		defer func() {
 			realTag := group.RealTag(proxy, N.NetworkTCP)
-			if err != nil {
+			// 超时和失败都算"没测出结果"：清掉历史让面板变黑，
+			// 不留下 0ms 或者上一次的旧数字。
+			if err != nil || ctx.Err() != nil || delay == 0 {
 				server.urlTestHistory.DeleteURLTestHistory(realTag)
 			} else {
 				server.urlTestHistory.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
