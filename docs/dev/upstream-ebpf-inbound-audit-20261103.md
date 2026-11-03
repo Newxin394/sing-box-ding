@@ -335,13 +335,22 @@ recovery.created_at_ns = released_at_ns != 0U ? released_at_ns : flow_time_ns();
 
 fork 没有这个头文件，因为它是父仓新引入的 `_force4/_force6` LPM map 机制；fork 的等价物是 `ForceInterceptIPv4/ForceInterceptIPv6` 两个前缀字段（`inbound_lifecycle.go:64-65` 传给 cgroup 控制块）。同一个语义，两种承载。这又是一条"同物异名"。
 
-### 10.2 这一轮确认的**真实**缺陷（3 条，都不是文件缺失）
+### 10.2 这一轮确认的**真实**缺陷（4 条，都不是文件缺失）
 
 | # | 缺陷 | 证据 | 后果 |
 |---|---|---|---|
 | **E1** | 同一 UDP socket 重连到新目标时，旧 redirect/token 条目不清理 | 父仓有 `cgroup_udp_token_reverse`（listener→cookie 反查）在 `store_connected_udp_token` 里发现 cookie 变了就删旧 token+peer；fork 直接 `map_update(&cgroup_udp_token, &cookie, &listener, 0U)` 覆盖（`cgroup.bpf.c:616/719/789`），**没有反查表** | 旧 `listener_key` 指向的 `cgroup_udp_redirect` 变成孤儿，直到该 socket 关闭才被 `release_socket` 清掉；频繁重连的客户端会累积 |
 | **E2** | recovery 表只增不减（LRU 兜底） | fork 的 `cgroup_udp_recovery` 是 `BPF_MAP_TYPE_LRU_HASH`（8192），内核侧只在 `release_socket` 写、**从不在内核侧读**（`cgroup.bpf.c` 仅 L889 一处写）；用户态只在收到迟到包时 `lookupAndDelete` | 不会有正确的条目被主动清理；压满后 LRU 赶掉**仍可能需要**的条目 → 迟到包找不到原目标，静默丢会话 |
 | **E3** | map 压力只上报、不处理 | fork 有 `MapPressureHealthy/Warning/Degraded` 阈值（0.85/0.95）和 `diagnostics` 上报，但没有父仓 `maintenance.go` 的 `mapPressureHysteresis` + `maintenanceSchedule`（压力驱动提前触发维护/清理） | 仪表盘会显示 degraded，但系统不会因此做任何事；诊断能看到问题、修不了 |
+| **E4** | per-interface local route 缺失：socket 绑定接口场景流量绕过 listener | fork `addLocalRoute` 只装 loopback 一条（redirect_route.go:141 `LinkIndex: loopbackIndex`），`setupLocalRoutes` 只在启动时调（inbound_lifecycle.go:116），接口地址变化后的 `reconcileTCDataPlane` 只重挂 TC attachment **不碰 local route**；父的 `ReconcileInterfaceRoutes`（redirect_route.go:131）给每个 up 且有该族地址的接口都装 prefix local route（source 用接口自己的地址），接口/地址变化时重跑 | systemd-resolved 的 DNS socket（SO_BINDTODEVICE/IP_UNICAST_IF 绑定）路由查找会跳过 next hop 是别的设备的路由——包括 loopback 上的 redirect prefix 路由——被 cgroup 重定向的连接顺着默认路由出接口而不是到达 listener，表现为 DNS 解析黑洞。**纯用户态（Go）可修**，是 4 条缺陷里唯一本机能做的 |
+
+#### E4 的技术细节（照父模块 redirect_route.go:109-130 注释）
+
+> A socket bound to an interface (SO_BINDTODEVICE, IP_UNICAST_IF or IPV6_UNICAST_IF, as systemd-resolved binds the sockets for its DNS servers) routes with that interface as the required output device, and the kernel skips every route whose next hop is another device, the prefix's loopback route included. A connection a cgroup program redirected into the prefix would follow the default route out of the interface instead of reaching the listener. The interface route keeps the lookup local, and its source address, one of the interface's own, brings the listener's replies back on the interface the socket is bound to, so the socket accepts them.
+
+要点：①per-interface 路由的 source 必须用接口自己的地址（listener 回包从同接口回来，绑定 socket 才会接受）；②IPv4 还要在 loopback 上保留 prefix 路由（比接口路由更优先，未绑定 socket 保持 127.0.0.1 源）；③**内核会连同源地址一起删路由**，所以接口/地址变化时必须重跑 reconcile——fork 现在 reconcileTCDataPlane 完全不做这件事。
+
+**fork 的 pre_match/NFQUEUE 不是这个场景的替代**：preMatchController 是"没匹配到的包送用户态决定"的机制（pre_match_linux.go:44），处理的是匹配面，不是路由面。
 
 ### 10.3 内核侧改不了（本机约束）
 
@@ -349,14 +358,16 @@ fork 没有这个头文件，因为它是父仓新引入的 `_force4/_force6` LP
 
 E3 是纯用户态（Go），可以在这里做——但需要先明确"压力降下来该做什么"（提前 reclaim？拒绝新会话？缩表？），属于策略决策，不该由我替他拍。
 
+**E4 也是纯用户态（Go），本机就能做**：照父的 `ReconcileInterfaceRoutes` 移植 per-interface local route 管理并挂到接口监视事件上。这是 4 条缺陷里唯一可以立刻动手的。
+
 ### 10.4 这一轮仍确认"不是缺口"的项
 
 逐一按**行为**核过 fork 有无等价实现，下列均已有（形态不同）：
 
 `action_policy.go`→`inbound_policy.go`；`cgroup_packet_writer`→`sharedPacketWriter`（方向不同：父做 cgroup 侧写、fork 做 shared 侧写）；`tc_runtime/tc_listener/tc_connection`→`tc_dataplane.go`(65 KB)+`tc_netlink.go`；`shared_runtime.go`→直接调 `kernelRuntime`；`logging.go`→`inbound_log.go`；`policy_types.go`→`common/ebpf/policy.go`；`interface_topology.go` 的四个函数在 fork 的 `interface_monitor.go` 里同名存在；`maintenance.go` 见 E3（唯一真差异）；`icmp_echo_reply`→`fakeip_icmp`；`force_intercept_policy.h`→`ForceInterceptIPv4/6` 字段；`tc_isolation.h`/`tc_namespace.go`/`tc_isolated_delivery.go`（netns 隔离投递，520 行）→ **仍缺**，但只在多 netns 场景需要（与 8 月那份 parity 文档结论一致）。
 
+另外，父模块 `api.go` 的 31 个导出符号逐一对照：**19 个同名直接命中**；10 个异名（`SharedPacketRewriteBackend`≡`SharedNetworkBackend`、`PrepareSharedPacketRewrite`≡`PrepareSharedNetwork`、`CompileActionPolicy`≡`CompileBypassCIDRPolicy`、`NewSelfBypassWithCapacity`≡self_bypass.go 的 capacity 版、`InspectRuntimeState`≡cgroup_backend.go:212、`SelectRedirectPrefix`≡cgroup_backend.go:142、3 个 `wrap*` 是模块层包装 fork 不需要）；**真缺的只有 `NewLocalRouteSet`/`ReconcileInterfaceRoutes`（即 E4）**。
+
 ### 10.5 fork 独有的 eBPF 配置能力（父仓没有）
 
 `pre_match`（NFQUEUE 前置匹配）、`bypass_selector`（含 `直连` 通配）、`map_capacity`（8 项可调）、`shared.default_interface`、`capture_owner/capture_runtime`。这些父仓 `option/ebpf.go` 里一个都没有——fork 的 option 层确实是父仓的超集。
-
-发现一个好消息：`daemon`、`adapter`、`option`、`common/ebpf`、`common/tls` 这些包**能在 Windows 上真实跑测试**（不需要 WSL/Docker）。只有 `protocol/ebpf`（`linux || android` tag）与 `test/` 下的 e2e（要 Docker）跑不了。所以以后不是"只能编译通过"，多数纯逻辑改动可以真跑。
