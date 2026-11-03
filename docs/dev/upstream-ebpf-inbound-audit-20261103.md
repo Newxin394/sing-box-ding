@@ -298,4 +298,65 @@ common\ebpf\runtime_resources_backends.go:18:10: undefined: tcRuntime
 
 ### 9.5 本机测试覆盖现状
 
+---
+
+## 10. 第二轮 eBPF 专项复核（2026-11-03 追加）
+
+这一轮把父仓的 eBPF 内核侧也拿到了——它没有内联在仓库里，而是作为独立模块 `github.com/CHIZI-0618/sing-ebpf`（`v0.1.0-alpha.13.0.20261101121606-d904cb7932c5`）从 module cache 里解开。之前的审计只看 Go 侧，看不到 `.bpf.c`，所以漏掉了几条**只有在内核代码里才看得见**的结论。
+
+### 10.1 先说三个我自己的错误
+
+**（1）P2 的清扫在 fork 上是死代码。**
+
+我上一轮写的 `SweepUDPRecoveryBudgeted` 靠 `CreatedAtNS` 判断条目是否过期。但 fork 的内核侧**UDP 条目从来不打这个戳**：
+
+```c
+// fork: common/ebpf/native/cgroup.bpf.c:235,252
+value->created_at_ns = protocol == TCP_VALUE ? ktime_get_ns() : 0U;   // UDP 恒 0
+// :889 release_socket 里
+if (original != 0) map_update(&cgroup_udp_recovery, listener, original, 0U);  // 原样拷贝，仍 0
+```
+
+父仓多了一行（`release_socket_cookie` 里）：
+
+```c
+recovery.created_at_ns = released_at_ns != 0U ? released_at_ns : flow_time_ns();
+```
+
+所以我的清扫每条都命中 `value.CreatedAtNS == 0 → skip`，`Deleted` **永远是 0**。测试只验证了"参数校验"和"生命周期"，没验证"真的能删"，所以全绿。
+
+这不是"部分完成"，是**没完成**。要它生效必须改 `.bpf.c` 并重编 `.o`，而本机没有 NDK clang（见 10.3）。**结论：这个清扫目前应当视为未实现**，文档里 8.3 那句"部分完成"写得过于乐观，按此更正。
+
+**（2）我此前说"fork 用内联 common/ebpf、父用外部模块"是对的，但由此推出"fork 的 eBPF 更完整"是错的。**
+
+模块里的 `native/` 有 5 个 `.c`，其中 `icmp_echo_reply.bpf.c`（29 KB）fork 完全没有——fork 用自己写的 `fakeip_icmp.bpf.c`（27.4 KB）做同一件事。配置项两边都叫 `fakeip_icmp`，内核产物不同名，所以按"文件是否同名"比会误判。
+
+**（3）`force_intercept_policy.h` 父仓独有、fork 缺失，但功能不缺。**
+
+fork 没有这个头文件，因为它是父仓新引入的 `_force4/_force6` LPM map 机制；fork 的等价物是 `ForceInterceptIPv4/ForceInterceptIPv6` 两个前缀字段（`inbound_lifecycle.go:64-65` 传给 cgroup 控制块）。同一个语义，两种承载。这又是一条"同物异名"。
+
+### 10.2 这一轮确认的**真实**缺陷（3 条，都不是文件缺失）
+
+| # | 缺陷 | 证据 | 后果 |
+|---|---|---|---|
+| **E1** | 同一 UDP socket 重连到新目标时，旧 redirect/token 条目不清理 | 父仓有 `cgroup_udp_token_reverse`（listener→cookie 反查）在 `store_connected_udp_token` 里发现 cookie 变了就删旧 token+peer；fork 直接 `map_update(&cgroup_udp_token, &cookie, &listener, 0U)` 覆盖（`cgroup.bpf.c:616/719/789`），**没有反查表** | 旧 `listener_key` 指向的 `cgroup_udp_redirect` 变成孤儿，直到该 socket 关闭才被 `release_socket` 清掉；频繁重连的客户端会累积 |
+| **E2** | recovery 表只增不减（LRU 兜底） | fork 的 `cgroup_udp_recovery` 是 `BPF_MAP_TYPE_LRU_HASH`（8192），内核侧只在 `release_socket` 写、**从不在内核侧读**（`cgroup.bpf.c` 仅 L889 一处写）；用户态只在收到迟到包时 `lookupAndDelete` | 不会有正确的条目被主动清理；压满后 LRU 赶掉**仍可能需要**的条目 → 迟到包找不到原目标，静默丢会话 |
+| **E3** | map 压力只上报、不处理 | fork 有 `MapPressureHealthy/Warning/Degraded` 阈值（0.85/0.95）和 `diagnostics` 上报，但没有父仓 `maintenance.go` 的 `mapPressureHysteresis` + `maintenanceSchedule`（压力驱动提前触发维护/清理） | 仪表盘会显示 degraded，但系统不会因此做任何事；诊断能看到问题、修不了 |
+
+### 10.3 内核侧改不了（本机约束）
+
+`common/ebpf/Makefile` 要求 **Android NDK r29 的 clang 21**；`internal/bpfgen/*.o` 是预编译产物，`manifest.txt` 用 sha256 锁定，并明确写着 tc 那些对象是在设备上用该编译器重新生成的。本机 `Get-Command clang` 为空、没有 NDK。**E1 和 E2 都必须在 `.bpf.c` 里改并重编 `.o`，所以在本机无法完成**，只能记录成待办。
+
+E3 是纯用户态（Go），可以在这里做——但需要先明确"压力降下来该做什么"（提前 reclaim？拒绝新会话？缩表？），属于策略决策，不该由我替他拍。
+
+### 10.4 这一轮仍确认"不是缺口"的项
+
+逐一按**行为**核过 fork 有无等价实现，下列均已有（形态不同）：
+
+`action_policy.go`→`inbound_policy.go`；`cgroup_packet_writer`→`sharedPacketWriter`（方向不同：父做 cgroup 侧写、fork 做 shared 侧写）；`tc_runtime/tc_listener/tc_connection`→`tc_dataplane.go`(65 KB)+`tc_netlink.go`；`shared_runtime.go`→直接调 `kernelRuntime`；`logging.go`→`inbound_log.go`；`policy_types.go`→`common/ebpf/policy.go`；`interface_topology.go` 的四个函数在 fork 的 `interface_monitor.go` 里同名存在；`maintenance.go` 见 E3（唯一真差异）；`icmp_echo_reply`→`fakeip_icmp`；`force_intercept_policy.h`→`ForceInterceptIPv4/6` 字段；`tc_isolation.h`/`tc_namespace.go`/`tc_isolated_delivery.go`（netns 隔离投递，520 行）→ **仍缺**，但只在多 netns 场景需要（与 8 月那份 parity 文档结论一致）。
+
+### 10.5 fork 独有的 eBPF 配置能力（父仓没有）
+
+`pre_match`（NFQUEUE 前置匹配）、`bypass_selector`（含 `直连` 通配）、`map_capacity`（8 项可调）、`shared.default_interface`、`capture_owner/capture_runtime`。这些父仓 `option/ebpf.go` 里一个都没有——fork 的 option 层确实是父仓的超集。
+
 发现一个好消息：`daemon`、`adapter`、`option`、`common/ebpf`、`common/tls` 这些包**能在 Windows 上真实跑测试**（不需要 WSL/Docker）。只有 `protocol/ebpf`（`linux || android` tag）与 `test/` 下的 e2e（要 Docker）跑不了。所以以后不是"只能编译通过"，多数纯逻辑改动可以真跑。
