@@ -1,3 +1,5 @@
+//go:build with_ebpf && (linux || android)
+
 package ebpf
 
 import (

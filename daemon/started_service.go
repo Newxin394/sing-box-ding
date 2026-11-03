@@ -34,7 +34,14 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-const APIVersion = 4
+// APIVersion is the wire contract version reported by GetVersion. Bump it when
+// adding or changing RPCs: clients use it to decide whether a call is safe
+// before making it, and a client that skips the check would otherwise call
+// GetEBPFDiagnostics against a server that does not implement it.
+//
+// 5: added GetEBPFDiagnostics (eBPF runtime diagnostics).
+// 6: eBPF diagnostics schema reached 18 with the kernel runtime snapshot.
+const APIVersion = 6
 
 const (
 	urlTestPushMinInterval = 250 * time.Millisecond

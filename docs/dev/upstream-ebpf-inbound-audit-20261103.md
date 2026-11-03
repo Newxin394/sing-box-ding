@@ -246,3 +246,56 @@ protocol/ebpf/{inbound.go,inbound_lifecycle.go,diagnostics_api.go,diagnostics_ap
 ```
 
 编译矩阵（Windows 主机交叉编译）：`linux/arm64` + `with_ebpf` ✅、`linux/arm64` 无 tag ✅、全 tag 集（`with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,with_xhttp,with_tailscale`）android/arm64 87.3 MB ✅。**Linux 单测无法在本机运行**（无 WSL / Docker），只能编译通过。
+
+---
+
+## 9. 补记：RPC 测试与两个被漏掉的东西（2026-11-03 追加）
+
+补 `daemon/started_service_ebpf_test.go` 时，对着上游同名测试逐条比对，发现上一轮 P1 漏了两件事——都不是测试问题，是**产品缺陷**：
+
+### 9.1 `APIVersion` 没跟着升（真 bug）
+
+上游在 `f1a62dff` 里把 `daemon/started_service.go` 的 `const APIVersion = 4` 改成了 `6`，我们移植 RPC 时只搬了 proto 和实现，**没搬这一行**。
+
+后果是实的：客户端拿 `GetAPIVersion()` 的返回值决定"这个 server 支不支持 `GetEBPFDiagnostics`"，版本号还停在 4 就等于告诉客户端"不支持"，于是所有做版本协商的客户端都会跳过这个新接口——功能上线了但没人会调。`cmd/sing-box/main.go` 打印的 `core api version` 也仍然是 4。
+
+已改为 `6`，并在常量上方写清每个版本号对应的变更（5 = 加 `GetEBPFDiagnostics`，6 = 诊断 schema 到 18 带内核运行时快照），避免下次再漏。
+
+### 9.2 `common/ebpf/runtime_resources*.go` 缺 build tag（真 bug，只影响非 Linux）
+
+上一轮新建的 `runtime_resources.go` / `runtime_resources_backends.go` 忘了加 `//go:build with_ebpf && (linux || android)`。因为这个包在 Windows 上也会被编译（`common/ebpf` 有平台无关的文件），结果是：
+
+```
+common\ebpf\runtime_resources.go:43:16: undefined: MapOccupancyReport
+common\ebpf\runtime_resources_backends.go:18:10: undefined: tcRuntime
+...
+```
+
+**上一轮的验证没抓到它**，因为当时只做了 `GOOS=linux` 交叉编译。这次在本机能跑 `go test ./common/ebpf/` 时直接炸出来。已补上 tag，现在 Windows 下 `go build ./common/ebpf/` 与 `go test` 都通过。
+
+> 教训写在这里：`GOOS=linux` 交叉编译通过 ≠ 这个仓库在 Windows 上能编。以后动 `common/ebpf` 必须两边都过一遍。
+
+### 9.3 新增的 9 个测试
+
+`daemon/started_service_ebpf_test.go`（本机 **真实运行通过**，不是只编译）：
+
+| 测试 | 守住什么 |
+|---|---|
+| `ReportsSchemaVersionWithoutInbound` | 没有 eBPF 入站时也要回 schema 版本，dashboard 才能区分"没配置"与"server 太旧" |
+| `RequiresStartedService` | 未启动 / 无 instance 时拒绝，不能拿零值糊弄 |
+| `SkipsNonEBPFInbounds` | 非 eBPF 入站被跳过，而不是当成空诊断上报 |
+| `ShallowSkipsKernelWalk` | 轻量请求**不得**枚举内核对象（这是 `--deep` 存在的理由） |
+| `CarriesRuntimeState` | 时间戳按毫秒上 wire、attachment 的 slot、bypass 后端状态、计数器、policy epoch、UDP NAT 逐字段对齐 |
+| `DeepIncludesKernelRuntime` | deep 才带程序/映射快照 |
+| `MergeEBPFKernelRuntimeDeduplicatesSharedResources` | 两个入站共享同一批内核对象时**按 ID 去重**而不是相加；最差状态取胜；且不得污染入站自己的快照 |
+| `GRPCRegistrationAndAuthentication` | 新 RPC 必须同样过鉴权（无 token → `Unauthenticated`） |
+| `APIVersionAdvertisesEBPFDiagnostics` | 版本号 `< 6` 直接失败，防止以后再漏 |
+
+### 9.4 与上游测试的差异（有意）
+
+- 上游 stub 用 `Start(adapter.StartStage, *adapter.Scope)`，我们的 `adapter.Lifecycle` 只有 `Start(stage StartStage)`，stub 跟着我们的接口写。
+- 上游测试里断言了 `TCRoutingSlot`、`LocalUDPState`、`LocalUDPReleaseProgram` 等字段——我们的 proto 里有这些字段号（schema 18 完整搬过来了），但 `protocol/ebpf` 侧**没有对应实现**，恒为 0/空。测试里没有断言它们，因为断言一个恒零字段等于测试自己骗自己。等内核侧补上（见 8.3 遗留）再补断言。
+
+### 9.5 本机测试覆盖现状
+
+发现一个好消息：`daemon`、`adapter`、`option`、`common/ebpf`、`common/tls` 这些包**能在 Windows 上真实跑测试**（不需要 WSL/Docker）。只有 `protocol/ebpf`（`linux || android` tag）与 `test/` 下的 e2e（要 Docker）跑不了。所以以后不是"只能编译通过"，多数纯逻辑改动可以真跑。
