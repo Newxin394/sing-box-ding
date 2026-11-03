@@ -16,6 +16,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/windivert"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/gtcpip"
 	"github.com/sagernet/sing-tun/gtcpip/header"
 	"github.com/sagernet/sing/common/control"
@@ -207,8 +208,27 @@ func (b *backendWindows) acquireReservations() error {
 	return nil
 }
 
-func (b *backendWindows) PortSelectorRange() (uint16, uint16) {
-	return b.reservedStart, bridgeReservedPortCount
+const (
+	ipProtoTCP uint8 = 6
+	ipProtoUDP uint8 = 17
+)
+
+// PortSelectorRanges reports the one block this backend reserved. The
+// reservation is acquired for AF_INET/SOCK_STREAM/IPPROTO_TCP and Windows
+// hands the block to every protocol on the host, so both TCP and UDP answer
+// with the same range.
+func (b *backendWindows) PortSelectorRanges(protocol uint8) []tun.SelectorRange {
+	if protocol != ipProtoTCP && protocol != ipProtoUDP {
+		return nil
+	}
+	return []tun.SelectorRange{{Start: b.reservedStart, Count: bridgeReservedPortCount}}
+}
+
+// ExpandSelectorRanges reports false: the Windows port reservation is a block
+// of a fixed size taken once at start, and there is no second block to ask
+// the host for when the selector space runs out.
+func (b *backendWindows) ExpandSelectorRanges(protocol uint8) bool {
+	return false
 }
 
 func (b *backendWindows) rebuildDivertersLocked(state *egressState) error {
