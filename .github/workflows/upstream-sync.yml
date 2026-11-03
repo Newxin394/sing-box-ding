@@ -8,13 +8,19 @@ name: Upstream sync
 #                    handshake, so the copy can silently lose an upstream fix.
 #                    scripts/check-ding-sync.sh performs the comparison.
 # 2. upstream-drift -- reports how far this fork has moved away from
-#                    CHIZI-0618/sing-box's testing-ebpf-tc-rewrite. Report only:
-#                    the point is to make the drift a number instead of a
-#                    feeling, not to block anything.
+#                    CHIZI-0618/sing-box's ebpf-inbound. Report only: the point
+#                    is to make the drift a number instead of a feeling, not to
+#                    block anything. The job fails only when the two histories
+#                    no longer share an ancestor at all, because that is the one
+#                    case where the number it prints would be meaningless.
+#
+# Branch names here go stale silently, so they are checked by hand whenever the
+# fork or upstream renames a branch: this fork has a single maintenance branch
+# (tc-rewrite-clean), and upstream renamed testing-ebpf-tc-rewrite to ebpf-inbound.
 on:
   push:
     branches:
-      - testing-ebpf-tc-rewrite
+      - tc-rewrite-clean
     paths:
       - 'go.mod'
       - 'go.sum'
@@ -67,18 +73,18 @@ jobs:
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/CHIZI-0618/sing-box.git
-          git fetch --quiet upstream testing-ebpf-tc-rewrite
-          BASE=$(git merge-base HEAD upstream/testing-ebpf-tc-rewrite) || {
-            echo "::warning::no common ancestor found; the upstream branch may have been rewritten"
-            exit 0
+          git fetch --quiet upstream ebpf-inbound
+          BASE=$(git merge-base HEAD upstream/ebpf-inbound) || {
+            echo "::error::no common ancestor between HEAD and upstream/ebpf-inbound; upstream history was rewritten and this report is meaningless until the fork is rebased onto it"
+            exit 1
           }
           {
-            echo "### Upstream drift (CHIZI-0618/sing-box testing-ebpf-tc-rewrite)"
+            echo "### Upstream drift (CHIZI-0618/sing-box ebpf-inbound)"
             echo
             echo "- ahead of upstream: $(git rev-list --count "$BASE"..HEAD)"
-            echo "- behind upstream:  $(git rev-list --count "$BASE"..upstream/testing-ebpf-tc-rewrite)"
+            echo "- behind upstream:  $(git rev-list --count "$BASE"..upstream/ebpf-inbound)"
             echo
             echo '```'
-            git diff --shortstat "$BASE" upstream/testing-ebpf-tc-rewrite || true
+            git diff --shortstat "$BASE" upstream/ebpf-inbound || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

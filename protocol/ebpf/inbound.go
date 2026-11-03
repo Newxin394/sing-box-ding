@@ -115,6 +115,13 @@ type Inbound struct {
 	lifecycleAccess          sync.Mutex
 	interfaceMonitor         tcInterfaceMonitor
 
+	// kernelRuntimeAccess guards kernelRuntimeAt/kernelRuntimeValue, the cache
+	// that keeps a --deep diagnostics poll from walking the kernel on every
+	// request. See diagnostics_api.go.
+	kernelRuntimeAccess sync.Mutex
+	kernelRuntimeAt     time.Time
+	kernelRuntimeValue  adapter.EBPFKernelRuntimeDiagnostics
+
 	bypassRuleSetAccess sync.Mutex
 	bypassRuleSet       []adapter.RuleSet
 	// sharedBypassRuleSetEmptyPolicy is the empty CIDR policy always applied
@@ -184,6 +191,11 @@ type Inbound struct {
 	bypassSelectorState      bool
 	bypassSelectorStateKnown bool
 	bypassSelectorDirectWild bool
+
+	recoverySweepAccess  sync.Mutex
+	recoverySweepCancel  context.CancelFunc
+	recoverySweepDone    chan struct{}
+	recoverySweepHandled atomic.Uint64
 
 	udpClientTable    udpClientTable
 	udpReplySockets   udpReplySocketPool

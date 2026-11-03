@@ -214,3 +214,78 @@ func countMapKeys(mapInstance *CiliumEBPF.Map, keySize uint32, maxEntries uint32
 	}
 	return entries, err
 }
+
+// InspectOwnedMapOccupancy is InspectMapOccupancy restricted to the maps in
+// owned.
+//
+// A deep diagnostic run asks about the tables one instance created, not every
+// sb_-named table on the host: two instances can share a host, and the global
+// ID space would otherwise make each of them report the other's tables. The
+// owned set comes from handles the backends still hold, so an ID that no
+// longer resolves is skipped rather than reported as an error -- that is the
+// normal window while a backend is closing.
+//
+// An empty owned set is not an error and reports nothing. The caller that has
+// no handles to give (a cgroup backend that never attached, say) must not have
+// its absence turned into a failed diagnostic run.
+func InspectOwnedMapOccupancy(owned map[CiliumEBPF.MapID]struct{}) MapOccupancyReport {
+	report := MapOccupancyReport{Status: "pass", Maps: make([]MapOccupancy, 0)}
+	if len(owned) == 0 {
+		return report
+	}
+	ids := make([]CiliumEBPF.MapID, 0, len(owned))
+	for id := range owned {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	for _, id := range ids {
+		mapInstance, err := CiliumEBPF.NewMapFromID(id)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			report.Error = err.Error()
+			report.Status = MapPressureUnknown
+			break
+		}
+		info, infoErr := mapInstance.Info()
+		if infoErr != nil || info == nil {
+			_ = mapInstance.Close()
+			if infoErr != nil && !errors.Is(infoErr, os.ErrNotExist) {
+				report.Error = infoErr.Error()
+				report.Status = MapPressureUnknown
+				break
+			}
+			continue
+		}
+		item := MapOccupancy{
+			ID:         id,
+			Name:       info.Name,
+			Type:       info.Type.String(),
+			MaxEntries: info.MaxEntries,
+			KeySize:    info.KeySize,
+			ValueSize:  info.ValueSize,
+			Flags:      info.Flags,
+		}
+		if !mapOccupancySupported(info.Type) {
+			item.Error = "map type does not support safe key iteration"
+			item.Pressure = MapPressureNotApplicable
+			report.Maps = append(report.Maps, item)
+			_ = mapInstance.Close()
+			continue
+		}
+		item.Supported = true
+		item.Entries, err = countMapKeys(mapInstance, info.KeySize, info.MaxEntries)
+		if err != nil {
+			item.Error = err.Error()
+		}
+		item.Pressure = mapPressure(item.Entries, item.MaxEntries, item.Error != "")
+		report.Maps = append(report.Maps, item)
+		_ = mapInstance.Close()
+	}
+	sort.Slice(report.Maps, func(a, b int) bool { return report.Maps[a].Name < report.Maps[b].Name })
+	if report.Error == "" {
+		report.Status = mapOccupancyStatus(report.Maps)
+	}
+	return report
+}

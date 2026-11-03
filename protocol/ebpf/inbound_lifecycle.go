@@ -331,6 +331,7 @@ func (i *Inbound) startInbound() error {
 		", tc_priority=", i.tcPriority,
 	)
 	i.udpReplySockets.startSweeper(i.ctx)
+	i.startCgroupRecoverySweeper(i.ctx)
 	i.logStartupSummary()
 	return nil
 }
@@ -544,6 +545,9 @@ func (i *Inbound) cleanupStartFailure() error {
 }
 
 func (i *Inbound) closeResources() error {
+	// Stop the recovery sweeper before the backend goes away: a pass in flight
+	// would otherwise keep using map handles that are being closed.
+	i.stopCgroupRecoverySweeper()
 	monitorErr := i.stopTCInterfaceMonitor()
 	i.stopBypassSelector()
 	i.stopBypassRuleSets()

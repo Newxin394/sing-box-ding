@@ -66,6 +66,28 @@ func (b *TCBackend) FakeIPICMPSharedReplyProgram(framing TCLinkFraming) *CiliumE
 	return backend.SharedReplyProgram(framing)
 }
 
+// RuntimeResources reports the TC backend's kernel programs and maps, and the
+// fakeip_icmp object it loaded if it loaded one.
+//
+// It copies handles only, under the backend lock, and leaves the kernel walk to
+// the caller: enumerating by ID is slow and must not run while a reconcile is
+// waiting for this lock. The fakeip_icmp object is folded in here because the
+// backend owns it behind an unexported field, which is the only reason this
+// method is not simply runtimeResourcesLocked's wrapper in
+// runtime_resources_backends.go.
+func (b *TCBackend) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	resources := b.runtimeResourcesLocked()
+	fakeIPICMP := b.fakeIPICMP.runtimeResourcesLocked()
+	resources.Programs = append(resources.Programs, fakeIPICMP.Programs...)
+	resources.Maps = append(resources.Maps, fakeIPICMP.Maps...)
+	return resources
+}
+
 func (b *TCBackend) fakeIPICMPBackend() *FakeIPICMPBackend {
 	if b == nil {
 		return nil

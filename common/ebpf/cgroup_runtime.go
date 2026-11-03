@@ -2,6 +2,10 @@
 
 package ebpf
 
+// UDPCleanupModeLRUFallback is the cgroup cleanup mode where the kernel can not
+// report socket releases, so userspace has to reclaim recovery state itself.
+const UDPCleanupModeLRUFallback = cgroupUDPCleanupLRUFallback
+
 func (b *CgroupBackend) CgroupPath() string {
 	if b == nil {
 		return ""

@@ -34,7 +34,7 @@ on:
     branches:
       - stable
       - testing
-      - testing-ebpf-tc-rewrite
+      - tc-rewrite-clean
       - unstable
 
 permissions:

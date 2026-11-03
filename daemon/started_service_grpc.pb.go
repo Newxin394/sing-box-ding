@@ -57,6 +57,7 @@ const (
 	StartedService_SubmitOpenVPNChallengeResponse_FullMethodName = "/daemon.StartedService/SubmitOpenVPNChallengeResponse"
 	StartedService_CancelOpenVPNChallenge_FullMethodName         = "/daemon.StartedService/CancelOpenVPNChallenge"
 	StartedService_SubscribeNotifications_FullMethodName         = "/daemon.StartedService/SubscribeNotifications"
+	StartedService_GetEBPFDiagnostics_FullMethodName             = "/daemon.StartedService/GetEBPFDiagnostics"
 )
 
 // StartedServiceClient is the client API for StartedService service.
@@ -105,6 +106,7 @@ type StartedServiceClient interface {
 	SubmitOpenVPNChallengeResponse(ctx context.Context, in *OpenVPNChallengeSubmission, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	CancelOpenVPNChallenge(ctx context.Context, in *OpenVPNChallengeCancel, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SubscribeNotifications(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[NotificationEvent], error)
+	GetEBPFDiagnostics(ctx context.Context, in *EBPFDiagnosticsRequest, opts ...grpc.CallOption) (*EBPFDiagnosticsResponse, error)
 }
 
 type startedServiceClient struct {
@@ -697,6 +699,16 @@ func (c *startedServiceClient) SubscribeNotifications(ctx context.Context, in *e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StartedService_SubscribeNotificationsClient = grpc.ServerStreamingClient[NotificationEvent]
 
+func (c *startedServiceClient) GetEBPFDiagnostics(ctx context.Context, in *EBPFDiagnosticsRequest, opts ...grpc.CallOption) (*EBPFDiagnosticsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EBPFDiagnosticsResponse)
+	err := c.cc.Invoke(ctx, StartedService_GetEBPFDiagnostics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StartedServiceServer is the server API for StartedService service.
 // All implementations must embed UnimplementedStartedServiceServer
 // for forward compatibility.
@@ -743,6 +755,7 @@ type StartedServiceServer interface {
 	SubmitOpenVPNChallengeResponse(context.Context, *OpenVPNChallengeSubmission) (*emptypb.Empty, error)
 	CancelOpenVPNChallenge(context.Context, *OpenVPNChallengeCancel) (*emptypb.Empty, error)
 	SubscribeNotifications(*emptypb.Empty, grpc.ServerStreamingServer[NotificationEvent]) error
+	GetEBPFDiagnostics(context.Context, *EBPFDiagnosticsRequest) (*EBPFDiagnosticsResponse, error)
 	mustEmbedUnimplementedStartedServiceServer()
 }
 
@@ -919,6 +932,10 @@ func (UnimplementedStartedServiceServer) CancelOpenVPNChallenge(context.Context,
 
 func (UnimplementedStartedServiceServer) SubscribeNotifications(*emptypb.Empty, grpc.ServerStreamingServer[NotificationEvent]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeNotifications not implemented")
+}
+
+func (UnimplementedStartedServiceServer) GetEBPFDiagnostics(context.Context, *EBPFDiagnosticsRequest) (*EBPFDiagnosticsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEBPFDiagnostics not implemented")
 }
 func (UnimplementedStartedServiceServer) mustEmbedUnimplementedStartedServiceServer() {}
 func (UnimplementedStartedServiceServer) testEmbeddedByValue()                        {}
@@ -1545,6 +1562,24 @@ func _StartedService_SubscribeNotifications_Handler(srv interface{}, stream grpc
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StartedService_SubscribeNotificationsServer = grpc.ServerStreamingServer[NotificationEvent]
 
+func _StartedService_GetEBPFDiagnostics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EBPFDiagnosticsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).GetEBPFDiagnostics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_GetEBPFDiagnostics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).GetEBPFDiagnostics(ctx, req.(*EBPFDiagnosticsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StartedService_ServiceDesc is the grpc.ServiceDesc for StartedService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1639,6 +1674,10 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelOpenVPNChallenge",
 			Handler:    _StartedService_CancelOpenVPNChallenge_Handler,
+		},
+		{
+			MethodName: "GetEBPFDiagnostics",
+			Handler:    _StartedService_GetEBPFDiagnostics_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

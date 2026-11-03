@@ -6,7 +6,7 @@ on:
       - oldstable
       - stable
       - testing
-      - testing-ebpf-tc-rewrite
+      - tc-rewrite-clean
       - unstable
     paths-ignore:
       - '**.md'
@@ -17,7 +17,7 @@ on:
       - oldstable
       - stable
       - testing
-      - testing-ebpf-tc-rewrite
+      - tc-rewrite-clean
       - unstable
 
 permissions:
