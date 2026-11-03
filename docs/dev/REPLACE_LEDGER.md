@@ -1,6 +1,6 @@
 # go.mod replace 台账
 
-本仓库在 `go.mod` 里用 `replace` 把两个上游模块指向第三方 fork。**每一条都必须在此登记**，否则时间一长没人记得它们为什么存在，也就没人敢删。
+本仓库在 `go.mod` 里用 `replace` 把上游模块改指到第三方 fork 或本地目录。**每一条都必须在此登记**，否则时间一长没人记得它们为什么存在，也就没人敢删。
 
 ## 当前在册
 
@@ -8,6 +8,7 @@
 |---|---|---|---|---|---|
 | `github.com/sagernet/sing-anytls` | `github.com/reF1nd/sing-anytls` | 待补 | fork 的 `reF1nd-main` 分支相对上游多 5 个 commit：client metadata 空覆盖恢复（`9101d82`）、AnyTLS 0.0.13 互操作、session 复用与空闲生命周期、fallback 请求保留、lazy TFO 地址兼容等 | fork 独有改动已进入上游 | 2026-09-18 |
 | `github.com/sagernet/sing-snell` | `github.com/reF1nd/sing-snell` | 待补 | fork 的 `reF1nd-main` 分支相对上游多 7 个 commit：Snell keep-once session draining（`d8a791b`）、UoT framing 修复、UDP/QUIC proxy 处理、defer handshake、协议兼容扩展等。注意 replace 锁定的 `48a266f` 已被 fork 历史重写、不可达，go.mod 的 require 伪版本 `bc5a12a` 已与上游 HEAD 同步，建议后续将 replace 升级到 fork 当前 HEAD | fork 独有改动已进入上游 | 2026-09-18 |
+| `github.com/sagernet/fswatch` | `./deps/fswatch`（本地目录） | 待补 | 本地 vendored 的 fswatch 改动，不经上游模块发布。目录内是 fork 过的文件监听实现，仓库带着它编译，所以 `replace` 指向 `./deps/fswatch` 而不是版本号 | 改动合入 `sagernet/fswatch` 上游并发布版本后，删掉 `deps/fswatch` 与该行 | 2026-11-04 |
 
 > 已移除：`github.com/sagernet/sing-tun` 的 replace 已由 `f095386b`（build: use upstream sing-tun instead of the reF1nd fork）移除，go.mod 现用上游 `v0.9.4-0.20260916043548-e842d006fa65`，不再登记。
 >
