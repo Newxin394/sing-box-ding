@@ -61,7 +61,10 @@ func MonotonicNow() (time.Time, error) {
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
 		return time.Time{}, E.Cause(err, "read monotonic clock")
 	}
-	return time.Unix(now.Sec, now.Nsec), nil
+	// Timespec's fields are int32 on 32-bit platforms (android/arm, android/386),
+	// so they have to be widened explicitly; passing them straight to time.Unix
+	// is a compile error there and only there.
+	return time.Unix(int64(now.Sec), int64(now.Nsec)), nil
 }
 
 // SweepUDPRecoveryBudgeted removes entries from the UDP recovery table that are
