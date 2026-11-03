@@ -29,6 +29,7 @@ const (
 	CgroupCoarseMapCgroupUdpRecovery           = "cgroup_udp_recovery"
 	CgroupCoarseMapCgroupUdpRedirect           = "cgroup_udp_redirect"
 	CgroupCoarseMapCgroupUdpToken              = "cgroup_udp_token"
+	CgroupCoarseMapCgroupUdpTokenReverse       = "cgroup_udp_token_reverse"
 	CgroupCoarseMapCgroupUidPolicy             = "cgroup_uid_policy"
 	CgroupCoarseProgSbEbpfConn4Cookie          = "sb_ebpf_conn4_cookie"
 	CgroupCoarseProgSbEbpfConn4CookieTcp       = "sb_ebpf_conn4_cookie_tcp"
@@ -112,20 +113,21 @@ type CgroupCoarseProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type CgroupCoarseMapSpecs struct {
-	CgroupBypassIpv4   *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv4"`
-	CgroupBypassIpv6   *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv6"`
-	CgroupBypassPort   *ebpf.MapSpec `ebpf:"cgroup_bypass_port"`
-	CgroupControl      *ebpf.MapSpec `ebpf:"cgroup_control"`
-	CgroupHostIpv4     *ebpf.MapSpec `ebpf:"cgroup_host_ipv4"`
-	CgroupHostIpv6     *ebpf.MapSpec `ebpf:"cgroup_host_ipv6"`
-	CgroupSocketBypass *ebpf.MapSpec `ebpf:"cgroup_socket_bypass"`
-	CgroupTcpRedirect  *ebpf.MapSpec `ebpf:"cgroup_tcp_redirect"`
-	CgroupUdpFlow      *ebpf.MapSpec `ebpf:"cgroup_udp_flow"`
-	CgroupUdpPeer      *ebpf.MapSpec `ebpf:"cgroup_udp_peer"`
-	CgroupUdpRecovery  *ebpf.MapSpec `ebpf:"cgroup_udp_recovery"`
-	CgroupUdpRedirect  *ebpf.MapSpec `ebpf:"cgroup_udp_redirect"`
-	CgroupUdpToken     *ebpf.MapSpec `ebpf:"cgroup_udp_token"`
-	CgroupUidPolicy    *ebpf.MapSpec `ebpf:"cgroup_uid_policy"`
+	CgroupBypassIpv4      *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv4"`
+	CgroupBypassIpv6      *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv6"`
+	CgroupBypassPort      *ebpf.MapSpec `ebpf:"cgroup_bypass_port"`
+	CgroupControl         *ebpf.MapSpec `ebpf:"cgroup_control"`
+	CgroupHostIpv4        *ebpf.MapSpec `ebpf:"cgroup_host_ipv4"`
+	CgroupHostIpv6        *ebpf.MapSpec `ebpf:"cgroup_host_ipv6"`
+	CgroupSocketBypass    *ebpf.MapSpec `ebpf:"cgroup_socket_bypass"`
+	CgroupTcpRedirect     *ebpf.MapSpec `ebpf:"cgroup_tcp_redirect"`
+	CgroupUdpFlow         *ebpf.MapSpec `ebpf:"cgroup_udp_flow"`
+	CgroupUdpPeer         *ebpf.MapSpec `ebpf:"cgroup_udp_peer"`
+	CgroupUdpRecovery     *ebpf.MapSpec `ebpf:"cgroup_udp_recovery"`
+	CgroupUdpRedirect     *ebpf.MapSpec `ebpf:"cgroup_udp_redirect"`
+	CgroupUdpToken        *ebpf.MapSpec `ebpf:"cgroup_udp_token"`
+	CgroupUdpTokenReverse *ebpf.MapSpec `ebpf:"cgroup_udp_token_reverse"`
+	CgroupUidPolicy       *ebpf.MapSpec `ebpf:"cgroup_uid_policy"`
 }
 
 // CgroupCoarseVariableSpecs contains global variables before they are loaded into the kernel.
@@ -154,20 +156,21 @@ func (o *CgroupCoarseObjects) Close() error {
 //
 // It can be passed to LoadCgroupCoarseObjects or ebpf.CollectionSpec.LoadAndAssign.
 type CgroupCoarseMaps struct {
-	CgroupBypassIpv4   *ebpf.Map `ebpf:"cgroup_bypass_ipv4"`
-	CgroupBypassIpv6   *ebpf.Map `ebpf:"cgroup_bypass_ipv6"`
-	CgroupBypassPort   *ebpf.Map `ebpf:"cgroup_bypass_port"`
-	CgroupControl      *ebpf.Map `ebpf:"cgroup_control"`
-	CgroupHostIpv4     *ebpf.Map `ebpf:"cgroup_host_ipv4"`
-	CgroupHostIpv6     *ebpf.Map `ebpf:"cgroup_host_ipv6"`
-	CgroupSocketBypass *ebpf.Map `ebpf:"cgroup_socket_bypass"`
-	CgroupTcpRedirect  *ebpf.Map `ebpf:"cgroup_tcp_redirect"`
-	CgroupUdpFlow      *ebpf.Map `ebpf:"cgroup_udp_flow"`
-	CgroupUdpPeer      *ebpf.Map `ebpf:"cgroup_udp_peer"`
-	CgroupUdpRecovery  *ebpf.Map `ebpf:"cgroup_udp_recovery"`
-	CgroupUdpRedirect  *ebpf.Map `ebpf:"cgroup_udp_redirect"`
-	CgroupUdpToken     *ebpf.Map `ebpf:"cgroup_udp_token"`
-	CgroupUidPolicy    *ebpf.Map `ebpf:"cgroup_uid_policy"`
+	CgroupBypassIpv4      *ebpf.Map `ebpf:"cgroup_bypass_ipv4"`
+	CgroupBypassIpv6      *ebpf.Map `ebpf:"cgroup_bypass_ipv6"`
+	CgroupBypassPort      *ebpf.Map `ebpf:"cgroup_bypass_port"`
+	CgroupControl         *ebpf.Map `ebpf:"cgroup_control"`
+	CgroupHostIpv4        *ebpf.Map `ebpf:"cgroup_host_ipv4"`
+	CgroupHostIpv6        *ebpf.Map `ebpf:"cgroup_host_ipv6"`
+	CgroupSocketBypass    *ebpf.Map `ebpf:"cgroup_socket_bypass"`
+	CgroupTcpRedirect     *ebpf.Map `ebpf:"cgroup_tcp_redirect"`
+	CgroupUdpFlow         *ebpf.Map `ebpf:"cgroup_udp_flow"`
+	CgroupUdpPeer         *ebpf.Map `ebpf:"cgroup_udp_peer"`
+	CgroupUdpRecovery     *ebpf.Map `ebpf:"cgroup_udp_recovery"`
+	CgroupUdpRedirect     *ebpf.Map `ebpf:"cgroup_udp_redirect"`
+	CgroupUdpToken        *ebpf.Map `ebpf:"cgroup_udp_token"`
+	CgroupUdpTokenReverse *ebpf.Map `ebpf:"cgroup_udp_token_reverse"`
+	CgroupUidPolicy       *ebpf.Map `ebpf:"cgroup_uid_policy"`
 }
 
 func (m *CgroupCoarseMaps) Close() error {
@@ -185,6 +188,7 @@ func (m *CgroupCoarseMaps) Close() error {
 		m.CgroupUdpRecovery,
 		m.CgroupUdpRedirect,
 		m.CgroupUdpToken,
+		m.CgroupUdpTokenReverse,
 		m.CgroupUidPolicy,
 	)
 }

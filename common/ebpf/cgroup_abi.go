@@ -202,6 +202,17 @@ type originalDestinationValue struct {
 	CreatedAtNS  uint64
 }
 
+// udpTokenReverseValue mirrors the kernel's listener -> cookie table.
+//
+// The kernel keeps cookie -> listener for connected UDP, which makes a socket
+// that reconnects to another listener unreachable from the listener side: the
+// new token lands on a different key and the old one is never deleted. The
+// reverse entry lets the next store reclaim it.
+type udpTokenReverseValue struct {
+	SocketCookie uint64
+	Reserved     uint64
+}
+
 type udpFlowKey struct {
 	SocketCookie uint64
 	Family       uint8

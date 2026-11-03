@@ -117,6 +117,15 @@ func (i *Inbound) startInbound() error {
 			return E.Cause(err, "configure eBPF redirect routes")
 		}
 	}
+	// Interface routes must exist before the first redirected connection: a
+	// socket bound with SO_BINDTODEVICE or IP_UNICAST_IF skips the loopback
+	// route, so without these the very first connection from such a socket
+	// would follow the default route out instead of reaching the listener.
+	if i.localCgroupEnabled() {
+		if err := i.reconcileRedirectInterfaceRoutes(); err != nil {
+			return E.Cause(err, "configure eBPF redirect interface routes")
+		}
+	}
 	backendConfig := commonEBPF.TCConfig{
 		ListenerPort:     i.listeners.selectedPort(),
 		EnableLocal:      localTCEnabled,
@@ -332,6 +341,7 @@ func (i *Inbound) startInbound() error {
 	)
 	i.udpReplySockets.startSweeper(i.ctx)
 	i.startCgroupRecoverySweeper(i.ctx)
+	i.startCgroupMaintenance(i.ctx)
 	i.logStartupSummary()
 	return nil
 }
@@ -548,6 +558,7 @@ func (i *Inbound) closeResources() error {
 	// Stop the recovery sweeper before the backend goes away: a pass in flight
 	// would otherwise keep using map handles that are being closed.
 	i.stopCgroupRecoverySweeper()
+	i.stopCgroupMaintenance()
 	monitorErr := i.stopTCInterfaceMonitor()
 	i.stopBypassSelector()
 	i.stopBypassRuleSets()
@@ -587,6 +598,7 @@ func (i *Inbound) closeResources() error {
 	udpReplySocketErr := i.udpReplySockets.close()
 	dataPlaneErr := i.closeTakenTCDataPlane(dataPlane)
 	routeErr := i.removeLocalRoutes()
+	interfaceRouteErr := i.closeRedirectInterfaceRoutes()
 	selfBypassErr := error(nil)
 	if i.selfBypass != nil {
 		if clearer, loaded := i.networkManager.(interface {
@@ -602,7 +614,7 @@ func (i *Inbound) closeResources() error {
 		processTrackerErr = i.processTracker.Close()
 		i.processTracker = nil
 	}
-	return E.Errors(monitorErr, preMatchErr, sharedRewriteErr, disableErr, listenerErr, udpNATErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, selfBypassErr)
+	return E.Errors(monitorErr, preMatchErr, sharedRewriteErr, disableErr, listenerErr, udpNATErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, interfaceRouteErr, processTrackerErr, selfBypassErr)
 }
 
 func (i *Inbound) prepareCgroupBackend() error {

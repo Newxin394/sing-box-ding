@@ -19,16 +19,14 @@ import (
 // therefore stays until unrelated traffic pushes it out, and the map keeps
 // reporting a full occupancy that has nothing to do with live sockets.
 //
-// The fix upstream uses is a kernel-side release notification: the socket
-// release hook reports the cookie and a timestamp through a ring buffer, and
-// userspace deletes the entry at an exact deadline. That needs a loader change
-// (a new ring buffer map and program) and this fork's objects are built ahead
-// of time with the Android NDK, so it cannot be reproduced here without
-// regenerating every object.
+// The socket release hook now stamps each recovery entry with the release time,
+// so the entry has a real age and can be expired by age instead of waiting for
+// LRU pressure. Upstream goes one step further and delivers the release through
+// a ring buffer so userspace deletes at an exact deadline; this fork still uses
+// a periodic sweep, which bounds the same leak at the sweep interval instead of
+// at the notification.
 //
-// What can be done in userspace alone is to make the table bounded in time:
-// every entry that is too old to still receive a late packet is removed. The
-// lower bound for "too old" is the kernel UDP conntrack timeout, because a
+// The lower bound for "too old" is the kernel UDP conntrack timeout, because a
 // packet arriving after the flow mapping expired can no longer be redirected
 // and recovery would never be consulted for it again.
 
@@ -51,13 +49,28 @@ type RecoverySweepStats struct {
 	Complete bool
 }
 
+// MonotonicNow reads CLOCK_MONOTONIC.
+//
+// The kernel stamps recovery entries with flow_time_ns(), which is
+// ktime_get_ns() -- monotonic, not wall clock. Comparing that against
+// time.Now() would mix two clocks: a wall-clock jump (NTP step, timezone
+// handling in a container) moves the cutoff by arbitrary amounts in either
+// direction, silently deleting live entries or never deleting stale ones.
+func MonotonicNow() (time.Time, error) {
+	var now unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
+		return time.Time{}, E.Cause(err, "read monotonic clock")
+	}
+	return time.Unix(now.Sec, now.Nsec), nil
+}
+
 // SweepUDPRecoveryBudgeted removes entries from the UDP recovery table that are
 // older than maxAge, walking at most budget entries.
 //
-// Entries whose timestamp is unknown (zero) are left alone: the table can hold
-// values written by the in-kernel copy that never stamped them, and guessing an
-// age from a missing timestamp would delete state that is still serving a live
-// flow.
+// now must be a CLOCK_MONOTONIC reading, see MonotonicNow. Entries whose
+// timestamp is unknown (zero) are left alone: an object built before the release
+// hook stamped them can still be loaded after an upgrade, and guessing an age
+// from a missing timestamp would delete state that is still serving a live flow.
 func (b *CgroupBackend) SweepUDPRecoveryBudgeted(
 	maxAge time.Duration,
 	now time.Time,

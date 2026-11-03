@@ -79,13 +79,7 @@ func selectRedirectPrefix(
 }
 
 func (i *Inbound) setupLocalRoutes() error {
-	prefixes := make([]netip.Prefix, 0, 2)
-	if i.redirectIPv4Prefix.IsValid() {
-		prefixes = append(prefixes, i.redirectIPv4Prefix)
-	}
-	if i.cgroupIPv6Enabled() || i.sharedRewriteIPv6Enabled() {
-		prefixes = append(prefixes, i.redirectIPv6Prefix)
-	}
+	prefixes := i.redirectPrefixes()
 	routes, err := addLocalRoutes(prefixes)
 	if err != nil {
 		return err

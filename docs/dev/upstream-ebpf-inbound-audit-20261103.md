@@ -337,6 +337,8 @@ fork 没有这个头文件，因为它是父仓新引入的 `_force4/_force6` LP
 
 ### 10.2 这一轮确认的**真实**缺陷（4 条，都不是文件缺失）
 
+> **状态：E1–E4 已全部修复，见第 11 节。** 下表保留当时的判断与证据，便于回看"改了什么、为什么改"。
+
 | # | 缺陷 | 证据 | 后果 |
 |---|---|---|---|
 | **E1** | 同一 UDP socket 重连到新目标时，旧 redirect/token 条目不清理 | 父仓有 `cgroup_udp_token_reverse`（listener→cookie 反查）在 `store_connected_udp_token` 里发现 cookie 变了就删旧 token+peer；fork 直接 `map_update(&cgroup_udp_token, &cookie, &listener, 0U)` 覆盖（`cgroup.bpf.c:616/719/789`），**没有反查表** | 旧 `listener_key` 指向的 `cgroup_udp_redirect` 变成孤儿，直到该 socket 关闭才被 `release_socket` 清掉；频繁重连的客户端会累积 |
@@ -371,3 +373,102 @@ E3 是纯用户态（Go），可以在这里做——但需要先明确"压力�
 ### 10.5 fork 独有的 eBPF 配置能力（父仓没有）
 
 `pre_match`（NFQUEUE 前置匹配）、`bypass_selector`（含 `直连` 通配）、`map_capacity`（8 项可调）、`shared.default_interface`、`capture_owner/capture_runtime`。这些父仓 `option/ebpf.go` 里一个都没有——fork 的 option 层确实是父仓的超集。
+
+## 11. 第三轮执行：E1–E4 全部修完（2026-11-04）
+
+10.3 里我写过"E1/E2 本机做不到，因为缺 NDK clang"、"E3 属于策略决策不该我拍"。这两条都被推翻了：NDK r29 下载到位，`bpf2go` 在 Windows 上打通，四条缺陷全部落地。
+
+### 11.1 E1：UDP 重连时的孤儿 redirect
+
+内核侧加了一张反查表，把"cookie → listener"的单向映射补成双向。
+
+| 位置 | 改动 |
+|---|---|
+| `native/abi.h` | 新增 `sb_ebpf_udp_token_reverse_value{socket_cookie, reserved}`（16 B，`reserved` 为将来的 generation 留位）+ 静态断言 |
+| `native/cgroup.bpf.c` | 新增 `cgroup_udp_token_reverse`（`BPF_MAP_TYPE_HASH`，listener → reverse value） |
+| `native/cgroup.bpf.c` | 新增 `store_connected_udp_token(cookie, listener)`：查反查表，发现上一个 cookie 不同就删掉它的 token 和 peer，再写 token、写反查，反查写失败回滚 |
+| `native/cgroup.bpf.c` | 三处 connected_udp 的 `map_update(&cgroup_udp_token, ...)` 直写全部改调上面这个函数 |
+| `native/cgroup.bpf.c` | `reset_connected_udp` 补 `map_delete(&cgroup_udp_token_reverse, ...)` |
+| `cgroup_maps.go` | override 加 `sb_cg_token_rev`；`validateCgroupUDPCleanupMaps` 把它一并纳入类型校验 |
+| `cgroup_abi.go` | 新增 Go 侧镜像结构 `udpTokenReverseValue` |
+
+`store_connected_udp_token` 必须**单行声明**——它的参数列表会被 `INLINE` 宏展开吃掉，写成多行 clang 直接报 `expected parameter declarator`。
+
+### 11.2 E2：recovery 表只增不减
+
+两处改动共同让它变成"能过期"：
+
+1. **内核侧打戳**：`release_socket` 拆成 `release_socket_cookie(cookie, released_at_ns)`，拷贝 original 进 `cgroup_udp_recovery` 时写 `recovery.created_at_ns = released_at_ns != 0U ? released_at_ns : flow_time_ns()`；`release_socket(ctx)` 变成它的薄包装。
+2. **用户态扫掉过期的**：`SweepUDPRecoveryBudgeted` 现在真的能删东西了。
+
+**时钟必须对得上**：内核写的是 `ktime_get_ns()`（`CLOCK_MONOTONIC`），而清扫原来拿 `time.Now()`（`CLOCK_REALTIME`）去比——两个量纲比大小，删不删全看运气。新增 `commonEBPF.MonotonicNow()`（`unix.ClockGettime(CLOCK_MONOTONIC)`），清扫统一用它。
+
+**门禁也改对了**：原来只扫 `lru_fallback` 模式，漏掉了 `socket_release`。而 recovery 表在**两种**模式下都是内核释放钩子写的，socket_release 模式不扫，表照样被 LRU 挤爆。现在两种都扫。
+
+### 11.3 E3：map 压力从"看得见"变成"会动手"
+
+父仓的 `maintenance.go` 依赖一个 fork 没有的原语（TC assignment 扫描），所以没有照抄，而是把它的**滞回 + 调度**套在 fork 真有的两个可收缩对象上：cgroup UDP recovery 表、shared network 流表。
+
+新增 `protocol/ebpf/cgroup_maintenance.go`：
+
+- 每分钟一次慢 tick，重读两张表的占用；
+- 受压（≥85% 进、≤50% 出，沿用 `MapPressureTracker` 的滞回）就 15 秒扫一次，宽松就 2 分钟一次；
+- 每次最多扫 1024 条（`cgroupMaintenanceSweepBudget`），失败冷却 5 秒；
+- **第一次启动必扫**，不必等第一个间隔。
+
+redirect/token 两张表被**故意排除**在压力观察之外——清扫永远缩不小它们，纳进来只会让循环白扫。
+
+`UDPRecoveryUsage()` 数不出 entries 时**上报满额**而不是 0：谎报"还有空间"会让表悄悄填满，而这正是这条路径要防的事。
+
+### 11.4 E4：per-interface local route
+
+新增 `protocol/ebpf/redirect_interface_routes.go`（照父模块 `redirect_route.go` 的 `LocalRouteSet` 移植）：
+
+- 每个 up 且有该族地址的接口，都装一条 redirect 前缀的 local route，**source 用接口自己的地址**；
+- IPv4 额外保留 loopback 上那条（更优先，未绑定 socket 保持 127.0.0.1 源）；
+- 路由用 `RTM_NEWROUTE` 手工构造（`netlink` 包会把 `Src` 设成 source-specific 前缀，只有 `RTA_PREFSRC` 才是要的）；
+- 用 `RTA_PRIORITY = 0x53000000 + linkIndex` 排在 loopback 路由之后；
+- 挂进 `interface_monitor.go` 的 tick——**内核会连同源地址一起删路由，接口/地址一变就必须重跑**；
+- 失败只 warn，不阻塞 TC reconcile。
+
+`setupLocalRoutes` 里原本重复的前缀计算收敛成 `redirectPrefixes()`，两处共用。
+
+### 11.5 内核对象重编（NDK 打通）
+
+10.3 说"本机无 NDK"已不成立。做法：
+
+1. `cilium/ebpf` 的 `cmd/bpf2go` 全部文件带 `//go:build !windows`，Windows 上跑不了；把它整棵 module 复制出来、去掉那几个 `!windows` 标记后编译成 `bpf2go.exe`。
+2. 用 NDK r29 的 clang 21 重生成 cgroup / cgroup_coarse / cgroup_storage 六个对象（两种字节序）。
+3. `llvm-objcopy --remove-section=.BTF --remove-section=.BTF.ext` 剥掉调试段（bpf2go 强制 `-g`，不剥体积会翻三倍）。
+4. `manifest.txt` 的 sha256 与 clang 版本行同步更新；手工复刻 `make check` 的 native 比对 → **15 条目 / 15 文件全部一致**。
+
+对象体积：`cgroup_bpfel.o` 112,968 → 104,448 B，`cgroup_bpfeb.o` 113,072 → 104,944 B。`cgroup_bpfel.go` 多了 `CgroupMapCgroupUdpTokenReverse` 常量。
+
+### 11.6 新增测试
+
+| 文件 | 守住什么 |
+|---|---|
+| `protocol/ebpf/redirect_interface_routes_test.go` | nil 接收者不 panic、close 后 no-op、地址族分类、空前缀不发路由 |
+| `protocol/ebpf/cgroup_maintenance_test.go` | 无 backend 不启动、stop 幂等且 5 秒内返回、间隔大小关系、无 backend 时判为宽松 |
+| `protocol/ebpf/cgroup_recovery_sweep_test.go`（追加 2 个） | `MonotonicNow` 确实读的是单调钟（与墙钟差 > 1 分钟）、没打戳的条目不被误删 |
+
+### 11.7 验证
+
+| 项目 | 结果 |
+|---|---|
+| `GOOS=linux GOARCH=arm64 go build -tags with_ebpf`（4 个包） | exit 0 |
+| 同上 `go vet` | exit 0 |
+| 160 个包 bulk build（排除 `experimental/boxdd`、`experimental/libbox`） | exit 0 |
+| 全 tag 集 android/arm64 完整二进制 | exit 0，92,360,606 B |
+| Windows 原生无 tag：`go build ./common/ebpf/ ./daemon/ ./adapter/` | exit 0 |
+| Windows 原生 `go test ./common/ebpf/` | ok |
+| `make check` 的 native 部分（手工复刻） | 15/15 一致 |
+| `golangci-lint fmt -E gci -E gofumpt`（只对改动文件） | 无无关漂移 |
+
+`protocol/ebpf` 的测试二进制只能交叉编译（`go test -c` 通过），在 Windows 上跑不了——eBPF 的集成测试要么 Linux 真机、要么 CI 里的 `ebpf-verifier.yml`。
+
+### 11.8 仍然没做的
+
+- **父仓的 ringbuf 释放通知**（`sock_release_notify` + watch/stats/events 四张表 + 用户态 deadline 调度）。有了 `created_at_ns` 之后，10 秒级周期清扫已经能覆盖"socket 已关的孤儿"，ringbuf 只买到那 10 秒的延迟。收益与复杂度（多四张表、多一个读线程、一条降级路径）不成比例，决定不做。
+- **netns 隔离投递**（`tc_isolation.h` / `tc_namespace.go` / `tc_isolated_delivery.go`，约 520 行）：只在多 netns 场景需要，与 8 月那份 parity 文档结论一致。
+- **`adapter/host.go`、`common/kernelports/`、`tailssh/switch_user`**：不属于 eBPF 范围，第 2 节列过，仍未移植。

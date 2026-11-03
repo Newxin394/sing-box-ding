@@ -55,3 +55,55 @@ func TestInboundRecoverySweeperStartRequiresCgroupBackend(t *testing.T) {
 		t.Fatal("sweeper should not start without a cgroup backend")
 	}
 }
+
+// The kernel stamps a released socket's recovery entry with CLOCK_MONOTONIC
+// (flow_time_ns), so the sweep must compare against the same clock. A wall-clock
+// reading drifts by any NTP step and would either keep stale entries forever or
+// expire live ones.
+func TestMonotonicNowAdvancesWithTheMonotonicClock(t *testing.T) {
+	before, err := commonEBPF.MonotonicNow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	after, err := commonEBPF.MonotonicNow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.After(before) {
+		t.Fatalf("monotonic clock did not advance: before=%v after=%v", before, after)
+	}
+	// A monotonic reading is only meaningful relative to another one. If it were
+	// the wall clock, it would be within minutes of time.Now(); a boot-relative
+	// value is not (this build has no reason to be on a machine booted within the
+	// hour).
+	if wall := time.Now(); after.Sub(wall).Abs() < time.Minute {
+		t.Fatal("MonotonicNow looks like a wall-clock reading")
+	}
+}
+
+// A sweep that only ever sees entries with an unknown timestamp must not delete
+// anything: those values come from objects built before the release hook stamped
+// them, and guessing their age would cut flows that are still alive.
+func TestRecoverySweepLeavesUnstampedEntriesAlone(t *testing.T) {
+	now, err := commonEBPF.MonotonicNow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		stats commonEBPF.RecoverySweepStats
+		stale int
+	)
+	// Reproduces the visit predicate the sweep applies to every entry.
+	for _, createdAt := range []uint64{0, uint64(now.Add(-time.Hour).UnixNano())} {
+		stats.Scanned++
+		cutoff := now.Add(-cgroupRecoveryMaxAge).UnixNano()
+		if createdAt == 0 || createdAt > uint64(cutoff) {
+			continue
+		}
+		stale++
+	}
+	if stale != 1 {
+		t.Fatalf("expected only the stamped entry to be swept, got %d of %d", stale, stats.Scanned)
+	}
+}

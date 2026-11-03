@@ -34,20 +34,21 @@ func prepareCgroupMaps(runtimeState *cgroupRuntime, capacity CgroupMapCapacity, 
 	}
 	var err error
 	runtimeState.maps, err = loadObjectMaps(loadCgroup, map[string]mapSpecOverride{
-		"cgroup_control":       {name: "sb_cg_control", mapType: CiliumEBPF.Array, maxEntries: 1},
-		"cgroup_tcp_redirect":  {name: "sb_cg_tcp", mapType: CiliumEBPF.LRUHash, maxEntries: tcpCapacity},
-		"cgroup_udp_redirect":  {name: "sb_cg_udp", mapType: udpLayout.cleanupType, maxEntries: udpCapacity, flags: udpLayout.cleanupFlags},
-		"cgroup_udp_recovery":  {name: "sb_cg_recover", mapType: CiliumEBPF.LRUHash, maxEntries: recoveryCapacity},
-		"cgroup_udp_token":     {name: "sb_cg_token", mapType: udpLayout.cleanupType, maxEntries: udpCapacity, flags: udpLayout.cleanupFlags},
-		"cgroup_udp_peer":      {name: "sb_cg_peer", mapType: udpLayout.peerType, maxEntries: udpLayout.peerCapacity, flags: udpLayout.peerFlags},
-		"cgroup_udp_flow":      {name: "sb_cg_flow", mapType: CiliumEBPF.LRUHash, maxEntries: udpLayout.flowCapacity},
-		"cgroup_socket_bypass": {name: "sb_cg_sock_byp", mapType: CiliumEBPF.LRUHash, maxEntries: capacity.SocketBypass},
-		"cgroup_bypass_port":   {name: "sb_cg_byp_port", mapType: CiliumEBPF.Hash, maxEntries: tcPortPolicyCapacity},
-		"cgroup_uid_policy":    {name: "sb_cg_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: uidCapacity, flags: bpfFlagNoPrealloc},
-		"cgroup_bypass_ipv4":   {name: "sb_cg_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
-		"cgroup_bypass_ipv6":   {name: "sb_cg_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
-		"cgroup_host_ipv4":     {name: "sb_cg_host4", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
-		"cgroup_host_ipv6":     {name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
+		"cgroup_control":           {name: "sb_cg_control", mapType: CiliumEBPF.Array, maxEntries: 1},
+		"cgroup_tcp_redirect":      {name: "sb_cg_tcp", mapType: CiliumEBPF.LRUHash, maxEntries: tcpCapacity},
+		"cgroup_udp_redirect":      {name: "sb_cg_udp", mapType: udpLayout.cleanupType, maxEntries: udpCapacity, flags: udpLayout.cleanupFlags},
+		"cgroup_udp_recovery":      {name: "sb_cg_recover", mapType: CiliumEBPF.LRUHash, maxEntries: recoveryCapacity},
+		"cgroup_udp_token":         {name: "sb_cg_token", mapType: udpLayout.cleanupType, maxEntries: udpCapacity, flags: udpLayout.cleanupFlags},
+		"cgroup_udp_token_reverse": {name: "sb_cg_token_rev", mapType: udpLayout.cleanupType, maxEntries: udpCapacity, flags: udpLayout.cleanupFlags},
+		"cgroup_udp_peer":          {name: "sb_cg_peer", mapType: udpLayout.peerType, maxEntries: udpLayout.peerCapacity, flags: udpLayout.peerFlags},
+		"cgroup_udp_flow":          {name: "sb_cg_flow", mapType: CiliumEBPF.LRUHash, maxEntries: udpLayout.flowCapacity},
+		"cgroup_socket_bypass":     {name: "sb_cg_sock_byp", mapType: CiliumEBPF.LRUHash, maxEntries: capacity.SocketBypass},
+		"cgroup_bypass_port":       {name: "sb_cg_byp_port", mapType: CiliumEBPF.Hash, maxEntries: tcPortPolicyCapacity},
+		"cgroup_uid_policy":        {name: "sb_cg_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: uidCapacity, flags: bpfFlagNoPrealloc},
+		"cgroup_bypass_ipv4":       {name: "sb_cg_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
+		"cgroup_bypass_ipv6":       {name: "sb_cg_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
+		"cgroup_host_ipv4":         {name: "sb_cg_host4", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
+		"cgroup_host_ipv6":         {name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
 	})
 	if err != nil {
 		return err
@@ -150,7 +151,7 @@ func validateCgroupUDPCleanupMaps(runtimeState *cgroupRuntime) error {
 	if runtimeState.socket_release_supported {
 		expectedType = CiliumEBPF.Hash
 	}
-	for _, name := range []string{"cgroup_udp_redirect", "cgroup_udp_token"} {
+	for _, name := range []string{"cgroup_udp_redirect", "cgroup_udp_token", "cgroup_udp_token_reverse"} {
 		mapInstance := runtimeState.maps[name]
 		if mapInstance == nil {
 			return E.New("missing UDP cleanup map ", name)

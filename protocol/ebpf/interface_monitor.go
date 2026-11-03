@@ -536,6 +536,12 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 		return
 	}
 	outcome.bypassRuleSet = i.retryBypassRuleSetIfNeededLocked()
+	// The kernel deletes a route together with its source address, so an
+	// interface or address change needs the redirect interface routes
+	// reconciled even when the TC topology itself did not change.
+	if err := i.reconcileRedirectInterfaceRoutes(); err != nil {
+		i.interfaceWarnings.infrastructure.warn(i.logger, "reconcile eBPF redirect interface routes: ", err)
+	}
 	if err := i.networkManager.UpdateInterfaces(); err != nil {
 		i.interfaceWarnings.inventory.warn(i.logger, "update interfaces for TC eBPF: ", err)
 		outcome.general = tcSharedRewriteRecoverable

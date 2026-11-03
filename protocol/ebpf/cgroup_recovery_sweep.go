@@ -23,12 +23,13 @@ const (
 
 // startCgroupRecoverySweeper bounds the UDP recovery table in time.
 //
-// The table upstream is bounded by a kernel release notification delivered
-// through a ring buffer. That needs loader support this fork's prebuilt
-// objects do not have, so this sweeper is the userspace stand-in: it deletes
-// entries older than cgroupRecoveryMaxAge on a fixed interval. Entries with an
-// unknown timestamp are left alone (they predate timestamping, and deleting
-// them would cut live flows).
+// The table is written by the kernel release hook and is an LRU map, so without
+// a delete path an entry only leaves when unrelated traffic evicts it -- which
+// can just as well evict an entry a late packet still needs. Upstream deletes
+// at an exact deadline from a ring buffer notification; this fork walks the
+// table on a fixed interval and deletes entries older than
+// cgroupRecoveryMaxAge. Entries with an unknown timestamp are left alone (they
+// predate the release stamp, and deleting them would cut live flows).
 //
 // A second call before stopCgroupRecoverySweeper is a no-op.
 func (i *Inbound) startCgroupRecoverySweeper(ctx context.Context) {
@@ -84,27 +85,49 @@ func (i *Inbound) recoverySweepHandledAnything() bool {
 }
 
 func (i *Inbound) sweepCgroupRecovery() {
+	i.sweepCgroupRecoveryBudgeted(cgroupRecoveryMaxAge, 0)
+}
+
+// sweepCgroupRecoveryBudgeted is the sweep both the fixed-interval loop and the
+// pressure-driven maintenance loop share: the only difference between them is
+// how often they ask and how many entries one pass may walk.
+func (i *Inbound) sweepCgroupRecoveryBudgeted(maxAge time.Duration, budget uint32) (commonEBPF.RecoverySweepStats, error) {
 	backend := i.cgroupBackendInstance()
 	if backend == nil {
-		return
+		return commonEBPF.RecoverySweepStats{}, nil
 	}
-	// Only LRU-fallback cleanup leaves entries behind forever; with a kernel
-	// release hook the table is reclaimed by the hook, and sweeping would race
-	// the kernel for no reason.
-	if backend.UDPCleanupMode() != commonEBPF.UDPCleanupModeLRUFallback {
-		return
+	// The recovery table is written by the kernel release hook in both cleanup
+	// modes: the mode only decides whether the redirect and token maps are Hash
+	// (exact reclaim) or LRU (fallback). Nothing else removes a recovery entry
+	// except a late packet consuming it, so leaving the sweep off in
+	// socket_release mode would let the LRU map fill up and evict entries that
+	// are still needed. Only warn when entries actually outlive the age bound
+	// past the kernel timeout.
+	switch backend.UDPCleanupMode() {
+	case commonEBPF.UDPCleanupModeLRUFallback, commonEBPF.UDPCleanupModeSocketRelease:
+	default:
+		return commonEBPF.RecoverySweepStats{}, nil
 	}
-	stats, err := backend.SweepUDPRecoveryBudgeted(cgroupRecoveryMaxAge, time.Now(), 0)
+	// The kernel stamps entries with CLOCK_MONOTONIC; reading the wall clock
+	// here would drift with NTP steps and either keep stale entries or expire
+	// live ones after a clock jump.
+	now, err := commonEBPF.MonotonicNow()
+	if err != nil {
+		i.udpWarnings.originalDestination.warn(i.logger, "read monotonic clock for cgroup eBPF UDP recovery sweep: ", err)
+		return commonEBPF.RecoverySweepStats{}, err
+	}
+	stats, err := backend.SweepUDPRecoveryBudgeted(maxAge, now, budget)
 	if err != nil {
 		i.udpWarnings.originalDestination.warn(i.logger, "sweep cgroup eBPF UDP recovery state: ", err)
-		return
+		return commonEBPF.RecoverySweepStats{}, err
 	}
 	if stats.Deleted > 0 {
 		i.recoverySweepHandled.Add(uint64(stats.Deleted))
 		i.logger.Trace(
 			"eBPF cgroup UDP recovery sweep: scanned=", stats.Scanned,
 			", deleted=", stats.Deleted,
-			", max_age=", cgroupRecoveryMaxAge,
+			", max_age=", maxAge,
 		)
 	}
+	return stats, nil
 }

@@ -75,6 +75,19 @@ struct sb_ebpf_udp_peer_key {
     __u64 cookie;
 };
 
+/*
+ * cgroup_udp_token_reverse maps a listener key back to the socket that claimed
+ * it. Without it the kernel side only has cookie -> listener, so a socket that
+ * reconnects to a different listener overwrites its own token and the previous
+ * listener key keeps a redirect entry pointing at a cookie that no longer
+ * exists. The value is 16 bytes rather than 8 so a generation counter can be
+ * added without another ABI break.
+ */
+struct sb_ebpf_udp_token_reverse_value {
+    __u64 socket_cookie;
+    __u64 reserved;
+};
+
 struct sb_ebpf_udp_peer_value {
     __u8 family;
     __u8 protocol;
@@ -103,8 +116,8 @@ _Static_assert(sizeof(struct sb_ebpf_listener_key) == 20U, "unexpected redirect 
 _Static_assert(sizeof(struct sb_ebpf_original_dst) == 40U, "unexpected original destination ABI");
 _Static_assert(__builtin_offsetof(struct sb_ebpf_original_dst, socket_cookie) == 24U, "unexpected socket cookie ABI");
 _Static_assert(__builtin_offsetof(struct sb_ebpf_original_dst, created_at_ns) == 32U, "unexpected creation time ABI");
-_Static_assert(sizeof(struct sb_ebpf_udp_peer_key) == 8U, "unexpected UDP peer key ABI");
-_Static_assert(sizeof(struct sb_ebpf_udp_peer_value) == 20U, "unexpected UDP peer value ABI");
+_Static_assert(sizeof(struct sb_ebpf_udp_peer_key) == 8U, "unexpected UDP peer key ABI");_Static_assert(sizeof(struct sb_ebpf_udp_peer_value) == 20U, "unexpected UDP peer value ABI");
+_Static_assert(sizeof(struct sb_ebpf_udp_token_reverse_value) == 16U, "unexpected UDP token reverse ABI");
 _Static_assert(sizeof(struct sb_ebpf_udp_flow_key) == 32U, "unexpected UDP flow key ABI");
 _Static_assert(sizeof(struct sb_ebpf_udp_flow_value) == 32U, "unexpected UDP flow value ABI");
 

@@ -30,6 +30,7 @@ const (
 	CgroupStorageMapCgroupUdpRedirect           = "cgroup_udp_redirect"
 	CgroupStorageMapCgroupUdpSocketStorage      = "cgroup_udp_socket_storage"
 	CgroupStorageMapCgroupUdpToken              = "cgroup_udp_token"
+	CgroupStorageMapCgroupUdpTokenReverse       = "cgroup_udp_token_reverse"
 	CgroupStorageMapCgroupUidPolicy             = "cgroup_uid_policy"
 	CgroupStorageProgSbEbpfConn4Cookie          = "sb_ebpf_conn4_cookie"
 	CgroupStorageProgSbEbpfConn4CookieTcp       = "sb_ebpf_conn4_cookie_tcp"
@@ -127,6 +128,7 @@ type CgroupStorageMapSpecs struct {
 	CgroupUdpRedirect      *ebpf.MapSpec `ebpf:"cgroup_udp_redirect"`
 	CgroupUdpSocketStorage *ebpf.MapSpec `ebpf:"cgroup_udp_socket_storage"`
 	CgroupUdpToken         *ebpf.MapSpec `ebpf:"cgroup_udp_token"`
+	CgroupUdpTokenReverse  *ebpf.MapSpec `ebpf:"cgroup_udp_token_reverse"`
 	CgroupUidPolicy        *ebpf.MapSpec `ebpf:"cgroup_uid_policy"`
 }
 
@@ -170,6 +172,7 @@ type CgroupStorageMaps struct {
 	CgroupUdpRedirect      *ebpf.Map `ebpf:"cgroup_udp_redirect"`
 	CgroupUdpSocketStorage *ebpf.Map `ebpf:"cgroup_udp_socket_storage"`
 	CgroupUdpToken         *ebpf.Map `ebpf:"cgroup_udp_token"`
+	CgroupUdpTokenReverse  *ebpf.Map `ebpf:"cgroup_udp_token_reverse"`
 	CgroupUidPolicy        *ebpf.Map `ebpf:"cgroup_uid_policy"`
 }
 
@@ -189,6 +192,7 @@ func (m *CgroupStorageMaps) Close() error {
 		m.CgroupUdpRedirect,
 		m.CgroupUdpSocketStorage,
 		m.CgroupUdpToken,
+		m.CgroupUdpTokenReverse,
 		m.CgroupUidPolicy,
 	)
 }

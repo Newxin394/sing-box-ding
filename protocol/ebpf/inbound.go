@@ -63,6 +63,7 @@ type Inbound struct {
 	cgroupPath               string
 	cgroupBackend            *commonEBPF.CgroupBackend
 	localRoutes              []*localRoute
+	redirectInterfaceRoutes  *localRouteSet
 	redirectIPv4Prefix       netip.Prefix
 	redirectIPv6Prefix       netip.Prefix
 	selfBypass               *commonEBPF.SelfBypass
@@ -196,6 +197,8 @@ type Inbound struct {
 	recoverySweepCancel  context.CancelFunc
 	recoverySweepDone    chan struct{}
 	recoverySweepHandled atomic.Uint64
+	maintenanceCancel    context.CancelFunc
+	maintenanceDone      chan struct{}
 
 	udpClientTable    udpClientTable
 	udpReplySockets   udpReplySocketPool
