@@ -49,22 +49,42 @@ grep -vE '^[[:space:]]*//|^$' protocol/http/ding.go > "$LOCAL_STRIPPED"
 diff -u "$UP_STRIPPED" "$LOCAL_STRIPPED" | grep -E '^[+-][^+-]' > "$DIFF_LINES" || true
 
 DIFF_COUNT=$(wc -l < "$DIFF_LINES" | tr -d ' ')
-echo "差异行数: $DIFF_COUNT (健康值约 57; 明显增大说明上游改动尚未同步)"
+echo "差异行数: $DIFF_COUNT (健康值约 82; 明显增大说明上游改动尚未同步)"
 
 # 判定哪些差异属于"握手/认证逻辑"——这些行一旦变化, 必须人工把上游新逻辑搬进
 # ding.go, 因为本 fork 无法在外部感知这类改动。
-# 注意不要把这些也列进来: NewClient / Client / Options 的改名是 ding 扩展本身
-# 造成的既有差异, 每次都会命中, 加进来会让 CI 永久变红。
-CRITICAL='ReadResponse|std_bufio|bufio|CachedConn|Proxy-Authorization|request\.Write|context\.AfterFunc|http\.MethodConnect|Proxy-Connection|base64\.StdEncoding'
+#
+# 判据: 某个握手/认证关键词在差异里出现过, 而 ding.go 里一处都找不到 —— 这说明
+# 上游往这条路径里写了新逻辑, ding.go 没跟。
+#
+# 只看差异的 - 侧不够, 这是实测踩到的坑: ding.go 是 client.go 的改写副本, 两边共有
+# 的行(ReadResponse / MethodConnect / Proxy-Connection...)是上下文行, 带一个空格前缀,
+# 不进 - 也不进 +。所以 - 侧只剩 "上游原样、被 ding 换掉" 的行, 比如
+#
+#   -	reader := std_bufio.NewReader(conn)      上游原样, ding 换成池化版
+#   +	reader := acquireDingBufioReader(conn)
+#
+# 这类行在 ding.go 里找得到替换物, 不算问题; 但真正的漏同步 —— 上游新加一行
+# http.ReadResponse(...), ding.go 没搬 —— 会出现在 + 侧, 只扫 - 侧就漏了(反证测试
+# 确认过: 把 ding.go 的 ReadResponse 全删掉, 旧判据仍然 exit 0)。
+#
+# 所以两侧都扫, 以 "关键词在差异里出现 且 ding.go 里没有" 为唯一条件。
+# bufio 不单列成 token: 它只出现在 std_bufio 的上下文里, 单列会让池化实现被误判。
+CRITICAL_TOKENS='ReadResponse std_bufio CachedConn Proxy-Authorization request\.Write context\.AfterFunc http\.MethodConnect Proxy-Connection base64\.StdEncoding'
 
 if [ "$CHECK_MODE" = 1 ]; then
-  if grep -E "$CRITICAL" "$DIFF_LINES" > "$CRITICAL_HITS"; then
+  for token in $CRITICAL_TOKENS; do
+    if grep -qE "$token" "$DIFF_LINES" && ! grep -qE "$token" protocol/http/ding.go; then
+      echo "$token" >> "$CRITICAL_HITS"
+    fi
+  done
+  if [ -s "$CRITICAL_HITS" ]; then
     echo
-    echo "❌ 上游 sing 的 HTTP 握手/认证逻辑已变更, ding.go 需要手动同步:"
+    echo "❌ upstream sing's HTTP handshake/auth calls are missing from ding.go:"
     echo
     cat "$CRITICAL_HITS"
     echo
-    echo "  1. 对照上面的行, 把上游 client.go 的新逻辑搬进 protocol/http/ding.go"
+    echo "  1. 对照上面的 token, 到 protocol/http/ding.go 里补上对应的上游逻辑"
     echo "  2. 重跑 sh scripts/check-ding-sync.sh 确认只剩 ding 扩展差异"
     exit 1
   fi
@@ -78,7 +98,7 @@ cat "$DIFF_LINES"
 echo
 echo "=== 判定提示 ==="
 echo "若无输出或仅 ding/重命名相关 → ding.go 健康, 无需动作"
-echo "若出现 ReadResponse / bufio / CachedConn / Proxy-Authorization /"
-echo "request.Write / context.AfterFunc 等行变更 → 需手动同步上游到 ding.go"
+echo "若上游出现 ding.go 里完全没有的握手调用 (ReadResponse / CachedConn /"
+echo "Proxy-Authorization / request.Write / context.AfterFunc 等) → 需手动同步到 ding.go"
 echo
 echo "CI 可用: sh scripts/check-ding-sync.sh --check"
