@@ -614,3 +614,30 @@ su -c 'sh /data/local/tmp/costcompare.sh 8 udp'      # 或 tcpconn
 
 - `local.enabled` 接管的是**整机 cgroup**，所以这个配置一跑起来就真的在代理系统流量，测完必须 `pkill -f sb-test`。
 - `attachments[].interfaceName` 在 cgroup 模式下报的是挂载路径（`/sys/fs/cgroup`），`interfaceIndex` 是 0。字段名是历史包袱，上游同款，改字段名会破坏 proto 兼容性，先记着。
+## 13. CI 门禁修复（2026-11-06）
+
+Lint 自 2026-09-12 起就没绿过，Test 从未绿过。两道门禁分别卡在不同位置，按顺序拆开修：
+
+| 门禁 | 之前卡在哪 | 修了什么 |
+| --- | --- | --- |
+| Replace ledger must match go.mod | go.mod 有 3 条 replace（含 swatch => ./deps/fswatch），ledger 只有 2 行 | 补 fswatch 行（9c74130） |
+| go vet against baseline | 基线记 experimental/libbox/debug.go:10:11，实际 :11:11（上游 0bdface 加 16 行下推） | 更新 scripts/vet-baseline/{linux,windows}.txt（e0d3d14d） |
+| golangci-lint | 前两道过了才第一次真正跑到它，暴露出 19 项既有问题 | 12 项 unused 删除、6 项 modernize、1 项 import 顺序（本次） |
+| Schema is up to date | docs/schema.json 落后于 eBPF 选项新增 | 重新生成（本次） |
+| Test (windows) | 依赖升级后 	ransport/wireguard 的 fake 缺 WaitActiveContext、oute 的 L3 NAT 测试还在用旧签名；另有 TestURLTestOutboundsConcurrentCapsConcurrency 与 clashapi 的进程名断言从未通过 | 逐个修（本次） |
+
+三个值得记下的点：
+
+- **unused 的删除都先做过全仓 grep 确认零引用**。其中 (*slowOpenConn).setCloseHandler 只被 with_ebpf 的 self-bypass 路径调用，而 lint 的 build-tags 不含 with_ebpf，所以它不是死代码——已移到 common/dialer/tfo_ebpf.go，用同一 build tag 保护，而不是删掉。
+- **TestURLTestOutboundsConcurrentCapsConcurrency 原来是假通过反面的假失败**：它断言 288 个成员全部产出延迟，但 288 个并发真 dial 打同一个 loopback listener 时会被拒掉几十个（Windows 上三次里失败两次）。改为断言「每个成员都被发出一次 + 峰值不超过 256」，这才是这个测试名字要保证的东西。用 git stash 验证过它在改动前就失败，不是本次引入。
+- **clashapi 的进程名偏好反了**：代码优先 ProcessPaths[0]，而测试（以及 Android 现实——所有 app 的 exe 都是 pp_process64）要的是 PackageNames[0]。PackageNames 只在 Android 上被填充，所以调换顺序不影响其他平台。
+
+复现命令（本机 Windows，10 个 matrix 目标逐个跑）：
+
+``bash
+GOOS=<os> GOARCH=<arch> golangci-lint run --timeout=30m   # 现在 10/10 都是 0 issues
+go test -count=1 -tags "with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_usbip,with_openvpn,with_openconnect,badlinkname,tfogo_checklinkname0" \
+  -ldflags "-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0" ./...                 # 43 包 ok，0 失败
+go run -ldflags "-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0" \
+  -tags "with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_usbip,with_openvpn,with_openconnect,badlinkname,tfogo_checklinkname0" ./cmd/sing-box schema -o docs/schema.json
+``
