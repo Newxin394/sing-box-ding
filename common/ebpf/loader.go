@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	BPFGen "github.com/sagernet/sing-box/common/ebpf/internal/bpfgen"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -15,6 +16,21 @@ import (
 )
 
 const bpfFlagNoPrealloc = 1
+
+// errCgroupHookOccupied marks the case where a cgroup hook already has an owner
+// we refuse to displace. It is a capability condition, not an attach failure:
+// Android's netd keeps pass-through placeholders on the root socket-address
+// hooks and a real traffic-accounting program on the socket-release hook, and
+// taking either over would break the system. Optional components must treat it
+// as "this feature is unavailable here" and fall back; the required
+// interception backend reports it as a configuration conflict.
+var errCgroupHookOccupied = errors.New("refusing to replace existing cgroup program owner")
+
+// isCgroupHookOccupied reports whether err is the "someone else owns this hook"
+// condition rather than a kernel attach rejection.
+func isCgroupHookOccupied(err error) bool {
+	return errors.Is(err, errCgroupHookOccupied)
+}
 
 var loadTC = BPFGen.LoadTC
 
@@ -27,6 +43,54 @@ var loadCgroupStorage = BPFGen.LoadCgroupStorage
 var loadSharedNetwork = BPFGen.LoadSharedNetwork
 
 var loadFakeIPICMP = BPFGen.LoadFakeIPICMP
+
+// attachProgramRawReplacingPassThrough is attachProgramRaw for the
+// interception backend, which has no userspace fallback. When the hook is
+// held by a single pass-through program, such as the placeholder Android 15+
+// netd keeps on the root socket-address hooks, the placeholder is swapped for
+// ours in the hook's own mode and returned to the caller to restore later.
+// Any owner that does real work, and the socket-release hook in particular, is
+// still refused.
+func attachProgramRawReplacingPassThrough(target int, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) (*displacedCgroupOwner, error) {
+	if err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: target, Program: program, Attach: attachType, Flags: 2}); err == nil {
+		return nil, nil
+	}
+	result, queryErr := queryCgroupPrograms(link.QueryOptions{Target: target, Attach: attachType})
+	if queryErr == nil && len(result.Programs) > 0 {
+		if _, cleanupErr := detachOwnedCgroupProgramsForAttach(target, attachType); cleanupErr != nil {
+			return nil, E.Cause(cleanupErr, "clean stale eBPF cgroup program")
+		}
+		result, queryErr = queryCgroupPrograms(link.QueryOptions{Target: target, Attach: attachType})
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		if len(result.Programs) > 0 {
+			displaced, keptReason := displaceableCgroupOwner(target, attachType, result.Programs)
+			if displaced == nil {
+				owners, namesErr := cgroupProgramOwnerNames(result)
+				if namesErr != nil {
+					return nil, E.Cause(namesErr, "refusing to replace existing cgroup program owner")
+				}
+				errOwnerOccupied := E.Cause(errCgroupHookOccupied, attachType.String(), " owned by ", strings.Join(owners, ", "))
+				if keptReason != nil {
+					errOwnerOccupied = E.Cause(errOwnerOccupied, ": ", keptReason)
+				}
+				return nil, errOwnerOccupied
+			}
+			if replaceErr := replaceCgroupOwner(target, program, attachType, displaced.flags); replaceErr != nil {
+				_ = displaced.Close()
+				return nil, replaceErr
+			}
+			return displaced, nil
+		}
+	}
+	// Keep the legacy fallback used before multi-only attachment was adopted.
+	// Some vendor kernels reject ALLOW_MULTI for otherwise usable hooks. An
+	// attach that tries ALLOW_MULTI first and drops it on EINVAL ensures
+	// correctness across that split.
+	err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: target, Program: program, Attach: attachType})
+	return nil, err
+}
 
 func attachProgramRaw(target int, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) error {
 	if err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: target, Program: program, Attach: attachType, Flags: 2}); err == nil {
@@ -47,7 +111,16 @@ func attachProgramRaw(target int, program *CiliumEBPF.Program, attachType Cilium
 			if namesErr != nil {
 				return E.Cause(namesErr, "refusing to replace existing cgroup program owner")
 			}
-			return E.New("refusing to replace existing cgroup program owner: ", owners)
+			// A []string cannot go through E.New: sing's format.ToString only
+			// handles scalars, errors and Stringers, and panics on anything
+			// else. Joining here keeps a conflicting hook a returned error
+			// instead of a crash during startup.
+			//
+			// The result is wrapped around errCgroupHookOccupied so callers can
+			// tell "this hook is taken by someone else" from "the kernel
+			// rejected the attach": the first is a capability answer an optional
+			// probe has to accept, the second is a real failure.
+			return E.Cause(errCgroupHookOccupied, attachType.String(), " owned by ", strings.Join(owners, ", "))
 		}
 	}
 	// Keep the legacy fallback used before multi-only attachment was adopted.

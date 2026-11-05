@@ -111,12 +111,12 @@ func (i *Inbound) sweepCgroupRecoveryBudgeted(maxAge time.Duration, budget uint3
 	// The kernel stamps entries with CLOCK_MONOTONIC; reading the wall clock
 	// here would drift with NTP steps and either keep stale entries or expire
 	// live ones after a clock jump.
-	now, err := commonEBPF.MonotonicNow()
+	nowNS, err := commonEBPF.MonotonicNanoseconds()
 	if err != nil {
 		i.udpWarnings.originalDestination.warn(i.logger, "read monotonic clock for cgroup eBPF UDP recovery sweep: ", err)
 		return commonEBPF.RecoverySweepStats{}, err
 	}
-	stats, err := backend.SweepUDPRecoveryBudgeted(maxAge, now, budget)
+	stats, err := backend.SweepUDPRecoveryBudgeted(maxAge, nowNS, budget)
 	if err != nil {
 		i.udpWarnings.originalDestination.warn(i.logger, "sweep cgroup eBPF UDP recovery state: ", err)
 		return commonEBPF.RecoverySweepStats{}, err

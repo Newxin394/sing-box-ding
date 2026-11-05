@@ -49,34 +49,41 @@ type RecoverySweepStats struct {
 	Complete bool
 }
 
-// MonotonicNow reads CLOCK_MONOTONIC.
+// MonotonicNanoseconds reads CLOCK_MONOTONIC in nanoseconds since boot.
 //
-// The kernel stamps recovery entries with flow_time_ns(), which is
-// ktime_get_ns() -- monotonic, not wall clock. Comparing that against
-// time.Now() would mix two clocks: a wall-clock jump (NTP step, timezone
-// handling in a container) moves the cutoff by arbitrary amounts in either
-// direction, silently deleting live entries or never deleting stale ones.
-func MonotonicNow() (time.Time, error) {
+// This is the unit the kernel stamps recovery entries with (flow_time_ns, i.e.
+// ktime_get_ns). It is returned as a plain uint64 rather than a time.Time
+// because a monotonic reading has no epoch: wrapping it in time.Time means its
+// wall-clock fields hold "seconds since boot", and anything that then asks
+// UnixNano of it - or subtracts a Duration from it - is computing with a value
+// that only resembles a timestamp. Comparing against time.Now() would mix two
+// clocks as well: a wall-clock jump (NTP step, timezone handling in a
+// container) moves the cutoff by arbitrary amounts in either direction,
+// silently deleting live entries or never deleting stale ones.
+func MonotonicNanoseconds() (uint64, error) {
 	var now unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
-		return time.Time{}, E.Cause(err, "read monotonic clock")
+		return 0, E.Cause(err, "read monotonic clock")
 	}
 	// Timespec's fields are int32 on 32-bit platforms (android/arm, android/386),
-	// so they have to be widened explicitly; passing them straight to time.Unix
-	// is a compile error there and only there.
-	return time.Unix(int64(now.Sec), int64(now.Nsec)), nil
+	// so they have to be widened explicitly.
+	return uint64(int64(now.Sec))*uint64(time.Second) + uint64(int64(now.Nsec)), nil
 }
 
 // SweepUDPRecoveryBudgeted removes entries from the UDP recovery table that are
 // older than maxAge, walking at most budget entries.
 //
-// now must be a CLOCK_MONOTONIC reading, see MonotonicNow. Entries whose
-// timestamp is unknown (zero) are left alone: an object built before the release
-// hook stamped them can still be loaded after an upgrade, and guessing an age
-// from a missing timestamp would delete state that is still serving a live flow.
+// nowNanoseconds must be a CLOCK_MONOTONIC reading in nanoseconds, see
+// MonotonicNanoseconds. It is a bare uint64 rather than a time.Time on purpose:
+// the kernel stamps entries in that unit, and a time.Time carrying a monotonic
+// reading round-trips through UnixNano in ways that depend on its wall-clock
+// fields rather than on the reading. Entries whose timestamp is unknown (zero)
+// are left alone: an object built before the release hook stamped them can
+// still be loaded after an upgrade, and guessing an age from a missing
+// timestamp would delete state that is still serving a live flow.
 func (b *CgroupBackend) SweepUDPRecoveryBudgeted(
 	maxAge time.Duration,
-	now time.Time,
+	nowNanoseconds uint64,
 	budget uint32,
 ) (RecoverySweepStats, error) {
 	if b == nil {
@@ -99,7 +106,14 @@ func (b *CgroupBackend) SweepUDPRecoveryBudgeted(
 	if recoveryMap == nil {
 		return RecoverySweepStats{}, E.New("UDP recovery map is unavailable")
 	}
-	cutoff := now.Add(-maxAge).UnixNano()
+	maxAgeNS := uint64(maxAge)
+	// A reading younger than maxAge yields no cutoff at all: nothing can be
+	// that old yet, and the subtraction would underflow into a huge cutoff that
+	// expires everything.
+	if nowNanoseconds <= maxAgeNS {
+		return RecoverySweepStats{}, nil
+	}
+	cutoff := nowNanoseconds - maxAgeNS
 	var (
 		stats   RecoverySweepStats
 		stale   []listenerLookupKey
@@ -111,7 +125,7 @@ func (b *CgroupBackend) SweepUDPRecoveryBudgeted(
 		recoverySweepFallbackBudget,
 		func(key listenerLookupKey, value originalDestinationValue) {
 			stats.Scanned++
-			if value.CreatedAtNS == 0 || value.CreatedAtNS > uint64(cutoff) {
+			if value.CreatedAtNS == 0 || value.CreatedAtNS > cutoff {
 				return
 			}
 			stale = append(stale, key)

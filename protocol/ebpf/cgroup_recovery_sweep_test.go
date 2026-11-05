@@ -12,17 +12,17 @@ import (
 
 func TestSweepUDPRecoveryBudgetedRejectsNonPositiveMaxAge(t *testing.T) {
 	backend := &commonEBPF.CgroupBackend{}
-	if _, err := backend.SweepUDPRecoveryBudgeted(0, time.Now(), 0); err == nil {
+	if _, err := backend.SweepUDPRecoveryBudgeted(0, uint64(time.Hour), 0); err == nil {
 		t.Fatal("sweep with a zero max age should fail instead of deleting everything")
 	}
-	if _, err := backend.SweepUDPRecoveryBudgeted(-time.Second, time.Now(), 0); err == nil {
+	if _, err := backend.SweepUDPRecoveryBudgeted(-time.Second, uint64(time.Hour), 0); err == nil {
 		t.Fatal("sweep with a negative max age should fail")
 	}
 }
 
 func TestSweepUDPRecoveryBudgetedRejectsClosedBackend(t *testing.T) {
 	var backend *commonEBPF.CgroupBackend
-	if _, err := backend.SweepUDPRecoveryBudgeted(time.Minute, time.Now(), 0); err == nil {
+	if _, err := backend.SweepUDPRecoveryBudgeted(time.Minute, uint64(time.Hour), 0); err == nil {
 		t.Fatal("sweep on a nil backend should fail")
 	}
 }
@@ -60,25 +60,25 @@ func TestInboundRecoverySweeperStartRequiresCgroupBackend(t *testing.T) {
 // (flow_time_ns), so the sweep must compare against the same clock. A wall-clock
 // reading drifts by any NTP step and would either keep stale entries forever or
 // expire live ones.
-func TestMonotonicNowAdvancesWithTheMonotonicClock(t *testing.T) {
-	before, err := commonEBPF.MonotonicNow()
+func TestMonotonicNanosecondsAdvancesWithTheMonotonicClock(t *testing.T) {
+	before, err := commonEBPF.MonotonicNanoseconds()
 	if err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	after, err := commonEBPF.MonotonicNow()
+	after, err := commonEBPF.MonotonicNanoseconds()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !after.After(before) {
-		t.Fatalf("monotonic clock did not advance: before=%v after=%v", before, after)
+	if after <= before {
+		t.Fatalf("monotonic clock did not advance: before=%d after=%d", before, after)
 	}
-	// A monotonic reading is only meaningful relative to another one. If it were
-	// the wall clock, it would be within minutes of time.Now(); a boot-relative
-	// value is not (this build has no reason to be on a machine booted within the
-	// hour).
-	if wall := time.Now(); after.Sub(wall).Abs() < time.Minute {
-		t.Fatal("MonotonicNow looks like a wall-clock reading")
+	// A monotonic reading is nanoseconds since boot, which is orders of
+	// magnitude smaller than the wall clock's nanoseconds since 1970. Compare
+	// against a generous floor rather than an exact value, since a device that
+	// has been up for years still lands far below 1970-based counts.
+	if wall := uint64(time.Now().UnixNano()); after >= wall {
+		t.Fatalf("monotonic reading %d is not below the wall clock %d", after, wall)
 	}
 }
 
@@ -86,24 +86,38 @@ func TestMonotonicNowAdvancesWithTheMonotonicClock(t *testing.T) {
 // anything: those values come from objects built before the release hook stamped
 // them, and guessing their age would cut flows that are still alive.
 func TestRecoverySweepLeavesUnstampedEntriesAlone(t *testing.T) {
-	now, err := commonEBPF.MonotonicNow()
+	nowNS, err := commonEBPF.MonotonicNanoseconds()
 	if err != nil {
 		t.Fatal(err)
+	}
+	maxAgeNS := uint64(cgroupRecoveryMaxAge)
+	// The stale entry has to be older than cgroupRecoveryMaxAge but must still
+	// be a value the table can hold, i.e. not underflow the subtraction on a
+	// device that booted less than maxAge ago. Pick an age strictly between
+	// maxAge and the current uptime, then floor it to at least maxAge+1ns.
+	if nowNS <= maxAgeNS+1 {
+		t.Skipf("monotonic clock is only %dns since boot, too young to build a stale entry", nowNS)
+	}
+	// Age it by half the uptime: guaranteed older than maxAge (since
+	// uptime > maxAge) and guaranteed not to underflow.
+	staleAge := nowNS / 2
+	if staleAge <= maxAgeNS {
+		staleAge = maxAgeNS + 1
 	}
 	var (
 		stats commonEBPF.RecoverySweepStats
 		stale int
 	)
-	// Reproduces the visit predicate the sweep applies to every entry.
-	for _, createdAt := range []uint64{0, uint64(now.Add(-time.Hour).UnixNano())} {
+	for _, createdAt := range []uint64{0, nowNS - staleAge} {
 		stats.Scanned++
-		cutoff := now.Add(-cgroupRecoveryMaxAge).UnixNano()
-		if createdAt == 0 || createdAt > uint64(cutoff) {
+		cutoff := nowNS - maxAgeNS
+		if createdAt == 0 || createdAt > cutoff {
 			continue
 		}
 		stale++
 	}
 	if stale != 1 {
-		t.Fatalf("expected only the stamped entry to be swept, got %d of %d", stale, stats.Scanned)
+		t.Fatalf("expected only the stamped entry to be swept, got %d of %d (now=%d, cutoff=%d)",
+			stale, stats.Scanned, nowNS, nowNS-uint64(cgroupRecoveryMaxAge))
 	}
 }

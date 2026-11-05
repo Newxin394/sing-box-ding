@@ -72,7 +72,10 @@ func TestEBPFRuntimeDiagnosticsReportsOnePolicyInBothScopes(t *testing.T) {
 	inbound.bypassRuleSetTC = bypassRuleSetBackendVersion{version: 7, known: true}
 	inbound.bypassRuleSetShared = bypassRuleSetBackendVersion{version: 7, known: true}
 	inbound.tcDataPlane = &tcDataPlane{backend: &commonEBPF.TCBackend{}}
-	inbound.sharedRewrite = &sharedRewrite{}
+	// Backend state is published only for backends whose instance exists, so
+	// the shared side needs a real *SharedNetworkBackend, not just a
+	// sharedRewrite wrapper: sharedBackendInstance() reads the backend field.
+	inbound.sharedRewrite = &sharedRewrite{sharedBackend: &commonEBPF.SharedNetworkBackend{}}
 	diagnostics := inbound.EBPFRuntimeDiagnostics()
 	if diagnostics.LocalBypassRuleSet.PolicyVersion != 7 ||
 		diagnostics.SharedBypassRuleSet.PolicyVersion != 7 {

@@ -203,6 +203,18 @@ func probeSocketReleaseSupport(cgroupFD int) (bool, error) {
 }
 
 func socketReleaseUnavailable(err error) bool {
-	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) ||
-		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, linuxErrnoNotSupported)
+	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) ||
+		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, linuxErrnoNotSupported) {
+		return true
+	}
+	// The hook is already owned by a program that is not ours, and we refuse
+	// to displace it. On Android that owner is netd's socket-release program,
+	// which does real traffic-accounting cleanup: taking the hook over would
+	// silently break the system's accounting, so the correct response is to
+	// fall back to the LRU cleanup path instead of failing the inbound.
+	//
+	// This is a probe, not an attach: a busy hook means "this optional
+	// acceleration is unavailable here", which is exactly the same outcome as
+	// an unsupported kernel.
+	return isCgroupHookOccupied(err)
 }

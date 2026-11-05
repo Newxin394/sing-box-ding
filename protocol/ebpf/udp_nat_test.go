@@ -274,7 +274,11 @@ func TestUDPNATOwnedPacketReleasedWhenQueueIsFull(t *testing.T) {
 }
 
 func TestUDPNATDiagnosticsReuseCacheMetrics(t *testing.T) {
-	connections := make(chan udpNATTestConnection, 1025)
+	// Fill one entry past the real capacity rather than a hardcoded 1024: the
+	// default became configurable (map_capacity.udp_sessions, 8192) and a test
+	// pinned to the old number asserted an eviction that no longer happens.
+	const capacity = defaultUDPNATSessions
+	connections := make(chan udpNATTestConnection, capacity+1)
 	service := newUDPNATService(
 		&udpNATTestHandler{connections: connections},
 		func(key udpSessionKey, _ M.Socksaddr, _ M.Socksaddr, _ any) (bool, context.Context, N.PacketWriter, N.CloseHandlerFunc) {
@@ -286,14 +290,15 @@ func TestUDPNATDiagnosticsReuseCacheMetrics(t *testing.T) {
 
 	source := M.ParseSocksaddr("192.0.2.10:53000")
 	destination := M.ParseSocksaddr("223.5.5.5:53")
-	for cookie := uint64(1); cookie <= 1025; cookie++ {
+	for cookie := uint64(1); cookie <= capacity+1; cookie++ {
 		service.NewPacket(
 			udpSessionKey{Source: source.AddrPort(), Scope: udpSessionScopeLocalTC, SocketCookie: cookie},
 			[][]byte{[]byte("packet")}, source, destination, nil,
 		)
 	}
 	diagnostics := service.diagnostics()
-	if diagnostics.ActiveSessions != 1024 || diagnostics.CreatedSessions != 1025 || diagnostics.CapacityEvictions != 1 {
+	if diagnostics.ActiveSessions != capacity || diagnostics.CreatedSessions != capacity+1 ||
+		diagnostics.CapacityEvictions != 1 {
 		t.Fatalf("unexpected UDP NAT cache diagnostics: %+v", diagnostics)
 	}
 }

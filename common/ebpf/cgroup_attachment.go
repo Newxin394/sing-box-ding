@@ -66,6 +66,12 @@ func detachOwnedCgroupProgramsForAttach(cgroupFD int, attachType CiliumEBPF.Atta
 	if !sameProgramIDs(first, second) {
 		return false, unix.ESTALE
 	}
+	// Flags the kernel withheld are treated as multi-program mode, so that only
+	// interception backend programs are reclaimed from such a hook.
+	hookFlags := uint32(unix.BPF_F_ALLOW_MULTI)
+	if flags, flagsErr := queryCgroupHookFlags(cgroupFD, attachType); flagsErr == nil {
+		hookFlags = flags
+	}
 	var detached bool
 	for _, programID := range first {
 		name, nameErr := programNameByID(programID)
@@ -76,6 +82,26 @@ func detachOwnedCgroupProgramsForAttach(cgroupFD int, attachType CiliumEBPF.Atta
 			program, openErr := newProgramFromID(programID)
 			if openErr != nil {
 				return detached, openErr
+			}
+			// A stale program that is the sole single-program owner took the
+			// hook over from Android netd and never handed it back, because the
+			// process that held the displaced placeholder died. Put a netd
+			// placeholder back instead of emptying the hook: an empty hook lets
+			// the next attach put it in multi-program mode, which makes a
+			// restarting netd abort.
+			if hookFlags&unix.BPF_F_ALLOW_MULTI == 0 && len(first) == 1 {
+				restored, restoreErr := restoreNetdOwnerForStaleProgram(cgroupFD, attachType, hookFlags)
+				if restoreErr != nil {
+					_ = program.Close()
+					return detached, restoreErr
+				}
+				if restored {
+					detached = true
+					if closeErr := program.Close(); closeErr != nil {
+						return detached, closeErr
+					}
+					continue
+				}
 			}
 			if detachErr := rawDetachProgram(cgroupFD, program, attachType); detachErr != nil {
 				_ = program.Close()
@@ -165,15 +191,25 @@ func (b *CgroupBackend) Attach() error {
 		if program == nil {
 			continue
 		}
+		attachType := cgroupProgramDefinitions[slot].attachType
 		programLink, err := link.AttachRawLink(link.RawLinkOptions{
 			Target:  cgroupFD,
 			Program: program,
-			Attach:  cgroupProgramDefinitions[slot].attachType,
+			Attach:  attachType,
 		})
 		if err == nil {
 			b.runtime.links[slot] = programLink
 		} else if cgroupLinkUnavailable(err) {
-			err = attachProgramRaw(cgroupFD, program, cgroupProgramDefinitions[slot].attachType)
+			// The interception backend has no userspace fallback, so it is
+			// allowed to take over a pass-through placeholder that Android 15+
+			// netd holds on these hooks. The displaced program is kept and put
+			// back when this backend lets go, which leaves the hook in the
+			// single-program mode netd keeps it in.
+			var displaced *displacedCgroupOwner
+			displaced, err = attachProgramRawReplacingPassThrough(cgroupFD, program, attachType)
+			if displaced != nil {
+				b.runtime.displaced[slot] = displaced
+			}
 		}
 		if err != nil {
 			_ = b.detachProgramsLocked()
@@ -216,6 +252,18 @@ func (b *CgroupBackend) detachProgramsLocked() error {
 			if err != nil {
 				detachErr = E.Errors(detachErr, err)
 			}
+			continue
+		} else if displaced := b.runtime.displaced[slot]; displaced != nil {
+			// Put netd's pass-through back in place of ours so the hook keeps
+			// the single-program mode netd expects to find on restart.
+			err = restoreDisplacedCgroupOwner(cgroupFD, b.runtime.programs[slot], displaced, cgroupProgramDefinitions[slot].attachType)
+			b.runtime.displaced[slot] = nil
+			if err != nil {
+				detachErr = E.Errors(detachErr, err)
+				b.runtime.attached[slot] = false
+				continue
+			}
+			b.runtime.attached[slot] = false
 			continue
 		} else {
 			err = rawDetachProgram(cgroupFD, b.runtime.programs[slot], cgroupProgramDefinitions[slot].attachType)

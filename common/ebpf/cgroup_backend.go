@@ -52,11 +52,14 @@ var cgroupProgramDefinitions = [cgroupProgramCount]cgroupProgramDefinition{
 }
 
 type cgroupRuntime struct {
-	cgroupFile                  *os.File
-	maps                        map[string]*CiliumEBPF.Map
-	programs                    []*CiliumEBPF.Program
-	links                       [cgroupProgramCount]link.Link
-	attached                    [cgroupProgramCount]bool
+	cgroupFile *os.File
+	maps       map[string]*CiliumEBPF.Map
+	programs   []*CiliumEBPF.Program
+	links      [cgroupProgramCount]link.Link
+	attached   [cgroupProgramCount]bool
+	// displaced holds the pass-through programs this backend took over from
+	// Android netd, restored when the hook is released.
+	displaced                   [cgroupProgramCount]*displacedCgroupOwner
 	control_map_fd              int
 	tcp_redirect_map_fd         int
 	udp_redirect_map_fd         int

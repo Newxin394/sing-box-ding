@@ -472,3 +472,110 @@ redirect/token 两张表被**故意排除**在压力观察之外——清扫永�
 - **父仓的 ringbuf 释放通知**（`sock_release_notify` + watch/stats/events 四张表 + 用户态 deadline 调度）。有了 `created_at_ns` 之后，10 秒级周期清扫已经能覆盖"socket 已关的孤儿"，ringbuf 只买到那 10 秒的延迟。收益与复杂度（多四张表、多一个读线程、一条降级路径）不成比例，决定不做。
 - **netns 隔离投递**（`tc_isolation.h` / `tc_namespace.go` / `tc_isolated_delivery.go`，约 520 行）：只在多 netns 场景需要，与 8 月那份 parity 文档结论一致。
 - **`adapter/host.go`、`common/kernelports/`、`tailssh/switch_user`**：不属于 eBPF 范围，第 2 节列过，仍未移植。
+
+## 12. 真机验证与 eBPF CPU 归因（2026-11-05）
+
+### 12.1 设备
+
+Redmi 2407FRK8KEC（`rothko`），Android 16 / SDK 36，`arm64-v8a`，内核 `6.1.138-android14-11-g6ab8c9a86a33-ab14396278`，Magisk root，**没有 bpftool**（所以本文所有内核侧观测都是自己发 `bpf()` 系统调用读的）。内核带 `CONFIG_CGROUP_BPF`、`CONFIG_NET_CLS_BPF`、`CONFIG_DEBUG_INFO_BTF`。
+
+### 12.2 Android 15+ 的 netd 占位程序
+
+Android 15（API 35）起 netd 用**不带 flag** 的 `BPF_PROG_ATTACH` 占住 cgroup v2 root 上每一个 socket-address hook（connect4/6、sendmsg4/6、recvmsg4/6）。内核把这些 hook 锁进单程序模式，之后任何多程序 attach（含 `BPF_LINK_CREATE`）都返回 EPERM。这是本 fork 之前在这台设备上一启动就失败的原因：
+
+```
+attach eBPF inbound: sb_ebpf_conn4: CGroupInet4Connect owned by connect4_inet4_:
+refusing to replace existing cgroup program owner
+```
+
+移植的解法（`common/ebpf/cgroup_netd.go`）：**不把 hook 转成多程序**，而是用 hook 自己的 flags 原子换掉 owner，detach 时换回来。
+
+- 判定按**行为**不按名字：必须是单程序 hook、单程序模式、且翻译后指令化简为 `r0 = 1; exit`（`instructionsAlwaysAllow`，上限 8 条）。
+- 内核隐瞒指令时才按身份认，且只认 netd 为该 hook pin 的那个（`/sys/fs/bpf/netd_shared/prog_netd_*`）。
+- **netd 的 socket-release 程序做真实流量统计，其 hook 永不接管**（`netdHookPinPrefixes` 里故意没有 `CGroupInetSockRelease`）；该 hook 被占时 socket-release 加速降级为 LRU 模式。
+- 崩溃自愈：上一个后端被 `kill -9` 留在 hook 上的 stale 程序**不能裸 detach**（空 hook 会让下次 attach 转成多程序模式，令重启的 netd 直接 abort），要先 `restoreNetdOwnerForStaleProgram` 换回 netd 的 pass-through。
+
+真机实测（`/sys/fs/cgroup` 上 7 个 hook 的 mode/count/owner）：
+
+| 场景 | connect4/6、sendmsg4/6、recvmsg4/6 | socket-release |
+|---|---|---|
+| 基线（无 sing-box） | `exclusive` count=1，owner `connect4_inet4_` 等（id 25–30） | `cgroupsockrelea`(22) |
+| 运行中 | `exclusive` count=1，owner `sb_ebpf_conn4` 等 | id 22 不动 |
+| 优雅停止 | netd 原 id 25–30 全部回来 | 不动 |
+| `kill -9` | 6 个 `sb_ebpf_*` 留在 hook（stale） | 不动 |
+| `kill -9` 后重启（无自愈） | 变 `multi` —— netd 重启会 abort | 不动 |
+| `kill -9` 后重启（有自愈） | 保持 `exclusive` | 不动 |
+
+接管、归还、崩溃自愈三条路径都验过；netd 的流量统计 hook 全程未被触碰。
+
+### 12.3 三轮集成测试
+
+`SING_BOX_EBPF_INTEGRATION=1 ./ebpf.test -test.count=1`（`-tags with_ebpf,ebpf_integration`）：
+
+| 轮次 | 结果 |
+|---|---|
+| 第 1 轮（首跑） | 398 PASS / 3 FAIL |
+| 修完 3 个失败后 | PASS（EXIT=0） |
+| 第 2 轮 | PASS |
+| 第 3 轮 | PASS |
+
+三个失败都是**测试自身**跟代码脱节，不是功能坏：
+
+1. `TestEBPFRuntimeDiagnosticsReportsOnePolicyInBothScopes`：断言要求 `backendState` 里有 `shared`，但构造的 `sharedRewrite{}` 没设 `sharedBackend` 字段（`diagnostics.go` 判的是 `sharedBackendInstance() != nil`）。修：构造时给 `&commonEBPF.SharedNetworkBackend{}`。
+2. `TestUDPNATDiagnosticsReuseCacheMetrics`：`c7329905` 把 `defaultUDPNATSessions` 从 1024 改成 8192（`protocol/ebpf/config.go`），测试还写死 1025 条并断言 1 次驱逐，实际容量 8192 不驱逐。修：容量取 `defaultUDPNATSessions`。
+3. `TestRecoverySweepLeavesUnstampedEntriesAlone`：暴露一个**真 bug**——`MonotonicNow()` 返回 `time.Time`，而内核戳的是 `CLOCK_MONOTONIC` 的纳秒数；`time.Unix(monotonicSec, nsec)` 把"开机 1317 秒"当成 1970 年，算出来的 cutoff 与表里的戳差三个数量级，清扫恒删 0 条。修：改成 `MonotonicNanoseconds() (uint64, error)` 直接返回裸纳秒，`SweepUDPRecoveryBudgeted(maxAge, nowNanoseconds uint64, budget uint32)` 全程用 uint64 比较（并防下溢）。
+
+### 12.4 CPU 归因：eBPF 到底吃了多少
+
+方法：`/proc/sys/kernel/bpf_stats_enabled=1` 打开内核统计（**默认 0，不开 `RunTimeNs` 恒 0**），然后按程序 ID 快照 `RunTimeNs`/`RunCnt` 两次算增量（`cmd/internal/statsprobe`）；流量由 `cmd/internal/trafficgen` 产生；`device/costcompare.sh` 一次跑完 baseline（停 sing-box）与 loaded 两轮。
+
+**UDP 50k pps，8 秒窗口**：
+
+| 程序 | 调用 | CPU (ms) | 单次 | 占比 |
+|---|---|---|---|---|
+| 厂商 `tracepoint_sched_*` ×3 | 388,074 | 1080.0 | 1.0–1.3 μs | **65.6%** |
+| netd `cgroupskb_egress` / `skfilter_egress` / `cgroupskb_ingress` / `skfilter_ingress` | 217,716 | 492.3 | 0.39–0.88 μs | **30.0%** |
+| **`sb_ebpf_urcv4`（我们）** | 203,392 | **47.9** | **235 ns** | **2.9%** |
+| `sb_ebpf_conn4` / `conn6` | 12 | 0.14 | 11–15 μs（冷缓存） | 0.0% |
+
+合计 eBPF 1647 ms / 8 s。
+
+**TCP connect（8 worker，10 ms 拨号超时，6 秒 36,402 次连接）**：
+
+| 程序 | 调用 | CPU (ms) | 单次 | 占比 |
+|---|---|---|---|---|
+| **`sb_ebpf_conn4`（我们）** | 66,991 | **116.0** | **1.73 μs** | **9.2%** |
+| `sb_ebpf_conn6` | 16 | 0.15 | 9.3 μs | 0.0% |
+| 其余 sb_ebpf_* | 13 | 0.03 | — | 0.0% |
+
+合计 eBPF 1260.6 ms / 8 s；其中厂商与 netd 仍是主体。同一时段 softirq：`NET_RX` 从基线 +253 涨到 +121,276（重定向把流量带回 loopback，属 cgroup 数据面的固有代价），`RCU` +36,764。
+
+**结论**（这也是对"sing-box 走 eBPF 让内核 CPU 异常"的回答）：
+
+1. 本 fork 的单次成本 **235 ns（recvmsg 快路径）/ 1.73 μs（connect 全策略链）**，全部程序的 CPU 占比在 3%–9%。
+2. 跑同一批包的是 netd 的流量统计程序，调用次数与我们几乎相同（217,716 vs 203,392），**每包 1.47 μs，是我们的 6 倍**。
+3. 空闲时厂商 `tracepoint_sched` 占 eBPF 总时间的 **92%**，与我们无关。
+4. `recv_v4` 已经是 2 次 map lookup 的最短路径（`control()` + 一次 `cgroup_udp_redirect` 查表 + 回写 user_ip/port）；`handle_v4` 的 connect 链是 8–10 次 lookup，在 11,000 conn/s 下占单核 1.9%。
+5. 想再省只能"少跑"：`:53` 的 DNS 包在 `respect_policy` 下会全量重定向并让 listener 每包多跑一次 `recvmsg` hook——这是配置语义（DNS 劫持）而非程序开销，要省应该改配置而不是改程序。
+
+### 12.5 复现方法
+
+```sh
+# 1. 用 NDK 的 clang 编 BPF 对象（Windows 上可行，NDK r29 = clang 21）
+clang -target bpf -mcpu=v1 -O2 -g0 -ffreestanding \
+  -mllvm -disable-block-placement -mllvm -disable-branch-fold \
+  -nostdinc -Inative -isystem "$NDK/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/21/include" \
+  -isystem "$NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include" \
+  -isystem "$NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android" \
+  -c -o out.o native/cgroup.bpf.c
+
+# 2. 打开内核统计（默认关，不开测不到时间）
+echo 1 > /proc/sys/kernel/bpf_stats_enabled
+
+# 3. 归因 + 压流量
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o statsprobe ./cmd/internal/statsprobe/
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o trafficgen ./cmd/internal/trafficgen/
+su -c 'sh /data/local/tmp/costcompare.sh 8 udp'      # 或 tcpconn
+```
+
+`statsprobe` 用 `BPF_PROG_GET_NEXT_ID` → `BPF_PROG_GET_FD_BY_ID` → `BPF_OBJ_GET_INFO_BY_FD` 遍历所有已加载程序读 `RunTimeNs`/`RunCnt`，不依赖 bpftool（设备上没有）。注意 `struct bpf_prog_info` 里 `RunTimeNs` 在偏移 192、`RunCnt` 在 200，`Name` 在 64。
