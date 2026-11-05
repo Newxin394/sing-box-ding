@@ -44,10 +44,6 @@ type dialClient interface {
 	ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
 }
 
-type dingOnlyDialClient interface {
-	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
-}
-
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HTTPOutboundOptions) (adapter.Outbound, error) {
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {

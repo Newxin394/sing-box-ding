@@ -1,19 +1,10 @@
 package route
 
 import (
-	"context"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
 )
-
-type lazyTestSearcher struct{}
-
-func (lazyTestSearcher) FindProcessInfo(ctx context.Context, network string, source, destination [4]uint8) (*adapter.ConnectionOwner, error) {
-	return nil, nil
-}
-func (lazyTestSearcher) ResetCache()  {}
-func (lazyTestSearcher) Close() error { return nil }
 
 func TestProcessInfoResolverIsLazyAndMemoized(t *testing.T) {
 	calls := 0

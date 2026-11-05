@@ -41,16 +41,6 @@ func (o *fixedNetworkOutbound) ListenPacket(ctx context.Context, destination M.S
 	return nil, nil
 }
 
-func selectorOptionsFor(member *fixedNetworkOutbound, udpTag, fallbackTag string) option.SelectorOutboundOptions {
-	return option.SelectorOutboundOptions{
-		GroupCommonOption: option.GroupCommonOption{
-			Outbounds:           []string{member.tag},
-			UDPOutbound:         udpTag,
-			UDPFallbackOutbound: fallbackTag,
-		},
-	}
-}
-
 // selectedSupportsUDP is the unit under test: it must report what the currently
 // selected member can actually carry, because that decides whether the
 // udp_outbound hop is needed at all.

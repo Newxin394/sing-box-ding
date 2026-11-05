@@ -75,7 +75,8 @@ func IsEventStream(contentType string) bool {
 // are copied directly. It reports whether the response was a stream.
 func WriteUntrackedResponse(logger interface {
 	Error(args ...any)
-}, writer http.ResponseWriter, response *http.Response) {
+}, writer http.ResponseWriter, response *http.Response,
+) {
 	if !IsEventStream(response.Header.Get("Content-Type")) {
 		_, _ = io.Copy(writer, response.Body)
 		return

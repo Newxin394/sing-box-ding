@@ -3,11 +3,12 @@
 package dialer
 
 import (
+	"net"
+	"syscall"
+
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/control"
-	"net"
-	"syscall"
 )
 
 func PrepareEBPFSelfBypass(adapter.NetworkManager, []option.Inbound) error {

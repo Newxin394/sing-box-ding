@@ -229,26 +229,6 @@ func (r *xmuxRelease) noteFailure() {
 	r.client.noteFailure()
 }
 
-// singleTransportXmux builds a manager permanently bound to one RoundTripper.
-// It is how a Client is assembled around a caller-supplied transport (tests,
-// and any future path that wants to drive XHTTP over a fixed transport): the
-// pool degenerates to a single connection that is never rotated.
-func singleTransportXmux(transport http.RoundTripper) *xmuxManager {
-	conn := &fixedXmuxConn{transport: transport}
-	manager := newXmuxManager(xmuxConfig{}, func() xmuxConn { return conn })
-	return manager
-}
-
-// fixedXmuxConn is a pool resource wrapping an already-built RoundTripper.
-type fixedXmuxConn struct {
-	transport http.RoundTripper
-	closed    atomic.Bool
-}
-
-func (c *fixedXmuxConn) Close()                          { c.closed.Store(true) }
-func (c *fixedXmuxConn) IsClosed() bool                  { return c.closed.Load() }
-func (c *fixedXmuxConn) roundTripper() http.RoundTripper { return c.transport }
-
 // xmuxConfig is the resolved (parsed, defaulted) XMUX option set.
 type xmuxConfig struct {
 	maxConcurrency   intRange

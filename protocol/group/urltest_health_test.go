@@ -22,7 +22,7 @@ func TestURLTestMemberHealthBackoff(t *testing.T) {
 
 func TestURLTestDialFailuresThresholdAndReset(t *testing.T) {
 	var failures urlTestDialFailures
-	for i := 0; i < urlTestDialFailureThreshold-1; i++ {
+	for range urlTestDialFailureThreshold - 1 {
 		require.False(t, failures.failure("node", time.Minute))
 	}
 	require.True(t, failures.failure("node", time.Minute))

@@ -42,7 +42,7 @@ func TestURLTestOutboundsUsesConfiguredBatchConcurrency(t *testing.T) {
 	state := &batchConcurrencyProbeState{started: make(chan struct{}, count)}
 	manager := &recursiveURLTestOutboundManager{outbounds: make(map[string]adapter.Outbound, count)}
 	outbounds := make([]adapter.Outbound, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		outbound := &batchConcurrencyProbeOutbound{state: state, tag: fmt.Sprintf("probe-%d", i)}
 		manager.outbounds[outbound.tag] = outbound
 		outbounds = append(outbounds, outbound)
@@ -55,7 +55,7 @@ func TestURLTestOutboundsUsesConfiguredBatchConcurrency(t *testing.T) {
 		close(finished)
 	}()
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		select {
 		case <-state.started:
 		case <-time.After(2 * time.Second):

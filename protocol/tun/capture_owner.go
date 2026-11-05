@@ -17,8 +17,8 @@ type captureOwner struct {
 	active  bool
 }
 
-func (i *Inbound) CaptureOwner() capture.Owner {
-	return &captureOwner{inbound: i}
+func (t *Inbound) CaptureOwner() capture.Owner {
+	return &captureOwner{inbound: t}
 }
 
 // SetCaptureDeferred suppresses the inbound's self-activation in the staged
@@ -26,8 +26,8 @@ func (i *Inbound) CaptureOwner() capture.Owner {
 // With deferral on, StartStateStart builds no TUN runtime and StartStatePostStart
 // starts nothing; activation happens exclusively through Activate. It is called
 // during construction, before any staged lifecycle runs, so no locking is needed.
-func (i *Inbound) SetCaptureDeferred(deferred bool) {
-	i.captureDeferred = deferred
+func (t *Inbound) SetCaptureDeferred(deferred bool) {
+	t.captureDeferred = deferred
 }
 
 func (o *captureOwner) Prepare() error {

@@ -41,7 +41,7 @@ func discoverSyscallConnDepth(conn any, depth int) syscall.Conn {
 		if !field.CanInterface() {
 			continue
 		}
-		if syscallConn, isSyscallConn := field.Interface().(syscall.Conn); isSyscallConn {
+		if syscallConn, isSyscallConn := reflect.TypeAssert[syscall.Conn](field); isSyscallConn {
 			return syscallConn
 		}
 		candidates = append(candidates, field)

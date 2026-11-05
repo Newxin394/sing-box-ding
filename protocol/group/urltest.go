@@ -210,18 +210,6 @@ func (s *URLTest) Close() error {
 	)
 }
 
-func (s *URLTest) nowTag() string {
-	selectedOutboundTCP := s.group.selectedOutboundTCP.Load()
-	if selectedOutboundTCP != nil {
-		return selectedOutboundTCP.Tag()
-	}
-	selectedOutboundUDP := s.group.selectedOutboundUDP.Load()
-	if selectedOutboundUDP != nil {
-		return selectedOutboundUDP.Tag()
-	}
-	return ""
-}
-
 // Selected implements adapter.OutboundGroup, resolving the best member for the
 // requested network. Falls back to the group's own Select() (which may run a
 // fresh pick) when no member has been latched yet.

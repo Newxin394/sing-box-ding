@@ -32,10 +32,6 @@ type slowOpenConn struct {
 	err          error
 }
 
-func (c *slowOpenConn) setCloseHandler(handler func(*net.TCPConn)) {
-	c.closeHandler.Store(handler)
-}
-
 func (c *slowOpenConn) closeTCP(conn *net.TCPConn) {
 	if handler, loaded := c.closeHandler.Load().(func(*net.TCPConn)); loaded {
 		handler(conn)

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -168,7 +169,10 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("sampled %d programs, waiting %ds...\n", len(before), interval)
-	unix.Nanosleep(&unix.Timespec{Sec: int64(interval)}, nil)
+	// time.Sleep keeps this portable: Timespec.Sec is int32 on 32-bit targets
+	// and int64 on 64-bit ones, so spelling the field width by hand does not
+	// build on every platform the lint matrix covers.
+	time.Sleep(time.Duration(interval) * time.Second)
 	after, err := snapshot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "second snapshot: %v\n", err)

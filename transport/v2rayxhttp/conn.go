@@ -841,10 +841,7 @@ func (c *packetConn) Write(b []byte) (int, error) {
 	}
 	written := 0
 	for written < len(b) {
-		end := written + maxEach
-		if end > len(b) {
-			end = len(b)
-		}
+		end := min(written+maxEach, len(b))
 		if err := c.sendPacket(b[written:end]); err != nil {
 			return written, err
 		}

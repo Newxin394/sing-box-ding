@@ -6,13 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/sagernet/sing-box/log"
-
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -249,7 +249,7 @@ func sessionIDSpaceSufficient(size, length int) bool {
 		return false
 	}
 	space := int64(1)
-	for i := 0; i < length; i++ {
+	for range length {
 		space *= int64(size)
 		if space >= minSessionIDSpace {
 			return true
@@ -266,10 +266,8 @@ func orDefault(v, def string) string {
 }
 
 func validatePlacement(field, value string, allowed ...string) error {
-	for _, a := range allowed {
-		if value == a {
-			return nil
-		}
+	if slices.Contains(allowed, value) {
+		return nil
 	}
 	return E.New("v2ray-xhttp: unsupported ", field, ": ", value)
 }

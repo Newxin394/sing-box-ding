@@ -103,10 +103,7 @@ func generateTokenishPaddingBase62(target int) string {
 		return ""
 	}
 	// Initial length: base62 Huffman-compresses to roughly 0.8x, so over-allocate.
-	initialLen := (target * 10) / 8
-	if initialLen < 1 {
-		initialLen = 1
-	}
+	initialLen := max((target*10)/8, 1)
 	buf := make([]byte, initialLen)
 	randBuf := make([]byte, initialLen)
 	if _, err := cryptorand.Read(randBuf); err != nil {
@@ -120,7 +117,7 @@ func generateTokenishPaddingBase62(target int) string {
 	}
 
 	const maxIter = 150
-	for iter := 0; iter < maxIter; iter++ {
+	for range maxIter {
 		encoded := int(hpack.HuffmanEncodeLength(string(buf)))
 		switch {
 		case encoded < target-2:
