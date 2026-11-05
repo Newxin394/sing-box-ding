@@ -30,9 +30,7 @@ const (
 	tcSharedICMPReplyFilterHandle = 0x5348
 )
 
-var (
-	tcxSupport atomic.Int32
-)
+var tcxSupport atomic.Int32
 
 const (
 	tcxSupportUnknown int32 = iota
@@ -114,6 +112,11 @@ type tcDataPlane struct {
 	hostAddresses         []netip.Addr
 	sharedSourceMACPolicy bool
 	priority              uint16
+	// networkGeneration is stamped into every assignment the kernel writes for
+	// this data plane. It is bumped whenever the interface set changes, so the
+	// maintenance sweep can drop assignments that describe the topology this
+	// data plane replaced instead of keeping them until they age out.
+	networkGeneration uint16
 	// hooks is nil in production. Tests set it to reconcile against synthetic
 	// interfaces, which is the only way to reach the ordering between releasing
 	// an attachment and taking the interface lock of the one that replaced it.
@@ -184,6 +187,14 @@ func startTCDataPlane(
 	}
 	if err = backend.SetRoutingMark(routing.mark); err != nil {
 		return cleanup(E.Cause(err, "set TC eBPF routing mark"))
+	}
+	// Generation 1 covers the first topology this data plane attaches. A rebuild
+	// starts another data plane, i.e. another generation 1 on a table the kernel
+	// created fresh with it, so the counter only has to move within one
+	// lifetime -- which is exactly what the interface reconcile below needs.
+	dataPlane.networkGeneration = 1
+	if err = backend.SetNetworkGeneration(uint32(dataPlane.networkGeneration)); err != nil {
+		return cleanup(E.Cause(err, "set TC eBPF network generation"))
 	}
 	if _, err = reclaimStaleTCDeliveryLinks(); err != nil {
 		return cleanup(E.Cause(err, "reclaim stale TC eBPF delivery links"))
@@ -472,12 +483,46 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 		}
 	}
 	d.attachments = attachments
+	interfaceChanged := (localInterface != "" && localInterface != d.localInterface) ||
+		!slices.Equal(d.sharedInterfaces, sharedInterfaces)
 	if localInterface != "" {
 		d.localInterface = localInterface
 	}
 	d.sharedInterfaces = slices.Clone(sharedInterfaces)
 	d.hostAddresses = slices.Clone(hostAddresses)
+	if interfaceChanged {
+		// Assignments written for the interface set this call replaced name an
+		// interface index and a delivery path that no longer apply. Moving the
+		// generation retires them on the next sweep instead of leaving the kernel
+		// to act on them until the idle window expires.
+		if generationErr := d.advanceNetworkGenerationLocked(); generationErr != nil {
+			closeErr = E.Errors(closeErr, generationErr)
+		}
+	}
 	return closeErr
+}
+
+// nextNetworkGeneration advances the generation, skipping zero.
+//
+// Zero is reserved as "never stamped", so the counter wraps past it: a wrap
+// costs one extra sweep worth of re-assignment, while reusing zero would make
+// the new assignments look like unstamped ones and the sweep would keep them
+// forever.
+func nextNetworkGeneration(current uint16) uint16 {
+	generation := current + 1
+	if generation == 0 {
+		generation = 1
+	}
+	return generation
+}
+
+func (d *tcDataPlane) advanceNetworkGenerationLocked() error {
+	generation := nextNetworkGeneration(d.networkGeneration)
+	if err := d.backend.SetNetworkGeneration(uint32(generation)); err != nil {
+		return E.Cause(err, "advance TC eBPF network generation")
+	}
+	d.networkGeneration = generation
+	return nil
 }
 
 func (d *tcDataPlane) desiredAttachmentState(localInterface string, sharedInterfaces []string) (map[string]tcAttachmentState, error) {

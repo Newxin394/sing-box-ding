@@ -539,6 +539,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
 		diagnostics.Counters.RawIPHeaderFailures = readTCStat(commonEBPF.TCStatRawIPHeaderFailures)
 		diagnostics.Counters.RawIPRedirectFailures = readTCStat(commonEBPF.TCStatRawIPRedirectFailures)
 		diagnostics.Counters.DeliveryParseFailures = readTCStat(commonEBPF.TCStatDeliveryParseFailures)
+		diagnostics.Counters.TCAssignmentUpdateFailures = readTCStat(commonEBPF.TCStatAssignmentUpdateFailures)
 	}
 	var sharedRewriteBackend *commonEBPF.SharedNetworkBackend
 	if shared := i.sharedRewriteInstance(); shared != nil {

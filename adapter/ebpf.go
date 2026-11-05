@@ -2,7 +2,7 @@ package adapter
 
 // EBPFDiagnosticsSchemaVersion versions the shape of EBPFDiagnosticsResponse.
 // Bump it whenever a field changes meaning, not merely when one is added.
-const EBPFDiagnosticsSchemaVersion = 18
+const EBPFDiagnosticsSchemaVersion = 19
 
 // EBPFDiagnosticsProvider is the no-build-tag surface the daemon uses to export
 // eBPF inbound state over gRPC.

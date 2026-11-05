@@ -3,7 +3,7 @@ targets: bpfel,bpfeb
 cflags: -mcpu=v1 -O2 -g0 -ffreestanding -mllvm -disable-block-placement -mllvm -disable-branch-fold -nostdinc -Inative -isystem <clang-resource>/include -isystem <ndk-sysroot>/usr/include -isystem <ndk-sysroot>/usr/include/aarch64-linux-android
 include_environment: cleared
 bpf2go: v0.22.1-0.20260724091036-00feb08ae4e5
-clang: clang version 21.0.0 (Windows NDK r29; cgroup objects regenerated with this compiler)
+clang: clang version 21.0.0 (Windows NDK r29; cgroup and tc objects regenerated with this compiler)
 322e15700713f85f499263894cd20c97cc15b66121c670798f5a4a3e00e4295e  native/abi.h
 acef2ae96d9657f06d0533ced13e39509f624074cbcf46197c2ed9909c5844b1  native/bpf_compat.h
 1b1383d46e9f865401a23fd80128509343727f78afb3280be91cb6824239f99a  native/cgroup.bpf.c
@@ -18,7 +18,7 @@ ddfc18d40c63fc4852a826111cbe2f61be1c79c6b7e4be939f52d646760207fc  native/shared_
 2857a13fc1404bb137ad03cc8a304cdd3c360ffbc0d265cfe7a13d1f70b8b453  native/shared_network_packet.h
 ab8a1207d1d3547d38d361c7afe863c9d75e69dc010261eb552b882c9e4c826f  native/shared_network_policy.h
 ab800d6eafe5080e9910c09ac2a29b9f7eb6ca11661541c2d0ba5a91a0d50e0b  native/shared_network_rewrite.h
-c8f4e6db2a59239132249e72a6d93a4b172e5d75adc415888c10d39faca58d1d  native/tc.bpf.c
+8ed55f1b9f7c11dee7fb329abdad43075b735bd7a16ca3b1277cf99582f2b96c  native/tc.bpf.c
 ae81aa3939334dae69b5dc82e39779f061d314d2552db272ee5f8176bc89dd1f  internal/bpfgen/cgroup_bpfeb.o
 f71de5e94e0f487a2941ec101db2c3fc8c78d4a0f0a227d506a56b5efd6a82e3  internal/bpfgen/cgroup_bpfel.o
 01464ef5cec7fbe28378786a3d5233cf96b1f414adf53e37359b833fcd4996cd  internal/bpfgen/cgroup_coarse_bpfeb.o
@@ -29,5 +29,5 @@ c9416bed21ab35217be833c9a1e0b16d6b536e5bbd27dc065bd828acfd918631  internal/bpfge
 51ad649c4f86593b6adc9e8a941fcd5e39bb8c1410010de61758515313708b04  internal/bpfgen/fakeip_icmp_bpfel.o
 047c2d1606f3eac26de639e0faced25d673f4643b788ec8e6f649070e0bbc1e0  internal/bpfgen/shared_network_bpfeb.o
 85b05bff005e24cf252e32072260fc075bbebc80974d55ec76dfd577289394cb  internal/bpfgen/shared_network_bpfel.o
-dbe68ff02645e0449a6c40c432f4a1563bcaf996a2f436c72e423bb604277146  internal/bpfgen/tc_bpfeb.o
-9ae5e7423fd622f6b46240b738dea5560f0eef1f6744732b3f23bddc3f5f461f  internal/bpfgen/tc_bpfel.o
+0714dc173ac4d8458fd6f4a20aa482ae645487f87cb0146eba2a7277a68ec8c3  internal/bpfgen/tc_bpfeb.o
+94ee7af0302af141d6e821a5ff2392d34a9ce8d78c4ae5377cf193a1604f68a8  internal/bpfgen/tc_bpfel.o

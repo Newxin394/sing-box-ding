@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"errors"
+	"math"
 	"net/netip"
 	"slices"
 	"sync"
@@ -67,7 +68,7 @@ const (
 	TCPathDelivery = 2
 )
 
-const tcStatCount = 5
+const tcStatCount = 6
 
 const (
 	TCStatRawIPAttempts uint32 = iota
@@ -75,6 +76,10 @@ const (
 	TCStatRawIPHeaderFailures
 	TCStatRawIPRedirectFailures
 	TCStatDeliveryParseFailures
+	// TCStatAssignmentUpdateFailures counts assignment writes the kernel
+	// refused. A refused write on the assign path drops the packet, so this is
+	// the only place that drop is recorded at all.
+	TCStatAssignmentUpdateFailures
 )
 
 type TCConfig struct {
@@ -123,7 +128,10 @@ type tcControl struct {
 	LocalDNSMode      DNSMode
 	SharedDNSMode     DNSMode
 	DeliveryMAC       MACAddress
-	Reserved          uint16
+	// NetworkGeneration is stamped into every assignment the kernel writes, so
+	// a rebuilt data plane can tell its own assignments from those of the
+	// topology it replaced instead of waiting out the idle window.
+	NetworkGeneration uint16
 	FakeIPIPv4Prefix  [4]byte
 	FakeIPIPv4Mask    [4]byte
 	FakeIPIPv6Prefix  [16]byte
@@ -142,11 +150,24 @@ type tcAssignKey struct {
 }
 
 type TCAssignment struct {
-	SocketCookie   uint64
+	SocketCookie uint64
+	// LastSeenNS is the kernel side's monotonic stamp of the last time this
+	// assignment was confirmed (CLOCK_MONOTONIC, the same unit as
+	// MonotonicNanoseconds). Zero means the kernel object predates the stamp.
+	LastSeenNS     uint64
 	InterfaceIndex uint32
 	SourceMAC      MACAddress
 	Path           uint8
 	SourceMACValid uint8
+	// NetworkGeneration records the data plane generation this assignment was
+	// written under; entries from an older generation describe a topology that
+	// no longer exists.
+	NetworkGeneration uint16
+	// Reserved mirrors the kernel struct's explicit tail padding. It is not
+	// decoration: a batched map read is sized by the sum of the field widths,
+	// so without these two bytes this type would total 30 and the kernel's
+	// 32-byte value could not be unmarshaled into it.
+	Reserved [2]byte
 }
 
 type tcRuntime struct {
@@ -419,6 +440,36 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 		return err
 	}
 	return nil
+}
+
+// SetNetworkGeneration stamps the generation the kernel writes into every
+// assignment from now on. Bumping it on a data plane rebuild lets
+// SweepAssignments tell entries that describe a topology which no longer exists
+// apart from entries that are merely old, instead of waiting for every one of
+// them to age out.
+func (b *TCBackend) SetNetworkGeneration(generation uint32) error {
+	if generation == 0 || generation > math.MaxUint16 {
+		return E.New("invalid TC eBPF network generation: ", generation)
+	}
+	b.access.Lock()
+	defer b.access.Unlock()
+	if err := b.requireUsableLocked(); err != nil {
+		return err
+	}
+	previous := b.control.NetworkGeneration
+	b.control.NetworkGeneration = uint16(generation)
+	if err := b.updateControlLocked(); err != nil {
+		b.control.NetworkGeneration = previous
+		return err
+	}
+	return nil
+}
+
+// NetworkGeneration reports the generation stamped into new assignments.
+func (b *TCBackend) NetworkGeneration() uint16 {
+	b.access.RLock()
+	defer b.access.RUnlock()
+	return b.control.NetworkGeneration
 }
 
 func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {

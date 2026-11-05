@@ -199,6 +199,10 @@ type Inbound struct {
 	recoverySweepHandled atomic.Uint64
 	maintenanceCancel    context.CancelFunc
 	maintenanceDone      chan struct{}
+	// tcAssignmentSweepStatus is the last TC assignment sweep's outcome, read
+	// back by diagnostics.
+	tcAssignmentSweepAccess sync.Mutex
+	tcAssignmentSweepStatus tcAssignmentSweepStatus
 
 	udpClientTable    udpClientTable
 	udpReplySockets   udpReplySocketPool

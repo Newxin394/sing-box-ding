@@ -60,6 +60,11 @@ type EBPFCounters struct {
 	RawIPHeaderFailures      uint64 `json:"raw_ip_header_failures"`
 	RawIPRedirectFailures    uint64 `json:"raw_ip_redirect_failures"`
 	DeliveryParseFailures    uint64 `json:"delivery_parse_failures"`
+	// TCAssignmentUpdateFailures counts assignment writes the kernel refused.
+	// On the assign path that refusal drops the packet outright, so this is the
+	// only record of it anywhere; the refresh path keeps the packet and only
+	// loses the stamp.
+	TCAssignmentUpdateFailures uint64 `json:"tc_assignment_update_failures"`
 	// TokenReservationFailures and RewriteFailures are 0 whenever this
 	// inbound has no shared packet-rewrite backend to read them from, not
 	// necessarily because nothing ever failed.

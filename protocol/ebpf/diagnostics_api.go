@@ -90,6 +90,24 @@ func (i *Inbound) EBPFRuntimeDiagnostics() adapter.EBPFRuntimeDiagnostics {
 		CapacityRejected: diagnostics.UDPReplySockets.CapacityRejected,
 	}
 	runtimeDiagnostics.Counters = adapterCounters(diagnostics.Counters)
+	// The assignment sweep runs in userspace, so its outcome is the inbound's
+	// own state rather than part of the kernel snapshot above.
+	sweep := i.tcAssignmentSweepDiagnostics()
+	runtimeDiagnostics.TCAssignmentSweepUsageKnown = sweep.usageKnown
+	runtimeDiagnostics.TCAssignmentSweepEntries = sweep.entries
+	runtimeDiagnostics.TCAssignmentSweepCapacity = sweep.capacity
+	runtimeDiagnostics.TCAssignmentSweepPressure = sweep.pressured
+	runtimeDiagnostics.TCAssignmentSweepRuns = sweep.runs
+	runtimeDiagnostics.TCAssignmentSweepPartial = sweep.partial
+	runtimeDiagnostics.TCAssignmentSweepFailure = sweep.failure
+	if !sweep.lastAt.IsZero() {
+		lastAt := sweep.lastAt
+		runtimeDiagnostics.TCAssignmentSweepLastAt = &lastAt
+	}
+	if !sweep.partialAt.IsZero() {
+		partialAt := sweep.partialAt
+		runtimeDiagnostics.TCAssignmentSweepPartialAt = &partialAt
+	}
 
 	// The fork keeps one bypass_rule_set list shared by all three backends,
 	// where the parent's schema has a separate scope per data plane. The same
@@ -263,6 +281,7 @@ func adapterCounters(counters EBPFCounters) adapter.EBPFCounters {
 		FakeIPICMPReplies:             counters.FakeIPICMPReplies,
 		FakeIPICMPPassThrough:         counters.FakeIPICMPPassThrough,
 		FakeIPICMPRewriteFailureDrops: counters.FakeIPICMPRewriteFailureDrops,
+		TCAssignmentUpdateFailures:    counters.TCAssignmentUpdateFailures,
 	}
 }
 

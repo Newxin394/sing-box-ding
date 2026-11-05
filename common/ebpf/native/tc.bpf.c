@@ -81,7 +81,13 @@ struct sb_tc_control {
     __u16 local_dns_mode;
     __u16 shared_dns_mode;
     __u8 delivery_mac[6];
-    __u16 reserved;
+    /*
+     * Bumped by the backend every time the data plane is rebuilt. Assignments
+     * carry the generation they were written under, so a rebuild can tell the
+     * difference between "this flow is stale" and "this flow belongs to a
+     * previous topology" instead of waiting out the idle window.
+     */
+    __u16 network_generation;
     __u8 fakeip_ipv4_prefix[4];
     __u8 fakeip_ipv4_mask[4];
     __u8 fakeip_ipv6_prefix[16];
@@ -135,10 +141,27 @@ struct sb_tc_assign_key {
 
 struct sb_tc_assign_value {
     __u64 socket_cookie;
+    /*
+     * Last time the kernel side confirmed this assignment, used by the
+     * userspace janitor to drop flows nobody has matched in a while. Written at
+     * most once per second per assignment so a busy flow does not turn every
+     * packet into a map write.
+     */
+    __u64 last_seen_ns;
     __u32 ifindex;
     __u8 source_mac[6];
     __u8 path;
     __u8 source_mac_valid;
+    __u16 network_generation;
+    /*
+     * Tail padding, spelled out instead of left implicit: cilium/ebpf sizes a
+     * batched value by the sum of its field widths, so a struct whose compiler
+     * padding carries it from 30 to 32 bytes cannot be unmarshaled from a
+     * 32-byte map value ("doesn't consume all data"). Mirroring the two bytes
+     * in the Go type keeps the map value, the C struct, and the Go struct at
+     * the same 32 bytes.
+     */
+    __u8 reserved[2];
 };
 
 _Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
@@ -151,9 +174,15 @@ _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
 _Static_assert(__builtin_offsetof(struct sb_tc_control, fakeip_ipv6_mask) == 54,
     "sb_tc_control fakeip_ipv6_mask ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
-_Static_assert(sizeof(struct sb_tc_assign_value) == 24, "sb_tc_assign_value ABI size");
+_Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
     "sb_tc_assign_value socket_cookie ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_assign_value, last_seen_ns) == 8,
+    "sb_tc_assign_value last_seen_ns ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_assign_value, network_generation) == 28,
+    "sb_tc_assign_value network_generation ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_assign_value, reserved) == 30,
+    "sb_tc_assign_value reserved ABI offset");
 
 struct ethernet_header {
     __u8 destination[6];
@@ -240,7 +269,11 @@ MAP(tc_shared_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U
 #define SB_TC_STAT_RAW_IP_HEADER_FAILURE 2U
 #define SB_TC_STAT_RAW_IP_REDIRECT_FAILURE 3U
 #define SB_TC_STAT_DELIVERY_PARSE_FAILURE 4U
-#define SB_TC_STAT_COUNT 5U
+/* A refused assignment write. The map is an LRU_HASH, so a failure means the
+ * kernel could not admit the entry at all; without this counter the packet is
+ * dropped and nothing anywhere records why. */
+#define SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE 5U
+#define SB_TC_STAT_COUNT 6U
 
 MAP(tc_stats, __u32, __u64, BPF_MAP_TYPE_PERCPU_ARRAY, SB_TC_STAT_COUNT);
 
@@ -262,6 +295,22 @@ static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple
 static long (*sk_assign)(void *ctx, struct bpf_sock *socket, __u64 flags) =
     (void *)BPF_FUNC_sk_assign;
 static void (*sk_release)(struct bpf_sock *socket) = (void *)BPF_FUNC_sk_release;
+static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
+
+/*
+ * An assignment confirmed less than a second ago is not written again: the
+ * timestamp only has to be accurate enough for a janitor that runs on the order
+ * of minutes, and a map write per packet would cost more than the lookup.
+ */
+#define SB_TC_ASSIGNMENT_REFRESH_NS 1000000000ULL
+
+INLINE __u64 flow_time_ns(void) { return ktime_get_ns(); }
+
+INLINE bool assignment_is_stale(const struct sb_tc_assign_value *existing, __u64 now) {
+    if (existing == 0) return false;
+    if (existing->last_seen_ns == 0U) return true;
+    return now - existing->last_seen_ns >= SB_TC_ASSIGNMENT_REFRESH_NS;
+}
 
 INLINE void record_tc_stat(__u32 index) {
     __u64 *counter = map_lookup(&tc_stats, &index);
@@ -654,23 +703,29 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
     if (key->protocol == IPPROTO_UDP_VALUE && path == SB_TC_PATH_SHARED)
         assignment_key.interface_index = skb->ifindex;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
+    __u64 now = flow_time_ns();
     struct sb_tc_assign_value value = {
         .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .last_seen_ns = now,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
+        .network_generation = control->network_generation,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
         existing->ifindex != value.ifindex ||
-        existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
+        existing->path != value.path || existing->source_mac_valid != value.source_mac_valid ||
+        existing->network_generation != value.network_generation;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
     long result = sk_assign(skb, socket, 0U);
     sk_release(socket);
     if (result != 0) {
         return TC_ACT_SHOT;
     }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+    if ((assignment_changed || assignment_is_stale(existing, now)) &&
+        map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+        record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
     return TC_ACT_OK;
@@ -688,23 +743,29 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
     if (key->protocol == IPPROTO_UDP_VALUE && path == SB_TC_PATH_SHARED)
         assignment_key.interface_index = skb->ifindex;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
+    __u64 now = flow_time_ns();
     struct sb_tc_assign_value value = {
         .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .last_seen_ns = now,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
+        .network_generation = control->network_generation,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
         existing->ifindex != value.ifindex ||
-        existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
+        existing->path != value.path || existing->source_mac_valid != value.source_mac_valid ||
+        existing->network_generation != value.network_generation;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
     long result = sk_assign(skb, socket, 0U);
     sk_release(socket);
     if (result != 0) {
         return TC_ACT_SHOT;
     }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+    if ((assignment_changed || assignment_is_stale(existing, now)) &&
+        map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+        record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
     return TC_ACT_OK;
@@ -719,34 +780,64 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
     struct sb_tc_assign_key assignment_key = *key;
     assignment_key.interface_index = path == SB_TC_PATH_SHARED ? skb->ifindex : 0U;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
+    __u64 now = flow_time_ns();
     struct sb_tc_assign_value value = {
         .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .last_seen_ns = now,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
+        .network_generation = control->network_generation,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
         existing->ifindex != value.ifindex || existing->path != value.path ||
-        existing->source_mac_valid != value.source_mac_valid;
+        existing->source_mac_valid != value.source_mac_valid ||
+        existing->network_generation != value.network_generation;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
     long result = sk_assign(skb, socket, 0U);
     sk_release(socket);
     if (result != 0) {
         return TC_ACT_SHOT;
     }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+    if ((assignment_changed || assignment_is_stale(existing, now)) &&
+        map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+        record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
     return TC_ACT_OK;
 }
 
-INLINE void record_local_socket_cookie(const struct sb_tc_assign_key *key, __u64 socket_cookie) {
+INLINE void record_local_socket_cookie(const struct sb_tc_control *control,
+    const struct sb_tc_assign_key *key, __u64 socket_cookie) {
     if (socket_cookie == 0U) return;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, key);
-    if (existing != 0 && existing->socket_cookie == socket_cookie) return;
-    struct sb_tc_assign_value value = {.socket_cookie = socket_cookie};
-    map_update(&tc_assignment, key, &value, BPF_ANY);
+    __u64 now = flow_time_ns();
+    bool same_socket = existing != 0 && existing->socket_cookie == socket_cookie;
+    if (same_socket && !assignment_is_stale(existing, now) &&
+        existing->network_generation == control->network_generation) return;
+    struct sb_tc_assign_value value = {
+        .socket_cookie = socket_cookie,
+        .last_seen_ns = now,
+        .network_generation = control->network_generation,
+    };
+    /*
+     * A refresh of the same socket must not throw away what the assign path
+     * learned about this flow (interface, path, source MAC): the janitor only
+     * needs the timestamp moved forward.
+     */
+    if (same_socket) {
+        value.ifindex = existing->ifindex;
+        value.path = existing->path;
+        value.source_mac_valid = existing->source_mac_valid;
+        __builtin_memcpy(value.source_mac, existing->source_mac, 6U);
+    }
+    if (map_update(&tc_assignment, key, &value, BPF_ANY) != 0) {
+        /* The packet keeps going: this path only refreshes a cookie the
+         * assignment already carries, so a refused refresh costs the sweep one
+         * stale entry, not the connection. */
+        record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
+    }
 }
 
 INLINE int redirect_local(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
@@ -782,7 +873,7 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     __u8 source_mac[6];
     if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, ethernet, &key, source_mac)) return TC_ACT_UNSPEC;
     if (!local_selected(skb, control, &key, socket_metadata_value)) return TC_ACT_UNSPEC;
-    if (track_process) record_local_socket_cookie(&key, socket_cookie);
+    if (track_process) record_local_socket_cookie(control, &key, socket_cookie);
     return redirect_local(skb, control, ethernet);
 }
 

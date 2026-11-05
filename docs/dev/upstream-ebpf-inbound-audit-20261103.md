@@ -641,3 +641,94 @@ go test -count=1 -tags "with_quic,with_dhcp,with_wireguard,with_utls,with_acme,w
 go run -ldflags "-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0" \
   -tags "with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_usbip,with_openvpn,with_openconnect,badlinkname,tfogo_checklinkname0" ./cmd/sing-box schema -o docs/schema.json
 ``
+
+## 14. TC 数据面的资源表维护（2026-11-06）
+
+第 11 节的 E1–E4 修完之后，作者指出这台设备跑的是 `local.data_plane: tc`，不是 cgroup。按那个前提重查，发现两件事，都在这一节修掉。
+
+### 14.1 第 11 节的 E3 在纯 TC 上完全空转
+
+`protocol/ebpf/cgroup_maintenance.go` 的压力驱动维护循环入口是
+
+```go
+func (i *Inbound) startCgroupMaintenance(ctx context.Context) {
+	if i.cgroupBackendInstance() == nil {
+		return
+	}
+```
+
+纯 TC 没有 cgroup backend，所以这个循环**从来没有启动过**，我上一轮报告的「按 map 压力提前清扫」在 TC 上等于没有。这是本次复核最实质的发现：缺陷不在代码写错，而在覆盖面被一行门禁挡住，而报告没有跟着那行门禁收窄。
+
+### 14.2 TC 的 assignment 表此前没有任何过期机制
+
+`tc_assignment`（`sb_tc_assign`，LRU_HASH，默认 65536 条）只在启动时回收一次（`reclaimStaleTCDeliveryLinks`、`reclaimStaleTCPolicyRouting`）。LRU 表的问题是双向的：压满之前谁都不走，压满之后内核按 LRU 挑一个走，挑中的可能正是还在用的那条。对 UDP 尤其糟——一条迟到的包找不到 assignment 就当新流处理，会话断掉。
+
+上游的做法是 `TCBackend.SweepAssignments(maxIdle, fallbackBudget)`，判定条件是
+
+```go
+if value.NetworkGeneration != b.control.NetworkGeneration ||
+   (value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore) { /* 删 */ }
+```
+
+两个字段此前都不存在：`sb_tc_assign_value` 只有 24 字节，内核侧连 `ktime_get_ns` 都没调用过。
+
+### 14.3 这次改了什么
+
+内核侧（`common/ebpf/native/tc.bpf.c`）：
+
+| 项 | 改动 |
+| --- | --- |
+| `sb_tc_control` | `__u16 reserved` → `__u16 network_generation`（大小仍 72，偏移不变） |
+| `sb_tc_assign_value` | 24 → 32 字节：加 `last_seen_ns`（偏移 8）与 `network_generation`（偏移 28），并把编译器原本隐式的两字节尾填充写成显式 `reserved[2]` |
+| 记账 | 三个 assign 函数与 `record_local_socket_cookie` 写 assignment 时打戳；新增 `SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE` 统计槽位（`tc_stats` 5 → 6） |
+| 刷新粒度 | `assignment_is_stale` 以 `SB_TC_ASSIGNMENT_REFRESH_NS`（1 秒）为单位判过期，**每秒最多一次 map 写**，不让每包都写 |
+
+用户态：
+
+| 文件 | 内容 |
+| --- | --- |
+| `common/ebpf/tc_assignment_sweep.go`（新） | `SweepAssignments(maxIdle, budget)`：generation 不符先删，`LastSeenNS == 0` 一律不动（无从判断年龄），过期才删；删除在遍历之外做，容忍 `ENOENT`。`AssignmentUsage()` 供压力信号读占用。 |
+| `common/ebpf/tc.go` | `TCAssignment` 镜像 32 字节布局；`SetNetworkGeneration` / `NetworkGeneration`；`tcStatCount` 6 |
+| `protocol/ebpf/map_maintenance.go`（替换 `cgroup_maintenance.go`） | 循环从「cgroup 专用」改成「有任一数据面就启动」；每次 tick 同时清扫 UDP recovery 与 TC assignment；`observeMapPressure` 把 `tc_assignment` 占用也喂进滞回 |
+| `protocol/ebpf/tc_assignment_maintenance.go`（新） | 记录上一轮扫描的结果并按诊断字段形状上报 |
+| `protocol/ebpf/tc_dataplane.go` | `startTCDataPlane` 打 generation 1；`reconcile` 检测到接口集合变化时递增 generation，**在 `slices.Clone` 之前比较旧值**（否则永远相等） |
+
+超时窗口的选择值得单独说明：TC assignment 用 30 秒（压力）/ 5 分钟（宽松），比 UDP recovery 的 30 秒上限长得多。理由是两者语义不同——recovery 条目只活到对端下一个包，assignment 是流的 socket 映射，一条静默的 TCP 连接可以合法地好几分钟不动。按 recovery 的窗口清 assignment 会把活流重新 assign，代价是小，但纯属白折腾。
+
+### 14.4 admission 计数器：换成 TC 侧等价物
+
+上一轮列的「6 个 admission 失败计数器」经核查是 **cgroup 专属**：它们对应 `cgroup_tcp_redirect` / `cgroup_udp_token` / `cgroup_udp_token_reverse` / `cgroup_udp_peer` / `cgroup_udp_recovery` 的写入失败，而 `common/ebpf/native/cgroup.bpf.c` 里**根本没有 stats map**——照抄要新加一整张 PERCPU_ARRAY 再插进六处写入点，对这些设备零收益。
+
+改成做 TC 侧真正缺的那个：assignment 写失败。原来 assign 路径 `map_update(...) != 0` 直接 `return TC_ACT_SHOT`，**丢包且没有任何地方记录**。现在计入 `SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE`，经既有的 `tcAssignmentUpdateFailures` 字段上报——这个字段从移植进来那天就有，一直是常量 0。
+
+### 14.5 一个只在真机上才暴露的 bug
+
+第一次上机，清扫立刻报
+
+```
+scan TC assignment state: map batch lookup: unmarshaling []ebpf.TCAssignment doesn't consume all data
+```
+
+原因是 cilium/ebpf 的批量读按**各字段宽度之和**计算元素大小：`8+8+4+6+1+1+2 = 30`，而内核 map 的 value 是编译器对齐后的 32 字节。多出来的两字节尾填充 Go 侧看不见，于是「剩余数据没被消费」。修法是把填充在两个结构体里都写显式——C 加 `__u8 reserved[2]`，Go 加 `Reserved [2]byte`，两边都断言 32 与偏移 30。
+
+这个错误在 Linux 交叉编译、`go vet`、`go test -c` 里都看不见，只有真的跑起来读一次 map 才会出现。
+
+### 14.6 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `go vet -tags with_ebpf ./common/ebpf/ ./protocol/ebpf/` | exit=0 |
+| `golangci-lint run ./common/ebpf/... ./protocol/ebpf/...` | 0 issues |
+| `go build`（linux/amd64、linux/arm64、linux/arm、android/arm64） | 全部 exit=0 |
+| Windows 无 tag build + `go test ./...`（全 tag 集） | 43 包 ok，0 失败 |
+| `make -C common/ebpf check`（native 源与 manifest 的 sha256） | 15/15 一致 |
+| 真机 `data_plane: tc` 启动 | `attachments=[wlan0(local,l2,clsact)]`、`tcp_listener_lookup=sockmap`、流量正常接管 |
+| 真机 `api ebpf --deep` | `schemaVersion: 19`、`tcAssignmentSweepEntries: 15`、`Capacity: 65536`、`Runs: 1`、`Partial: 0`、`Failure: ""`、`UsageKnown: true` |
+
+`EBPFDiagnosticsSchemaVersion` 从 18 提到 19：这次没加字段，但让一批原本恒零的字段有了值，按该常量自己的注释（"Bump it whenever a field changes meaning, not merely when one is added"）属于该提的情形。
+
+### 14.7 仍然没做
+
+- **CPU 归因要按 TC 路径重测**：第 12.4 节的 235ns（recvmsg）/1.73μs（connect）是 cgroup hook 的数，TC 的钱花在 ingress 程序上，两组数不能混用。`cmd/internal/statsprobe` 与 `cmd/internal/trafficgen` 仍在，重测不需要新工具。
+- **ringbuf 释放通知**、**netns 隔离投递**：同 11.8，仍然决定不做。
+- **上游的 `tc_assignment_claim` 表与 `SweepAssignments` 的三计数器（Missing/Superseded/InFlight）**：我们只有 assignment 一张表，清扫结果按 `Scanned/Deleted/Expired/Superseded/Unstamped` 记录，字段名与上游对不上，不硬凑。
