@@ -68,10 +68,14 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 	}
 	var processPath string
 	if c.Metadata.ProcessInfo != nil {
-		if len(c.Metadata.ProcessInfo.ProcessPaths) > 0 {
-			processPath = c.Metadata.ProcessInfo.ProcessPaths[0]
-		} else if len(c.Metadata.ProcessInfo.PackageNames) > 0 {
+		// Android reports every app's executable as app_process (or
+		// app_process64), so the path identifies nothing; the package name is the
+		// only label a dashboard can act on. PackageNames is empty everywhere
+		// else, which is why this order is harmless outside Android.
+		if len(c.Metadata.ProcessInfo.PackageNames) > 0 {
 			processPath = c.Metadata.ProcessInfo.PackageNames[0]
+		} else if len(c.Metadata.ProcessInfo.ProcessPaths) > 0 {
+			processPath = c.Metadata.ProcessInfo.ProcessPaths[0]
 		}
 		if processPath == "" {
 			if c.Metadata.ProcessInfo.UserId != -1 {

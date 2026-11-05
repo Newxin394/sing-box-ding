@@ -26,6 +26,7 @@ type concurrencyProbeOutbound struct {
 	delay    time.Duration
 	inflight *atomic.Int32
 	peak     *atomic.Int32
+	attempts *atomic.Int32
 }
 
 func (o *concurrencyProbeOutbound) Tag() string { return o.tag }
@@ -34,6 +35,9 @@ func (o *concurrencyProbeOutbound) Network() []string {
 }
 
 func (o *concurrencyProbeOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if o.attempts != nil {
+		o.attempts.Add(1)
+	}
 	current := o.inflight.Add(1)
 	defer o.inflight.Add(-1)
 	for {
@@ -51,8 +55,18 @@ func (o *concurrencyProbeOutbound) DialContext(ctx context.Context, network stri
 }
 
 func newConcurrencyProbes(count int) ([]adapter.Outbound, *atomic.Int32) {
+	outbounds, peak, _ := newConcurrencyProbesCounting(count)
+	return outbounds, peak
+}
+
+// newConcurrencyProbesCounting also reports how many probes were started. The
+// capacity test has to assert that, not the number of results: a few hundred
+// simultaneous dials at one loopback listener get refused now and then on a
+// loaded machine, so counting results would test the host, not the limit.
+func newConcurrencyProbesCounting(count int) ([]adapter.Outbound, *atomic.Int32, *atomic.Int32) {
 	inflight := new(atomic.Int32)
 	peak := new(atomic.Int32)
+	attempts := new(atomic.Int32)
 	outbounds := make([]adapter.Outbound, 0, count)
 	for index := range count {
 		outbounds = append(outbounds, &concurrencyProbeOutbound{
@@ -60,9 +74,10 @@ func newConcurrencyProbes(count int) ([]adapter.Outbound, *atomic.Int32) {
 			delay:    80 * time.Millisecond,
 			inflight: inflight,
 			peak:     peak,
+			attempts: attempts,
 		})
 	}
-	return outbounds, peak
+	return outbounds, peak, attempts
 }
 
 func newProbeTarget(t *testing.T) *httptest.Server {
@@ -107,13 +122,15 @@ func TestURLTestOutboundsConcurrentFiresAllAtOnce(t *testing.T) {
 // 并发数不能超过上限，否则 400+ 节点的组会把 fd 和 CPU 打爆。
 func TestURLTestOutboundsConcurrentCapsConcurrency(t *testing.T) {
 	server := newProbeTarget(t)
-	outbounds, peak := newConcurrencyProbes(outboundProbeConcurrencyLimit + 32)
+	outbounds, peak, attempts := newConcurrencyProbesCounting(outboundProbeConcurrencyLimit + 32)
 
-	result := URLTestOutboundsConcurrent(
+	URLTestOutboundsConcurrent(
 		context.Background(), nil, urltest.NewHistoryStorage(),
 		log.NewNOPFactory().Logger(), outbounds, server.URL,
 	)
 
-	require.Len(t, result, len(outbounds))
-	require.LessOrEqual(t, peak.Load(), int32(outboundProbeConcurrencyLimit))
+	require.EqualValues(t, len(outbounds), attempts.Load(),
+		"每个成员都该被发出去一次，这正是全并发路径的意义")
+	require.LessOrEqual(t, peak.Load(), int32(outboundProbeConcurrencyLimit),
+		"同时在跑的探测数不能超过上限")
 }

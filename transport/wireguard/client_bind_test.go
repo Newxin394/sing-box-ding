@@ -237,6 +237,10 @@ func (m *endpointPauseManager) IsPaused() bool {
 
 func (m *endpointPauseManager) WaitActive() {}
 
+// WaitActiveContext is part of pause.Manager: this fake is never paused for long
+// enough to need a cancellable wait, so it returns immediately like WaitActive.
+func (m *endpointPauseManager) WaitActiveContext(context.Context) {}
+
 func (m *endpointPauseManager) RegisterCallback(callback pause.Callback) *list.Element[pause.Callback] {
 	m.access.Lock()
 	m.callback = callback
@@ -325,6 +329,16 @@ func (m *testPauseManager) IsPaused() bool {
 func (m *testPauseManager) WaitActive() {
 	m.waitingOnce.Do(func() { close(m.waiting) })
 	<-m.active
+}
+
+// WaitActiveContext is part of pause.Manager: same wait, but the caller can give
+// up through its context instead of blocking until the manager resumes.
+func (m *testPauseManager) WaitActiveContext(ctx context.Context) {
+	m.waitingOnce.Do(func() { close(m.waiting) })
+	select {
+	case <-m.active:
+	case <-ctx.Done():
+	}
 }
 
 func (m *testPauseManager) RegisterCallback(pause.Callback) *list.Element[pause.Callback] {

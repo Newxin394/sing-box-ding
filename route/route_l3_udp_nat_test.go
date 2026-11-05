@@ -36,9 +36,9 @@ func TestL3UDPDestinationNAT(t *testing.T) {
 		},
 	}
 	writeback := new(testL3NATWriteback)
-	dispatcher := tun.NewForwardDispatcher(handler, writeback, log.NewNOPFactory().NewLogger("forward"), 0, 0)
+	dispatcher := tun.NewForwardDispatcher(handler, writeback, log.NewNOPFactory().NewLogger("forward"), 0, tun.UDPNatOptions{}, 0)
 	defer dispatcher.Close()
-	stage := dispatcher.NewStage(writeback)
+	stage := dispatcher.NewStage(writeback, nil)
 
 	request := buildTestIPv4UDPPacket(client, fakeDestination, []byte("request"))
 	require.True(t, stage.Dispatch(request))
@@ -98,9 +98,9 @@ func TestL3UDPSniffOverrideDestinationNAT(t *testing.T) {
 		},
 	}
 	writeback := new(testL3NATWriteback)
-	dispatcher := tun.NewForwardDispatcher(handler, writeback, log.NewNOPFactory().NewLogger("forward"), 0, 0)
+	dispatcher := tun.NewForwardDispatcher(handler, writeback, log.NewNOPFactory().NewLogger("forward"), 0, tun.UDPNatOptions{}, 0)
 	defer dispatcher.Close()
-	stage := dispatcher.NewStage(writeback)
+	stage := dispatcher.NewStage(writeback, nil)
 
 	request := buildTestIPv4UDPPacket(client, originalDestination, []byte("request"))
 	require.True(t, stage.Dispatch(request))
