@@ -732,3 +732,90 @@ scan TC assignment state: map batch lookup: unmarshaling []ebpf.TCAssignment doe
 - **CPU 归因要按 TC 路径重测**：第 12.4 节的 235ns（recvmsg）/1.73μs（connect）是 cgroup hook 的数，TC 的钱花在 ingress 程序上，两组数不能混用。`cmd/internal/statsprobe` 与 `cmd/internal/trafficgen` 仍在，重测不需要新工具。
 - **ringbuf 释放通知**、**netns 隔离投递**：同 11.8，仍然决定不做。
 - **上游的 `tc_assignment_claim` 表与 `SweepAssignments` 的三计数器（Missing/Superseded/InFlight）**：我们只有 assignment 一张表，清扫结果按 `Scanned/Deleted/Expired/Superseded/Unstamped` 记录，字段名与上游对不上，不硬凑。
+
+## 15. TC 路径的 CPU 归因与一次失败的优化尝试（2026-11-06）
+
+第 12.4 节那组数字（recvmsg 235ns / connect 1.73μs）是在 `local.data_plane: cgroup` 上量的。真正
+在用的数据面是 TC，账单落在 tc ingress 程序上，得单独量一遍。这一节记实测值，以及顺着数字做的一次
+优化尝试——**没有收益，已回退**。
+
+### 15.1 方法
+
+- 设备：Redmi 2407FRK8KEC（Android 16 / SDK 36，内核 6.1.138，Magisk root），`bpf_stats_enabled=1`
+  （默认 0，不开的话 `RunTimeNs` 恒 0，第 12 节踩过这个坑）。
+- 采样：`cmd/internal/statsprobe` 一次调用内部做两次快照、间隔 5 秒，打印这 5 秒的差量表；所以必须让
+  流量落在采样窗口内，不能"前后各采一次相减"。
+- 打流量：`cmd/internal/trafficgen <秒> <模式>`（位置参数）。`udp` 是单 socket × 4 worker 打
+  `192.0.2.1:53`，约 50k pps，不等回包；`tcpconn` 是 8 worker 打 `192.0.2.1:9`，每次 10ms 超时。
+- 脚本：`device/tccost.sh`（TC）与 `device/cgcost.sh`（cgroup 对照），同一台设备、同一 5 秒窗口、
+  同一种流量，只换 `data_plane`。
+
+### 15.2 数据
+
+UDP 洪水（5 秒窗口）：
+
+| 数据面 | 程序 | 调用次数 | CPU | 单次 | 占 eBPF 时间 |
+| --- | --- | --- | --- | --- | --- |
+| cgroup | `sb_ebpf_urcv4` | 167,094 | 35.4ms | **211ns** | 3.1% |
+| cgroup | netd 四程序合计 | — | 395ms | — | 34.7% |
+| cgroup | 厂商 `tracepoint_sched_*` ×3 | — | 679ms | — | 59.7% |
+| TC | `sb_tc_deliver` | 161,097 | 538.6ms | **3343ns** | 27.6% |
+| TC | `sb_tc_local_l2` | 318,559 | 103.8ms | 325ns | 5.3% |
+| TC | netd 六程序合计 | — | 588ms | — | 30.2% |
+| TC | 厂商 `tracepoint_sched_*` ×3 | — | 677.5ms | — | 34.8% |
+
+两轮总计分别是 1137.7ms（cgroup）与 1949ms（TC）。TC 的 `sb_tc_local_l2` 调用次数是送达包数的两倍，
+第二趟是转发出去时命中 self-bypass 早退（`skb->ingress_ifindex` 非零 / socket metadata 标记），仍计入
+调用次数但单次很便宜。
+
+**一次 UDP 包的 TC 路径成本约 4.0μs（`local_l2` 325ns ×2 + `deliver` 3343ns），cgroup 路径是 211ns，
+差约 19 倍。** 我们自己占 eBPF 时间的比例从 3.1% 变成 33%——不是我们把别人挤掉了，是同一批包我们自己
+从 3% 涨到了三分之一。
+
+TCP 对照（同一 TC 数据面）：`sb_tc_deliver` 29,359 次 28.9ms = 982ns，`sb_tc_local_l2` 62,022 次
+29.5ms = 475ns。同一个程序处理 TCP 只要 982ns、处理 UDP 要 3343ns，差 3.4 倍。
+
+### 15.3 差异从哪来：TCP 命中已连接 socket，UDP 必然落到监听 socket
+
+`lookup_tcp_socket`（`native/tc.bpf.c`）先 `skc_lookup_tcp`，用的是报文里原来的 dport。送达路径上
+那个 dport 是客户端自己连出去时的远端端口，所以 **`skc_lookup_tcp` 直接命中客户端那条已连接的 socket**，
+`state != BPF_TCP_LISTEN` 就地返回；sockmap 只是它找不到时的回落分支。
+
+`lookup_udp_socket` 只有 `sk_lookup_udp` 一条路，tuple 是 `(saddr=local, daddr=remote,
+sport=local_port, dport=control->listener_port)`——dport 被换成了监听端口，这不是 UDP 哈希表的键，
+客户端那条已连接 socket 也匹配不上，所以只能命中监听 socket。
+
+### 15.4 一次失败的优化尝试：给 UDP 也加 sockmap 快路径
+
+动机：既然 TCP 便宜是因为查找命中，UDP 贵是因为每次都要"走链"，那就把 UDP 监听 socket 也预先进
+SOCKMAP，让 `lookup_udp_socket` 一步命中。
+
+先做零风险探测：写了个临时工具把 udp4/udp6 监听 socket 的 fd 用 `ebpf.Update` 塞进
+`BPF_MAP_TYPE_SOCKMAP`，设备实测两个方向都 `err=<nil>`——这颗 6.1.138 内核**允许 UDP socket 进
+SOCKMAP**，可以做。
+
+实现（`tc_listener_sockets` 从 2 槽扩到 4 槽，`SB_TC_LISTENER_UDP4/UDP6`，`lookup_udp_socket` 先查
+sockmap、未命中再回落原 tuple 查找，用户态 `RegisterUDPListener` + `registerTCUDPListeners`
+注册，失败只打 Debug 不拖垮入站），重编对象、真机跑：
+
+| 版本 | `sb_tc_deliver` | 单次 | `sb_tc_local_l2` | 总 eBPF 时间 |
+| --- | --- | --- | --- | --- |
+| 只有 tuple 查找 | 160,800 次 538.6ms | 3343ns | 325ns | 1949ms |
+| 加了 sockmap 快路径 | 160,800 次 583.3ms | **3627ns** | 400ns | ~2000ms |
+
+**没有变快，反而略慢约 280ns（接近一次多余 map lookup 的量）。** 为了分清"快路径没命中、白付一次查找"
+与"命中了但查找本来就不是成本中心"，临时在 miss 分支里借一个可读的统计槽位打点（`tcAssignmentUpdateFailures`，
+正常运行时恒 0），跑一轮 UDP 后读出来是 **0** ——**每次查找都命中 sockmap，一次都没 miss**。
+
+结论：UDP 的 3.3μs 不在 socket 查找上，而在 `bpf_sk_assign` 把一个包交给**监听 socket** 这件事本身；
+查找换成一步命中并不改变 assign 的成本。既然没有收益、还多了两个 map 槽位和一段注册代码，
+**整个改动已回退**（`tc.bpf.c`、`tc.go`、`listener.go`、`inbound_lifecycle.go`、两个 `.o` 与
+`manifest.txt` 全部 `git checkout` 回 `396c0327`）。
+
+### 15.5 因此没有做的
+
+- 不为了这 3.3μs 去换送达机制（比如用户态接手）——那是重写数据面，不是优化。
+- 不改 `data_plane` 的默认值。真要省 CPU 就选 cgroup（211ns/包），代价是 Android 15+ 上 netd 占位
+  程序的接管逻辑（第 12.2 节）以及 UDP cleanup 只能走 LRU 降级。
+- TC 侧的 `sk_assign` 成本是内核行为，我们能改的只有"少 assign 一次"（比如同一 flow 的后续包走更快
+  的短路径），但 UDP 每个包都是独立报文，没有可跳过的依据。
