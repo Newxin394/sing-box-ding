@@ -579,3 +579,38 @@ su -c 'sh /data/local/tmp/costcompare.sh 8 udp'      # 或 tcpconn
 ```
 
 `statsprobe` 用 `BPF_PROG_GET_NEXT_ID` → `BPF_PROG_GET_FD_BY_ID` → `BPF_OBJ_GET_INFO_BY_FD` 遍历所有已加载程序读 `RunTimeNs`/`RunCnt`，不依赖 bpftool（设备上没有）。注意 `struct bpf_prog_info` 里 `RunTimeNs` 在偏移 192、`RunCnt` 在 200，`Name` 在 64。
+### 12.6 gRPC 诊断 RPC 的真机端到端验证
+
+第 8.2 节移植的 `GetEBPFDiagnostics` 此前只在 Windows 上跑过单测，从没在真机上通过 gRPC 调过。这一节补上。
+
+`sing-box api` 走的是配置里的 `api` service（`service/api` 把 `daemon.NewServer` 挂到 h2c 上），所以设备上这样起：
+
+```json
+{
+  "services": [ { "type": "api", "tag": "api", "listen": "127.0.0.1",
+                  "listen_port": 18080, "secret": "devsecret" } ],
+  "inbounds": [ { "type": "ebpf", "tag": "ebpf-in", "network": ["tcp", "udp"],
+                  "local": { "enabled": true, "data_plane": "cgroup" } } ],
+  "outbounds": [ { "type": "direct", "tag": "direct" } ],
+  "route": { "final": "direct" }
+}
+```
+
+```sh
+/data/local/tmp/sb-test run -c test-api.json &
+/data/local/tmp/sb-test api --url http://127.0.0.1:18080 --secret devsecret ebpf
+/data/local/tmp/sb-test api --url http://127.0.0.1:18080 --secret devsecret ebpf --deep
+```
+
+结果（真实输出节选）：
+
+- 浅查询就带齐了 `observedAt` / `state: "normal"` / `localEnabled` / `localDataPlane: "cgroup"` / `attachments[]` / `udpReplySockets` / `counters`。
+- `--deep` 额外给到 `udpNAT`、`localBypassRuleSet`（`consistent: true`、`policyVersion: 1`）和 `kernelRuntime`（程序列表 + 每个 map 的 `maxEntries`/`entries`/`pressure`，例如 `sb_self_sockets` 65536 容量用了 5 条、`pressure: "healthy"`）。
+- 响应尾部 `"schemaVersion": 18`，与 `adapter.EBPFDiagnosticsSchemaVersion` 一致。
+- 启动日志：`eBPF inbound started: paths=[local=cgroup] mounts=[/sys/fs/cgroup(local,cgroup)] waiting_for_interface=[none] fakeip_icmp=[off]`。
+- 运行期间抓到了真实设备流量被接管：`inbound connection from 127.0.0.1:40962` → `inbound connection to 157.255.131.101:23861`。
+
+两个注意点：
+
+- `local.enabled` 接管的是**整机 cgroup**，所以这个配置一跑起来就真的在代理系统流量，测完必须 `pkill -f sb-test`。
+- `attachments[].interfaceName` 在 cgroup 模式下报的是挂载路径（`/sys/fs/cgroup`），`interfaceIndex` 是 0。字段名是历史包袱，上游同款，改字段名会破坏 proto 兼容性，先记着。
