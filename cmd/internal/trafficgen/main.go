@@ -32,10 +32,8 @@ const dnsQuery = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" +
 // recvmsg hook too, at a rate the resolver tolerates.
 func runUDPFlood(deadline time.Time, workers int, external bool, sent, received *atomic.Int64) {
 	var group sync.WaitGroup
-	for worker := 0; worker < workers; worker++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+	for range workers {
+		group.Go(func() {
 			target := "192.0.2.1:53"
 			if external {
 				target = "223.5.5.5:53"
@@ -47,7 +45,7 @@ func runUDPFlood(deadline time.Time, workers int, external bool, sent, received 
 			defer conn.Close()
 			buffer := make([]byte, 2048)
 			for time.Now().Before(deadline) {
-				for batch := 0; batch < 64; batch++ {
+				for range 64 {
 					if _, writeErr := conn.Write([]byte(dnsQuery)); writeErr != nil {
 						break
 					}
@@ -65,7 +63,7 @@ func runUDPFlood(deadline time.Time, workers int, external bool, sent, received 
 					time.Sleep(5 * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 	group.Wait()
 }
@@ -77,10 +75,8 @@ func runUDPFlood(deadline time.Time, workers int, external bool, sent, received 
 // running the connect is answered by its local listener instead.
 func runTCPConnect(deadline time.Time, workers int, sent, received *atomic.Int64) {
 	var group sync.WaitGroup
-	for worker := 0; worker < workers; worker++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+	for range workers {
+		group.Go(func() {
 			dialer := net.Dialer{Timeout: 10 * time.Millisecond}
 			for time.Now().Before(deadline) {
 				sent.Add(1)
@@ -91,7 +87,7 @@ func runTCPConnect(deadline time.Time, workers int, sent, received *atomic.Int64
 				received.Add(1)
 				_ = conn.Close()
 			}
-		}()
+		})
 	}
 	group.Wait()
 }
@@ -128,17 +124,15 @@ func runTCPLocal(deadline time.Time, sent, received *atomic.Int64) {
 		}
 	}()
 	var group sync.WaitGroup
-	for worker := 0; worker < 4; worker++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+	for range 4 {
+		group.Go(func() {
 			buffer := make([]byte, 32*1024)
 			for time.Now().Before(deadline) {
 				conn, dialErr := net.Dial("tcp", listener.Addr().String())
 				if dialErr != nil {
 					continue
 				}
-				for index := 0; index < 64; index++ {
+				for range 64 {
 					if _, writeErr := conn.Write(buffer); writeErr != nil {
 						break
 					}
@@ -152,7 +146,7 @@ func runTCPLocal(deadline time.Time, sent, received *atomic.Int64) {
 				}
 				_ = conn.Close()
 			}
-		}()
+		})
 	}
 	group.Wait()
 }
@@ -168,10 +162,8 @@ func runHTTP(deadline time.Time, url string, sent, received *atomic.Int64) {
 		Timeout: 20 * time.Second,
 	}
 	var group sync.WaitGroup
-	for worker := 0; worker < 2; worker++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+	for range 2 {
+		group.Go(func() {
 			buffer := make([]byte, 64*1024)
 			for time.Now().Before(deadline) {
 				response, err := client.Get(url)
@@ -184,7 +176,7 @@ func runHTTP(deadline time.Time, url string, sent, received *atomic.Int64) {
 				received.Add(read)
 				sent.Add(read)
 			}
-		}()
+		})
 	}
 	group.Wait()
 }
