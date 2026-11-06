@@ -104,8 +104,8 @@ type Inbound struct {
 	preMatchHostAddresses    []netip.Addr
 	fakeIPIPv4Prefix         netip.Prefix
 	fakeIPIPv6Prefix         netip.Prefix
-	bypassExcludeIPv4        netip.Prefix
-	bypassExcludeIPv6        netip.Prefix
+	bypassExcludeIPv4        []netip.Prefix
+	bypassExcludeIPv6        []netip.Prefix
 	fakeIPICMPReply          bool
 	flowMapCapacity          commonEBPF.FlowMapCapacities
 	cgroupMapCapacity        commonEBPF.CgroupMapCapacity
@@ -391,7 +391,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err = inbound.normalizeFakeIPPrefixes(); err != nil {
 		return nil, err
 	}
-	if err = validateBypassExcludeFakeIP(
+	if err = validateMustInterceptCapacity(
+		localEnabled, localDataPlane, sharedEnabled,
 		inbound.bypassExcludeIPv4, inbound.bypassExcludeIPv6,
 		inbound.fakeIPIPv4Prefix, inbound.fakeIPIPv6Prefix,
 	); err != nil {

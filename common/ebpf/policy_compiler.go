@@ -18,11 +18,11 @@ type PolicyConfig struct {
 	FakeIPIPv4          netip.Prefix
 	FakeIPIPv6          netip.Prefix
 	// ForceInterceptIPv4/IPv6 are non-FakeIP destinations that must be
-	// intercepted before every bypass decision (bypass_exclude). The kernel has
-	// one force-intercept slot per family, shared with FakeIP, so a valid
-	// ForceIntercept prefix may only be set where that family has no FakeIP.
-	ForceInterceptIPv4 netip.Prefix
-	ForceInterceptIPv6 netip.Prefix
+	// intercepted before every bypass decision (bypass_exclude). They end up in
+	// the same kernel set as the FakeIP range, because both mean "intercept
+	// unconditionally", so a family may carry several of them.
+	ForceInterceptIPv4 []netip.Prefix
+	ForceInterceptIPv6 []netip.Prefix
 	IncludeSourceCIDR  []netip.Prefix
 	ExcludeSourceCIDR  []netip.Prefix
 	IncludeSourceMAC   []MACAddress
@@ -41,8 +41,8 @@ type CompiledPolicy struct {
 	sharedBypassPrivate     bool
 	fakeIPIPv4              netip.Prefix
 	fakeIPIPv6              netip.Prefix
-	forceInterceptIPv4      netip.Prefix
-	forceInterceptIPv6      netip.Prefix
+	mustInterceptIPv4       []netip.Prefix
+	mustInterceptIPv6       []netip.Prefix
 	includeSource           dualStackCIDRPrefixes
 	excludeSource           dualStackCIDRPrefixes
 	includeSourceMAC        []MACAddress
@@ -64,11 +64,11 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
-	forceInterceptIPv4, err := compileForceInterceptPrefix("IPv4", fakeIPIPv4, config.ForceInterceptIPv4, true)
+	mustInterceptIPv4, err := compileMustInterceptPrefixes("IPv4", fakeIPIPv4, config.ForceInterceptIPv4, true)
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
-	forceInterceptIPv6, err := compileForceInterceptPrefix("IPv6", fakeIPIPv6, config.ForceInterceptIPv6, false)
+	mustInterceptIPv6, err := compileMustInterceptPrefixes("IPv6", fakeIPIPv6, config.ForceInterceptIPv6, false)
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
@@ -107,8 +107,8 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 		sharedBypassPrivate:     config.SharedBypassPrivate,
 		fakeIPIPv4:              fakeIPIPv4,
 		fakeIPIPv6:              fakeIPIPv6,
-		forceInterceptIPv4:      forceInterceptIPv4,
-		forceInterceptIPv6:      forceInterceptIPv6,
+		mustInterceptIPv4:       mustInterceptIPv4,
+		mustInterceptIPv6:       mustInterceptIPv6,
 		includeSource:           dualStackCIDRPrefixes{ipv4: includeIPv4, ipv6: includeIPv6},
 		excludeSource:           dualStackCIDRPrefixes{ipv4: excludeIPv4, ipv6: excludeIPv6},
 		includeSourceMAC:        slices.Clone(config.IncludeSourceMAC),
@@ -118,21 +118,43 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 	}, nil
 }
 
-// compileForceInterceptPrefix resolves the single kernel force-intercept slot
-// for one address family. FakeIP owns the slot when configured; otherwise an
-// explicit bypass_exclude prefix may use it.
-func compileForceInterceptPrefix(family string, fakeIP, explicit netip.Prefix, ipv4 bool) (netip.Prefix, error) {
-	explicit, err := normalizeAddressPrefix(family+" force-intercept prefix", explicit, ipv4)
-	if err != nil {
-		return netip.Prefix{}, err
+// compileMustInterceptPrefixes resolves the must-intercept set for one address
+// family: the FakeIP range of that family (when configured) unioned with the
+// explicit bypass_exclude prefixes. Both mean "intercept before any bypass
+// decision", so they share one set, and a set rather than a single slot is what
+// lets bypass_exclude carry several prefixes. This replaces the former
+// behaviour of refusing a configuration that set both.
+func compileMustInterceptPrefixes(family string, fakeIP netip.Prefix, explicit []netip.Prefix, ipv4 bool) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(explicit)+1)
+	if fakeIP.IsValid() {
+		prefixes = append(prefixes, fakeIP)
 	}
-	if fakeIP.IsValid() && explicit.IsValid() {
-		return netip.Prefix{}, E.New(family, " force-intercept prefix ", explicit, " conflicts with FakeIP range ", fakeIP)
+	for _, prefix := range explicit {
+		normalized, err := normalizeAddressPrefix(family+" bypass_exclude prefix", prefix, ipv4)
+		if err != nil {
+			return nil, err
+		}
+		if slices.Contains(prefixes, normalized) {
+			continue
+		}
+		prefixes = append(prefixes, normalized)
 	}
-	if explicit.IsValid() {
-		return explicit, nil
+	if len(prefixes) > maxMustInterceptPolicyEntries {
+		return nil, E.New(family, " must-intercept configuration has ", len(prefixes),
+			" prefixes, more than the eBPF map holds (", maxMustInterceptPolicyEntries, ")")
 	}
-	return fakeIP, nil
+	return prefixes, nil
+}
+
+// firstPrefix is what the single-slot data planes (cgroup and shared) can
+// express. Configuration refuses to enable one of them for a family whose
+// must-intercept set has more than one entry, so reading the first entry here
+// is not a silent truncation on those planes.
+func firstPrefix(prefixes []netip.Prefix) netip.Prefix {
+	if len(prefixes) == 0 {
+		return netip.Prefix{}
+	}
+	return prefixes[0]
 }
 
 func compilePortPolicy(ranges []PortRange, enableTCP, enableUDP bool) ([]tcPortKey, error) {

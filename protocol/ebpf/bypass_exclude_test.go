@@ -13,18 +13,25 @@ func TestNormalizeBypassExclude(t *testing.T) {
 	v4 := netip.MustParsePrefix("100.64.0.0/10")
 	v6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
 	gotV4, gotV6, err := normalizeBypassExclude("local.bypass_exclude", []netip.Prefix{v4, v6, v4})
-	if err != nil || gotV4 != v4 || gotV6 != v6 {
-		t.Fatalf("valid v4+v6 rejected: %v %v %v", gotV4, gotV6, err)
+	if err != nil {
+		t.Fatalf("valid v4+v6 rejected: %v", err)
 	}
-	if _, _, err = normalizeBypassExclude("x", []netip.Prefix{v4, netip.MustParsePrefix("10.0.0.0/8")}); err == nil {
-		t.Fatal("two IPv4 prefixes accepted")
+	if len(gotV4) != 1 || gotV4[0] != v4 || len(gotV6) != 1 || gotV6[0] != v6 {
+		t.Fatalf("unexpected normalization: %v %v", gotV4, gotV6)
 	}
-	if _, _, err = normalizeBypassExclude("x", []netip.Prefix{v6, netip.MustParsePrefix("fd00::/8")}); err == nil {
-		t.Fatal("two IPv6 prefixes accepted")
+	// A family may carry several prefixes now; the must-intercept set is a trie.
+	secondV4 := netip.MustParsePrefix("10.0.0.0/8")
+	gotV4, _, err = normalizeBypassExclude("x", []netip.Prefix{v4, secondV4})
+	if err != nil || len(gotV4) != 2 || gotV4[0] != v4 || gotV4[1] != secondV4 {
+		t.Fatalf("two IPv4 prefixes rejected: %v %v", gotV4, err)
 	}
-	mapped, _, err := normalizeBypassExclude("x", []netip.Prefix{netip.MustParsePrefix("::ffff:100.64.0.0/106")})
-	if err != nil || mapped != v4 {
-		t.Fatalf("IPv4-mapped prefix not converted: %v %v", mapped, err)
+	secondV6 := netip.MustParsePrefix("fd00::/8")
+	if _, gotV6, err = normalizeBypassExclude("x", []netip.Prefix{v6, secondV6}); err != nil || len(gotV6) != 2 {
+		t.Fatalf("two IPv6 prefixes rejected: %v %v", gotV6, err)
+	}
+	mappedV4, _, err := normalizeBypassExclude("x", []netip.Prefix{netip.MustParsePrefix("::ffff:100.64.0.0/106")})
+	if err != nil || len(mappedV4) != 1 || mappedV4[0] != v4 {
+		t.Fatalf("IPv4-mapped prefix not converted: %v %v", mappedV4, err)
 	}
 	if _, _, err = normalizeBypassExclude("x", []netip.Prefix{netip.MustParsePrefix("::ffff:0:0/80")}); err == nil {
 		t.Fatal("over-wide IPv4-mapped prefix accepted")
@@ -36,37 +43,55 @@ func TestNormalizeBypassExclude(t *testing.T) {
 	}
 }
 
-func TestResolveBypassExclude(t *testing.T) {
+// TestResolveBypassExcludeUnionsScopes covers the second half of the change:
+// local and shared used to have to name the same prefix because the kernel held
+// one slot, and they are unioned into the one trie the TC classifier reads now.
+func TestResolveBypassExcludeUnionsScopes(t *testing.T) {
 	a := netip.MustParsePrefix("100.64.0.0/10")
 	b := netip.MustParsePrefix("10.8.0.0/16")
-	if _, _, err := resolveBypassExclude(true, []netip.Prefix{a}, true, []netip.Prefix{b}); err == nil {
-		t.Fatal("differing local/shared IPv4 prefixes accepted")
+	v4, _, err := resolveBypassExclude(true, []netip.Prefix{a}, true, []netip.Prefix{b})
+	if err != nil {
+		t.Fatalf("differing local/shared IPv4 prefixes rejected: %v", err)
 	}
-	v4, _, err := resolveBypassExclude(true, []netip.Prefix{a}, true, []netip.Prefix{a})
-	if err != nil || v4 != a {
-		t.Fatalf("identical local/shared prefix rejected: %v %v", v4, err)
+	if len(v4) != 2 || v4[0] != a || v4[1] != b {
+		t.Fatalf("unexpected union: %v", v4)
+	}
+	v4, _, err = resolveBypassExclude(true, []netip.Prefix{a}, true, []netip.Prefix{a})
+	if err != nil || len(v4) != 1 || v4[0] != a {
+		t.Fatalf("duplicate prefix not collapsed: %v %v", v4, err)
 	}
 	v4, _, err = resolveBypassExclude(false, []netip.Prefix{a}, true, []netip.Prefix{b})
-	if err != nil || v4 != b {
+	if err != nil || len(v4) != 1 || v4[0] != b {
 		t.Fatalf("disabled local scope should be ignored: %v %v", v4, err)
 	}
 }
 
-func TestValidateBypassExcludeFakeIP(t *testing.T) {
-	v4 := netip.MustParsePrefix("100.64.0.0/10")
-	v6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
-	if err := validateBypassExcludeFakeIP(v4, v6, netip.Prefix{}, netip.Prefix{}); err != nil {
-		t.Fatal(err)
+// TestValidateMustInterceptCapacity pins the split between the planes: TC holds a
+// set, cgroup and shared hold one prefix per family, and configuration must say
+// so instead of quietly dropping the extra entries.
+func TestValidateMustInterceptCapacity(t *testing.T) {
+	first := netip.MustParsePrefix("100.64.0.0/10")
+	second := netip.MustParsePrefix("10.8.0.0/16")
+	fakeIP := netip.MustParsePrefix("198.18.0.0/15")
+	twoPrefixes := []netip.Prefix{first, second}
+	if err := validateMustInterceptCapacity(true, localDataPlaneCgroup, false, twoPrefixes, nil, netip.Prefix{}, netip.Prefix{}); err == nil {
+		t.Fatal("cgroup data plane accepted two IPv4 must-intercept prefixes")
 	}
-	if err := validateBypassExcludeFakeIP(v4, netip.Prefix{}, netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{}); err == nil {
-		t.Fatal("IPv4 FakeIP slot conflict accepted")
+	if err := validateMustInterceptCapacity(true, localDataPlaneTC, false, twoPrefixes, nil, netip.Prefix{}, netip.Prefix{}); err != nil {
+		t.Fatalf("tc data plane rejected two IPv4 must-intercept prefixes: %v", err)
 	}
-	if err := validateBypassExcludeFakeIP(netip.Prefix{}, v6, netip.Prefix{}, netip.MustParsePrefix("fc00::/18")); err == nil {
-		t.Fatal("IPv6 FakeIP slot conflict accepted")
+	if err := validateMustInterceptCapacity(false, "", true, twoPrefixes, nil, netip.Prefix{}, netip.Prefix{}); err == nil {
+		t.Fatal("shared data plane accepted two IPv4 must-intercept prefixes")
 	}
-	// Different families do not share a slot.
-	if err := validateBypassExcludeFakeIP(v4, netip.Prefix{}, netip.Prefix{}, netip.MustParsePrefix("fc00::/18")); err != nil {
-		t.Fatal(err)
+	// FakeIP occupies the same slot on the single-slot planes, so it counts.
+	if err := validateMustInterceptCapacity(true, localDataPlaneCgroup, false, []netip.Prefix{first}, nil, fakeIP, netip.Prefix{}); err == nil {
+		t.Fatal("cgroup data plane accepted a FakeIP range plus a bypass_exclude prefix")
+	}
+	if err := validateMustInterceptCapacity(true, localDataPlaneTC, false, []netip.Prefix{first}, nil, fakeIP, netip.Prefix{}); err != nil {
+		t.Fatalf("tc data plane rejected FakeIP plus bypass_exclude: %v", err)
+	}
+	if err := validateMustInterceptCapacity(true, localDataPlaneCgroup, false, nil, nil, netip.Prefix{}, netip.Prefix{}); err != nil {
+		t.Fatalf("empty configuration rejected: %v", err)
 	}
 }
 
@@ -81,9 +106,11 @@ func TestBypassExcludeRequiresEnabledScope(t *testing.T) {
 }
 
 func TestRedirectPrefixesAvoidBypassExclude(t *testing.T) {
-	inbound := &Inbound{bypassExcludeIPv4: netip.MustParsePrefix("100.64.0.0/10")}
+	first := netip.MustParsePrefix("100.64.0.0/10")
+	second := netip.MustParsePrefix("10.8.0.0/16")
+	inbound := &Inbound{bypassExcludeIPv4: []netip.Prefix{first, second}}
 	prefixes := inbound.forceInterceptPrefixes()
-	if len(prefixes) != 1 || prefixes[0] != inbound.bypassExcludeIPv4 {
+	if len(prefixes) != 2 || prefixes[0] != first || prefixes[1] != second {
 		t.Fatalf("bypass_exclude missing from redirect exclusion set: %v", prefixes)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -464,86 +465,109 @@ func parsePortRanges(name string, ports []uint16, ranges []string) ([]commonEBPF
 	return merged, nil
 }
 
-// normalizeBypassExclude masks bypass_exclude prefixes and enforces the kernel
-// layout: one force-intercept slot per address family. IPv4-mapped IPv6 input
-// is converted to IPv4. Prefixes touching mandatory safety ranges are refused
-// because the TC classifier checks force-intercept before those safety paths.
-func normalizeBypassExclude(name string, prefixes []netip.Prefix) (ipv4, ipv6 netip.Prefix, err error) {
+// normalizeBypassExclude masks bypass_exclude prefixes, converts IPv4-mapped
+// IPv6 input to IPv4, and refuses any prefix that touches a mandatory safety
+// range, because the TC classifier checks the must-intercept set before those
+// safety paths. Every prefix of a family is kept: the set lives in an LPM trie
+// now, so a family is no longer limited to one entry.
+func normalizeBypassExclude(name string, prefixes []netip.Prefix) (ipv4Prefixes, ipv6Prefixes []netip.Prefix, err error) {
 	for _, prefix := range prefixes {
 		if !prefix.IsValid() {
-			return netip.Prefix{}, netip.Prefix{}, E.New("invalid ", name, " prefix")
+			return nil, nil, E.New("invalid ", name, " prefix")
 		}
 		prefix = prefix.Masked()
 		if prefix.Addr().Is4In6() {
 			if prefix.Bits() < 96 {
-				return netip.Prefix{}, netip.Prefix{}, E.New(name, " IPv4-mapped prefix is wider than ::ffff:0:0/96: ", prefix)
+				return nil, nil, E.New(name, " IPv4-mapped prefix is wider than ::ffff:0:0/96: ", prefix)
 			}
 			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96).Masked()
 		}
 		safety := fakeIPSafetyIPv6Prefixes
-		target := &ipv6
-		family := "IPv6"
 		if prefix.Addr().Is4() {
 			safety = fakeIPSafetyIPv4Prefixes
-			target = &ipv4
-			family = "IPv4"
 		}
 		for _, safetyPrefix := range safety {
 			if prefixesOverlap(prefix, safetyPrefix) {
-				return netip.Prefix{}, netip.Prefix{}, E.New(name, " prefix ", prefix, " overlaps mandatory eBPF safety bypass ", safetyPrefix)
+				return nil, nil, E.New(name, " prefix ", prefix, " overlaps mandatory eBPF safety bypass ", safetyPrefix)
 			}
 		}
-		if target.IsValid() && *target != prefix {
-			return netip.Prefix{}, netip.Prefix{}, E.New(name, " accepts at most one ", family, " prefix; got both ", *target, " and ", prefix)
+		if prefix.Addr().Is4() {
+			if !slices.Contains(ipv4Prefixes, prefix) {
+				ipv4Prefixes = append(ipv4Prefixes, prefix)
+			}
+			continue
 		}
-		*target = prefix
+		if !slices.Contains(ipv6Prefixes, prefix) {
+			ipv6Prefixes = append(ipv6Prefixes, prefix)
+		}
 	}
-	return ipv4, ipv6, nil
+	return ipv4Prefixes, ipv6Prefixes, nil
 }
 
-// resolveBypassExclude merges local and shared bypass_exclude into the shared
-// kernel force-intercept slots. TC socket_assign carries local and shared
-// policy in one control struct, so differing prefixes in one family cannot be
-// represented safely.
-func resolveBypassExclude(localEnabled bool, local []netip.Prefix, sharedEnabled bool, shared []netip.Prefix) (ipv4, ipv6 netip.Prefix, err error) {
-	var localIPv4, localIPv6, sharedIPv4, sharedIPv6 netip.Prefix
+// resolveBypassExclude merges local and shared bypass_exclude into the one
+// must-intercept set the TC classifier applies to both paths: the trie is
+// shared, so the set is the union of the two scopes. Before the set became a
+// trie the scopes had to agree on a single prefix per family, because the
+// kernel literally held one.
+func resolveBypassExclude(localEnabled bool, local []netip.Prefix, sharedEnabled bool, shared []netip.Prefix) (ipv4Prefixes, ipv6Prefixes []netip.Prefix, err error) {
 	if localEnabled {
-		localIPv4, localIPv6, err = normalizeBypassExclude("local.bypass_exclude", local)
-		if err != nil {
-			return netip.Prefix{}, netip.Prefix{}, err
+		localIPv4, localIPv6, localErr := normalizeBypassExclude("local.bypass_exclude", local)
+		if localErr != nil {
+			return nil, nil, localErr
 		}
+		ipv4Prefixes = append(ipv4Prefixes, localIPv4...)
+		ipv6Prefixes = append(ipv6Prefixes, localIPv6...)
 	}
 	if sharedEnabled {
-		sharedIPv4, sharedIPv6, err = normalizeBypassExclude("shared.bypass_exclude", shared)
-		if err != nil {
-			return netip.Prefix{}, netip.Prefix{}, err
+		sharedIPv4, sharedIPv6, sharedErr := normalizeBypassExclude("shared.bypass_exclude", shared)
+		if sharedErr != nil {
+			return nil, nil, sharedErr
+		}
+		for _, prefix := range sharedIPv4 {
+			if !slices.Contains(ipv4Prefixes, prefix) {
+				ipv4Prefixes = append(ipv4Prefixes, prefix)
+			}
+		}
+		for _, prefix := range sharedIPv6 {
+			if !slices.Contains(ipv6Prefixes, prefix) {
+				ipv6Prefixes = append(ipv6Prefixes, prefix)
+			}
 		}
 	}
-	if localIPv4.IsValid() && sharedIPv4.IsValid() && localIPv4 != sharedIPv4 {
-		return netip.Prefix{}, netip.Prefix{}, E.New("local and shared IPv4 bypass_exclude prefixes differ: ", localIPv4, " vs ", sharedIPv4)
-	}
-	if localIPv6.IsValid() && sharedIPv6.IsValid() && localIPv6 != sharedIPv6 {
-		return netip.Prefix{}, netip.Prefix{}, E.New("local and shared IPv6 bypass_exclude prefixes differ: ", localIPv6, " vs ", sharedIPv6)
-	}
-	ipv4 = localIPv4
-	if !ipv4.IsValid() {
-		ipv4 = sharedIPv4
-	}
-	ipv6 = localIPv6
-	if !ipv6.IsValid() {
-		ipv6 = sharedIPv6
-	}
-	return ipv4, ipv6, nil
+	return ipv4Prefixes, ipv6Prefixes, nil
 }
 
-func validateBypassExcludeFakeIP(bypassIPv4, bypassIPv6, fakeIPv4, fakeIPv6 netip.Prefix) error {
-	if bypassIPv4.IsValid() && fakeIPv4.IsValid() {
-		return E.New("IPv4 bypass_exclude ", bypassIPv4, " conflicts with the FakeIP force-intercept prefix ", fakeIPv4,
-			"; use redir-host DNS or remove one of them")
+// validateMustInterceptCapacity refuses a configuration a single-slot data plane
+// cannot express. The cgroup and shared control blocks still carry one
+// must-intercept prefix per family, while the TC data plane keeps an LPM trie.
+// Feeding those planes only the first prefix would look as if the remaining
+// bypass_exclude entries silently did nothing, so refuse the configuration and
+// name the plane that cannot hold it.
+func validateMustInterceptCapacity(localEnabled bool, localDataPlane string, sharedEnabled bool, bypassIPv4, bypassIPv6 []netip.Prefix, fakeIPv4, fakeIPv6 netip.Prefix) error {
+	var singleSlot string
+	switch {
+	case localEnabled && localDataPlane != localDataPlaneTC:
+		singleSlot = "local.data_plane=" + localDataPlane
+	case sharedEnabled:
+		singleSlot = "the shared data plane"
+	default:
+		return nil
 	}
-	if bypassIPv6.IsValid() && fakeIPv6.IsValid() {
-		return E.New("IPv6 bypass_exclude ", bypassIPv6, " conflicts with the FakeIP force-intercept prefix ", fakeIPv6,
-			"; use redir-host DNS or remove one of them")
+	ipv4Count := len(bypassIPv4)
+	if fakeIPv4.IsValid() {
+		ipv4Count++
+	}
+	if ipv4Count > 1 {
+		return E.New(singleSlot, " carries one IPv4 must-intercept prefix, but this configuration needs ", ipv4Count,
+			" (the FakeIP range plus bypass_exclude); use local.data_plane=tc or configure one prefix")
+	}
+	ipv6Count := len(bypassIPv6)
+	if fakeIPv6.IsValid() {
+		ipv6Count++
+	}
+	if ipv6Count > 1 {
+		return E.New(singleSlot, " carries one IPv6 must-intercept prefix, but this configuration needs ", ipv6Count,
+			" (the FakeIP range plus bypass_exclude); use local.data_plane=tc or configure one prefix")
 	}
 	return nil
 }

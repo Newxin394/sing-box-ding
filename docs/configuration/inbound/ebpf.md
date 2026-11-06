@@ -310,12 +310,18 @@ Destination prefixes force-intercepted before every local bypass decision
 (private address, port, DNS mode, UID and bypass rule-set), for example a
 Tailscale/CGNAT range `100.64.0.0/10`.
 
-At most one IPv4 and one IPv6 prefix is accepted because the kernel keeps one
-force-intercept slot per family. FakeIP uses the same slot: configuring a
-FakeIP range and `bypass_exclude` for the same family is rejected at startup.
-Prefixes overlapping mandatory safety ranges (loopback, `0.0.0.0/8`,
-multicast) are rejected. When local and shared are both enabled, their
-prefixes for one family must be identical.
+Any number of IPv4 and IPv6 prefixes may be listed. They are kept in an LPM
+trie holding the must-intercept set of their family: the FakeIP range, when that
+family has one, plus every `bypass_exclude` prefix, because both mean "intercept
+before any bypass decision". Prefixes overlapping mandatory safety ranges
+(loopback, `0.0.0.0/8`, multicast) are rejected. When local and shared are both
+enabled their prefixes are merged into that one set, since the TC classifier
+reads a single trie for both paths.
+
+The `cgroup` local data plane and the shared data plane still hold one
+must-intercept prefix per family in their control block, so enabling one of them
+together with more than one prefix in a family is rejected at startup instead of
+silently intercepting only the first one.
 
 #### local.bypass_selector
 

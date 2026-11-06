@@ -38,7 +38,16 @@ const (
 const (
 	tcFlagBypassIPv4 = 1 << 8
 	tcFlagBypassIPv6 = 1 << 9
+	// The must-intercept set is an LPM trie per family now, so these bits only
+	// carry "a set exists for this family" rather than "this prefix is it".
+	tcFlagMustInterceptIPv4 = 1 << 10
+	tcFlagMustInterceptIPv6 = 1 << 11
 )
+
+// maxMustInterceptPolicyEntries bounds the must-intercept tries. They hold the
+// FakeIP range and the bypass_exclude prefixes, never flow state, so the
+// ceiling only has to cover a hand-written list.
+const maxMustInterceptPolicyEntries = 1024
 
 // DefaultTCRoutingMark is used only by standalone backend tests and callers
 // that do not install policy routing. The TC data plane selects a free mark
@@ -132,10 +141,12 @@ type tcControl struct {
 	// a rebuilt data plane can tell its own assignments from those of the
 	// topology it replaced instead of waiting out the idle window.
 	NetworkGeneration uint16
-	FakeIPIPv4Prefix  [4]byte
-	FakeIPIPv4Mask    [4]byte
-	FakeIPIPv6Prefix  [16]byte
-	FakeIPIPv6Mask    [16]byte
+	// Reserved is the control block's tail padding, spelled out instead of left
+	// implicit so this struct and the kernel's agree byte for byte. The
+	// must-intercept prefixes that used to live here are LPM tries now
+	// (mustInterceptIPv4/6), because one prefix per family could not express
+	// several bypass_exclude entries.
+	Reserved [2]byte
 }
 
 type tcAssignKey struct {
@@ -224,8 +235,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	uidEntries := policy.uidEntries
 	fakeIPIPv4 := policy.fakeIPIPv4
 	fakeIPIPv6 := policy.fakeIPIPv6
-	forceInterceptIPv4 := policy.forceInterceptIPv4
-	forceInterceptIPv6 := policy.forceInterceptIPv6
+	mustInterceptIPv4 := policy.mustInterceptIPv4
+	mustInterceptIPv6 := policy.mustInterceptIPv6
 	includeIPv4, includeIPv6 := policy.includeSource.ipv4, policy.includeSource.ipv6
 	excludeIPv4, excludeIPv6 := policy.excludeSource.ipv4, policy.excludeSource.ipv6
 	if err = checkLPMTriePolicyCompatibility(
@@ -243,6 +254,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_uid_policy":          {name: "sb_tc_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(uidEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_bypass_ipv4":         {name: "sb_tc_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
 		"tc_bypass_ipv6":         {name: "sb_tc_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
+		"tc_must_intercept_ipv4": {name: "sb_tc_must4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxMustInterceptPolicyEntries, flags: bpfFlagNoPrealloc},
+		"tc_must_intercept_ipv6": {name: "sb_tc_must6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxMustInterceptPolicyEntries, flags: bpfFlagNoPrealloc},
 		"tc_include_source_ipv4": {name: "sb_tc_insrc4", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(includeIPv4)), 1), flags: bpfFlagNoPrealloc},
 		"tc_include_source_ipv6": {name: "sb_tc_insrc6", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(includeIPv6)), 1), flags: bpfFlagNoPrealloc},
 		"tc_exclude_source_ipv4": {name: "sb_tc_exsrc4", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(excludeIPv4)), 1), flags: bpfFlagNoPrealloc},
@@ -292,15 +305,11 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if len(policy.excludeSourceMAC) > 0 {
 		controlValue.Flags |= 1 << 15
 	}
-	if forceInterceptIPv4.IsValid() {
-		controlValue.Flags |= 1 << 10
-		controlValue.FakeIPIPv4Prefix = forceInterceptIPv4.Addr().As4()
-		controlValue.FakeIPIPv4Mask = prefixMask4(forceInterceptIPv4.Bits())
+	if len(mustInterceptIPv4) > 0 {
+		controlValue.Flags |= tcFlagMustInterceptIPv4
 	}
-	if forceInterceptIPv6.IsValid() {
-		controlValue.Flags |= 1 << 11
-		controlValue.FakeIPIPv6Prefix = forceInterceptIPv6.Addr().As16()
-		controlValue.FakeIPIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
+	if len(mustInterceptIPv6) > 0 {
+		controlValue.Flags |= tcFlagMustInterceptIPv6
 	}
 	backend := &TCBackend{
 		runtime:         &tcRuntime{maps: maps, programs: loadedPrograms},
@@ -316,6 +325,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	// reported rather than discarded — calling Close does not by itself mean the
 	// maps and programs it held were actually released, and an error out of it is
 	// exactly the case where they may not have been.
+	if err = backend.installMustInterceptEntries(mustInterceptIPv4, mustInterceptIPv6); err != nil {
+		return nil, E.Errors(err, backend.Close())
+	}
 	if err = backend.updateControlLocked(); err != nil {
 		return nil, E.Errors(err, backend.Close())
 	}
@@ -472,6 +484,19 @@ func (b *TCBackend) NetworkGeneration() uint16 {
 	return b.control.NetworkGeneration
 }
 
+// installMustInterceptEntries fills the two must-intercept tries. It runs while
+// the backend is still being prepared and therefore unpublished, so it takes no
+// lock: there is nothing else that could observe the maps half filled.
+func (b *TCBackend) installMustInterceptEntries(ipv4Prefixes, ipv6Prefixes []netip.Prefix) error {
+	if err := replaceCIDRPolicyMap(b.runtime.maps["tc_must_intercept_ipv4"], nil, ipv4Prefixes); err != nil {
+		return E.Cause(err, "install IPv4 must-intercept prefixes")
+	}
+	if err := replaceCIDRPolicyMap(b.runtime.maps["tc_must_intercept_ipv6"], nil, ipv6Prefixes); err != nil {
+		return E.Cause(err, "install IPv6 must-intercept prefixes")
+	}
+	return nil
+}
+
 func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 	return policyVector{
 		EnableTCP:           config.EnableTCP,
@@ -485,8 +510,8 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		SharedBypassPrivate: policy.sharedBypassPrivate,
 		LocalBypassPort:     len(policy.localBypassPortEntries) > 0,
 		SharedBypassPort:    len(policy.sharedBypassPortEntries) > 0,
-		FakeIPIPv4:          policy.forceInterceptIPv4.IsValid(),
-		FakeIPIPv6:          policy.forceInterceptIPv6.IsValid(),
+		FakeIPIPv4:          len(policy.mustInterceptIPv4) > 0,
+		FakeIPIPv6:          len(policy.mustInterceptIPv6) > 0,
 		IncludeSource:       len(policy.includeSource.ipv4)+len(policy.includeSource.ipv6) > 0,
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,

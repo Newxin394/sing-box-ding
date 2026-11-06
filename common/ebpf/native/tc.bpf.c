@@ -45,8 +45,13 @@
 #define SB_TC_FLAG_SHARED_BYPASS_PRIVATE (1U << 7)
 #define SB_TC_FLAG_BYPASS_IPV4 (1U << 8)
 #define SB_TC_FLAG_BYPASS_IPV6 (1U << 9)
-#define SB_TC_FLAG_FAKEIP_IPV4 (1U << 10)
-#define SB_TC_FLAG_FAKEIP_IPV6 (1U << 11)
+/*
+ * The must-intercept set (FakeIP ranges plus every bypass_exclude prefix) is an
+ * LPM trie per family now, so these bits only say whether such a set exists for
+ * that family; the prefixes themselves are no longer part of the control block.
+ */
+#define SB_TC_FLAG_MUST_INTERCEPT_IPV4 (1U << 10)
+#define SB_TC_FLAG_MUST_INTERCEPT_IPV6 (1U << 11)
 #define SB_TC_FLAG_INCLUDE_SOURCE (1U << 12)
 #define SB_TC_FLAG_EXCLUDE_SOURCE (1U << 13)
 #define SB_TC_FLAG_INCLUDE_SOURCE_MAC (1U << 14)
@@ -68,6 +73,13 @@
 #define SB_TC_LISTENER_TCP6 1U
 #define SB_TC_LISTENER_COUNT 2U
 
+/*
+ * Must-intercept entries are configuration, not flow state: one trie per family
+ * holding the FakeIP range (if any) and the bypass_exclude prefixes, so the
+ * ceiling only has to cover a hand-written list.
+ */
+#define SB_TC_MUST_INTERCEPT_ENTRIES 1024U
+
 #define SB_TC_PATH_SHARED 1U
 #define SB_TC_PATH_DELIVERY 2U
 #define SB_TC_PATH_SOURCE_MAC_VALID 0x80U
@@ -88,10 +100,18 @@ struct sb_tc_control {
      * previous topology" instead of waiting out the idle window.
      */
     __u16 network_generation;
-    __u8 fakeip_ipv4_prefix[4];
-    __u8 fakeip_ipv4_mask[4];
-    __u8 fakeip_ipv6_prefix[16];
-    __u8 fakeip_ipv6_mask[16];
+    /*
+     * Tail padding, spelled out instead of left implicit. cilium/ebpf sizes a
+     * map value by the sum of its field widths, so a control block whose
+     * compiler padding carries it from 30 to 32 bytes would not unmarshal into
+     * a Go struct of the same layout.
+     *
+     * The four fixed-size prefix/mask fields this struct used to carry are
+     * gone: the must-intercept sets live in tc_must_intercept_ipv4/ipv6 now,
+     * because one prefix per family could not express several bypass_exclude
+     * entries.
+     */
+    __u8 reserved[2];
 };
 
 struct sb_tc_uid_key {
@@ -164,15 +184,17 @@ struct sb_tc_assign_value {
     __u8 reserved[2];
 };
 
-_Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
+_Static_assert(sizeof(struct sb_tc_control) == 32, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
     "sb_tc_control delivery_ifindex ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, routing_mark) == 12,
     "sb_tc_control routing_mark ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
     "sb_tc_control listener_port ABI offset");
-_Static_assert(__builtin_offsetof(struct sb_tc_control, fakeip_ipv6_mask) == 54,
-    "sb_tc_control fakeip_ipv6_mask ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_control, network_generation) == 28,
+    "sb_tc_control network_generation ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_control, reserved) == 30,
+    "sb_tc_control reserved ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
 _Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
@@ -253,6 +275,8 @@ MAP(tc_self_sockets, __u64, __u32, BPF_MAP_TYPE_LRU_HASH, 65536U);
 MAP(tc_uid_policy, struct sb_tc_uid_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
 MAP(tc_bypass_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 65536U);
 MAP(tc_bypass_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 65536U);
+MAP(tc_must_intercept_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, SB_TC_MUST_INTERCEPT_ENTRIES);
+MAP(tc_must_intercept_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, SB_TC_MUST_INTERCEPT_ENTRIES);
 MAP(tc_include_source_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
 MAP(tc_include_source_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
 MAP(tc_exclude_source_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
@@ -396,22 +420,26 @@ INLINE bool private_destination(const struct sb_tc_assign_key *key) {
     return sb_ebpf_ipv6_private_address(key->destination_addr);
 }
 
-INLINE bool must_intercept_fakeip(const struct sb_tc_control *control,
+/*
+ * Must-intercept destinations win over every bypass decision, so this check
+ * runs first in both the local and the shared selection path. The set is the
+ * union of the FakeIP range and the bypass_exclude prefixes, kept in one trie
+ * per family: the two paths share one configuration today, and a single trie
+ * expresses "any of these prefixes must be intercepted" without the one-prefix
+ * limit the old control-block slot had.
+ */
+INLINE bool must_intercept_destination(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key) {
     if (key->family == AF_INET_VALUE) {
-        return sb_ebpf_must_intercept_fakeip_ipv4(
-            key->destination_addr,
-            control->flags,
-            SB_TC_FLAG_FAKEIP_IPV4,
-            control->fakeip_ipv4_prefix,
-            control->fakeip_ipv4_mask);
+        if ((control->flags & SB_TC_FLAG_MUST_INTERCEPT_IPV4) == 0U) return false;
+        struct sb_tc_ipv4_lpm_key lookup = {.prefixlen = 32U};
+        __builtin_memcpy(lookup.address, key->destination_addr, 4U);
+        return map_lookup(&tc_must_intercept_ipv4, &lookup) != 0;
     }
-    return sb_ebpf_must_intercept_fakeip_ipv6(
-        key->destination_addr,
-        control->flags,
-        SB_TC_FLAG_FAKEIP_IPV6,
-        control->fakeip_ipv6_prefix,
-        control->fakeip_ipv6_mask);
+    if ((control->flags & SB_TC_FLAG_MUST_INTERCEPT_IPV6) == 0U) return false;
+    struct sb_tc_ipv6_lpm_key lookup = {.prefixlen = 128U};
+    __builtin_memcpy(lookup.address, key->destination_addr, 16U);
+    return map_lookup(&tc_must_intercept_ipv6, &lookup) != 0;
 }
 
 INLINE bool bypass_destination(const struct sb_tc_control *control,
@@ -471,7 +499,7 @@ INLINE bool source_mac_selected(const struct sb_tc_control *control, const __u8 
 
 INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, __u32 socket_metadata_value) {
-    if (must_intercept_fakeip(control, key)) return true;
+    if (must_intercept_destination(control, key)) return true;
     if (dns_bypassed(key->protocol, key->destination_port, control->local_dns_mode)) return false;
     if (dns_selected(key->protocol, key->destination_port, control->local_dns_mode)) return true;
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_POLICY_BYPASS) != 0U) return false;
@@ -485,7 +513,7 @@ INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *co
 
 INLINE bool shared_selected(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, const __u8 source_mac[6]) {
-    if (must_intercept_fakeip(control, key)) return true;
+    if (must_intercept_destination(control, key)) return true;
     if (dns_bypassed(key->protocol, key->destination_port, control->shared_dns_mode)) return false;
     if (dns_selected(key->protocol, key->destination_port, control->shared_dns_mode)) return true;
     if (!source_address_selected(control, key) || !source_mac_selected(control, source_mac)) return false;

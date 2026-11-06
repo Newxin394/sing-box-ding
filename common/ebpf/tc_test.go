@@ -9,7 +9,7 @@ import (
 )
 
 func TestTCABI(t *testing.T) {
-	if size := unsafe.Sizeof(tcControl{}); size != 72 {
+	if size := unsafe.Sizeof(tcControl{}); size != 32 {
 		t.Fatalf("unexpected TC control size: %d", size)
 	}
 	if offset := unsafe.Offsetof(tcControl{}.RoutingMark); offset != 12 {
@@ -21,8 +21,11 @@ func TestTCABI(t *testing.T) {
 	if offset := unsafe.Offsetof(tcControl{}.ListenerPort); offset != 16 {
 		t.Fatalf("unexpected TC listener port offset: %d", offset)
 	}
-	if offset := unsafe.Offsetof(tcControl{}.FakeIPIPv6Mask); offset != 54 {
-		t.Fatalf("unexpected TC IPv6 FakeIP mask offset: %d", offset)
+	if offset := unsafe.Offsetof(tcControl{}.NetworkGeneration); offset != 28 {
+		t.Fatalf("unexpected TC network generation offset: %d", offset)
+	}
+	if offset := unsafe.Offsetof(tcControl{}.Reserved); offset != 30 {
+		t.Fatalf("unexpected TC control reserved offset: %d", offset)
 	}
 	if size := unsafe.Sizeof(tcAssignKey{}); size != 44 {
 		t.Fatalf("unexpected TC assignment key size: %d", size)

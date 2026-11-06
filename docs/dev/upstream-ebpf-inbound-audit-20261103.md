@@ -819,3 +819,90 @@ sockmap、未命中再回落原 tuple 查找，用户态 `RegisterUDPListener` +
   程序的接管逻辑（第 12.2 节）以及 UDP cleanup 只能走 LRU 降级。
 - TC 侧的 `sk_assign` 成本是内核行为，我们能改的只有"少 assign 一次"（比如同一 flow 的后续包走更快
   的短路径），但 UDP 每个包都是独立报文，没有可跳过的依据。
+## 16. bypass_exclude 支持每个地址族多个前缀（2026-11-06）
+
+### 16.1 上游的做法
+
+上游 `sing-ebpf` 的 `native/force_intercept_policy.h` 把"强制接管"实现成 LPM trie
+（`_force4` / `_force6`），FakeIP 范围与 `bypass_exclude` 前缀都作为条目写进去，
+所以一个地址族天然可以有很多条。`v1.0.0-beta.1` 的 `docs/configuration/inbound/ebpf.zh.md`
+把 `shared.bypass_exclude` 的说明从"每个地址族最多接受一个前缀"改成了"支持配置多个
+IPv4 和 IPv6 前缀"，就是这个能力的对外声明。
+
+我们移植的时候把这条能力丢了：内核侧沿用控制块里的四个定长字段
+（`fakeip_ipv4_prefix/mask` + `fakeip_ipv6_prefix/mask`），用户态因此在
+`protocol/ebpf/config.go` 的 `normalizeBypassExclude` 里主动拒绝第二个同族前缀
+（`accepts at most one <family> prefix`），`resolveBypassExclude` 还进一步要求
+local 与 shared 的同族前缀必须完全一致。这三处限制是同一个内核约束的三层投影。
+
+### 16.2 改动
+
+内核 `common/ebpf/native/tc.bpf.c`：
+
+| 位置 | 改动 |
+| --- | --- |
+| `struct sb_tc_control` | 去掉四个前缀/掩码字段，补显式尾填充 `reserved[2]`，72 → 32 字节 |
+| 静态断言 | `sizeof == 32`、新增 `network_generation == 28` 与 `reserved == 30`，删掉 `fakeip_ipv6_mask == 54` |
+| flags | bit 10/11 由 `SB_TC_FLAG_FAKEIP_IPV4/6` 改名 `SB_TC_FLAG_MUST_INTERCEPT_IPV4/6`，语义从"这个前缀就是它"变成"这个地址族有强制接管集合" |
+| map | 新增 `tc_must_intercept_ipv4/ipv6`（LPM_TRIE，1024 条） |
+| 判定 | `must_intercept_fakeip()` 换成 `must_intercept_destination()`：flag 置位时做一次 LPM lookup |
+
+用户态：
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/ebpf/policy_compiler.go` | `PolicyConfig.ForceInterceptIPv4/6` 与 `CompiledPolicy.mustInterceptIPv4/6` 改为 `[]netip.Prefix`；`compileForceInterceptPrefix` 换成 `compileMustInterceptPrefixes`，把 FakeIP 范围与 `bypass_exclude` 并成一个集合（去重、掩码归一、容量上限 1024）；新增 `firstPrefix` |
+| `common/ebpf/tc.go` | `tcControl` 去掉四个字段、补 `Reserved [2]byte`；新增两条 map override（内核名 `sb_tc_must4` / `sb_tc_must6`，避开 15 字节限制）；`installMustInterceptEntries` 在 `PrepareTC` 里把集合写进 trie（backend 尚未发布，不需要锁）；`tcFlags` 改用 `len(...) > 0` |
+| `common/ebpf/cgroup_backend.go`、`shared_network_backend.go` | 单槽数据面改用 `firstPrefix(...)` |
+| `protocol/ebpf/config.go` | `normalizeBypassExclude` 返回两个切片（仍做 IPv4-mapped 转换与安全前缀重叠检查）；`resolveBypassExclude` 改为并集去重，不再要求两侧一致；`validateBypassExcludeFakeIP` 换成 `validateMustInterceptCapacity` |
+| `protocol/ebpf/inbound.go`、`fakeip.go` | `bypassExcludeIPv4/6` 改切片，重定向前缀排除集合随之接收全部条目 |
+| `docs/configuration/inbound/ebpf.{md,zh.md}` | 说明改为多前缀，并写清单槽数据面的限制 |
+
+### 16.3 为什么单槽数据面报错而不是只接管第一条
+
+`cgroup` 本地数据面与 shared 数据面仍然每个地址族只放一个前缀（`cgroup_abi` /
+`shared_network_abi` 的 `FakeIPIPv4Prefix` 等字段）。这两个控制块不在本次改动范围内：
+它们的内核对象没有对应的 LPM 表，加表要连带重编 `cgroup.bpf.c` / `shared_network.bpf.c`，
+而设备上用的数据面是 `tc`。
+
+所以 `validateMustInterceptCapacity` 在启用这两个数据面、且某地址族需要多于一个前缀时
+直接报错并指出是哪个数据面。截断成"只接管第一个"会让其余 `bypass_exclude` 条目看起来
+配置成功却完全无效，这种失败在流量上表现为"某些本该被接管的目标直连出去了"，很难排查。
+
+### 16.4 与旧行为的三处差异（有意的）
+
+1. 同一地址族可以配多个 `bypass_exclude` 前缀（TC 数据面）。
+2. FakeIP 范围与 `bypass_exclude` 可以同时配在同一地址族：两者含义都是"无条件接管"，
+   合并进同一个集合是正确语义。旧代码在 `compileForceInterceptPrefix` 里报
+   `conflicts with FakeIP range`，那是单槽时代的限制。
+3. local 与 shared 的同族前缀不再要求一致，按并集处理——TC 分类器对两条路径读的就是
+   同一张 trie，要求两侧相同只是为了迁就单槽。
+
+三、四条对 `cgroup` / shared 数据面仍然按单槽报错（差异仅在于错误来源从"前缀冲突"
+变成"数据面容量"），所以现有使用 cgroup 数据面的配置行为不变。
+
+### 16.5 验证
+
+| 项目 | 结果 |
+| --- | --- |
+| `clang` 重编 `tc.bpf.c` | 通过；`tc_bpfel.o` 113,288 B、`tc_bpfeb.o` 113,552 B（比上一版小约 9.7 KB：内联的前缀匹配代码随控制块字段一起删掉了） |
+| 对象布局（`LoadCollectionSpec`） | `tc_control Array key=4 value=32 max=1`；`tc_must_intercept_ipv4 LPMTrie key=8 value=1 max=1024`；`tc_must_intercept_ipv6 LPMTrie key=20 value=1 max=1024`；`tc_assignment` 不变；程序数仍 13，故 `tc_bpfel.go` / `tc_bpfeb.go` 无需重新生成 |
+| Go/C ABI | `tcControl` 32 字节，偏移 8/12/16/28/30 与内核静态断言逐一对应 |
+| `manifest.txt` | 三条 sha256 更新，15 条 native 与 2 个 .o 全部比对 0 不符 |
+| `go build`（linux/amd64、linux/arm64、linux/arm，`with_ebpf`） | exit=0 |
+| `go vet` / `golangci-lint run`（linux/arm64） | 0 issues |
+| `go test -c`（`common/ebpf`、`protocol/ebpf`） | 通过 |
+| Windows 无 tag build 与 `go test ./daemon ./adapter` | 通过 |
+
+### 16.6 还没做的
+
+真机验证没做。提交时设备断开（`adb devices` 为空），二进制与测试程序都已编好
+（`device/sb-tc` 85,563,776 B、`device/ebpf.test` 17,425,912 B），补验时用
+`local.bypass_exclude: ["100.64.0.0/10", "10.20.0.0/16"]` 启动 TC 数据面，确认
+①启动不再报 "accepts at most one"；②`api ebpf --deep` 的 `kernelRuntime` 里
+`sb_tc_must4` 有 2 条条目；③`data_plane: cgroup` 配同样两个前缀时按预期报错。
+
+需要留意的是：本次改动的内核对象与用户态都只经交叉编译、`go vet`、`golangci-lint`
+与对象布局检查，`common/ebpf` / `protocol/ebpf` 的单元测试是 `linux || android`
+构建标签，Windows 上无法运行（`go test -c` 只证明能编译）。因此这一版的多前缀写入
+路径没有在任何内核上真正执行过一次。

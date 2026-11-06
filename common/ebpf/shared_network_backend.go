@@ -87,8 +87,8 @@ func PrepareSharedNetwork(cgroupBackend *CgroupBackend, config SharedNetworkConf
 	policy := config.Policy
 	fakeIPIPv4 := policy.fakeIPIPv4
 	fakeIPIPv6 := policy.fakeIPIPv6
-	forceInterceptIPv4 := policy.forceInterceptIPv4
-	forceInterceptIPv6 := policy.forceInterceptIPv6
+	forceInterceptIPv4 := firstPrefix(policy.mustInterceptIPv4)
+	forceInterceptIPv6 := firstPrefix(policy.mustInterceptIPv6)
 	for name, capacity := range map[string]uint32{
 		"shared-network proxy":  config.MapCapacity.Proxy,
 		"shared-network bypass": config.MapCapacity.Bypass,
