@@ -73,10 +73,12 @@ func TestTCLocalProgramsUseSocketCookieHelper(t *testing.T) {
 
 func TestEmbeddedTCObjectLayout(t *testing.T) {
 	testEmbeddedObjectLayout(t, loadTC, map[string]objectMapLayout{
-		"tc_control":             {4, 72},
+		"tc_control":             {4, 32},
 		"tc_listener_sockets":    {4, 4},
-		"tc_assignment":          {44, 24},
+		"tc_assignment":          {44, 32},
 		"tc_self_sockets":        {8, 4},
+		"tc_must_intercept_ipv4": {8, 1},
+		"tc_must_intercept_ipv6": {20, 1},
 		"tc_uid_policy":          {8, 1},
 		"tc_bypass_ipv4":         {8, 1},
 		"tc_bypass_ipv6":         {20, 1},
