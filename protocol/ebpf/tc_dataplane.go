@@ -485,12 +485,16 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 	d.attachments = attachments
 	interfaceChanged := (localInterface != "" && localInterface != d.localInterface) ||
 		!slices.Equal(d.sharedInterfaces, sharedInterfaces)
+	// Nothing was intercepted before, so nothing carries a stamp from the old
+	// topology: the first reconcile of a hand-built data plane has nothing to
+	// retire and must not need the kernel to accept a new generation.
+	previouslyIntercepting := d.localInterface != "" || len(d.sharedInterfaces) > 0
 	if localInterface != "" {
 		d.localInterface = localInterface
 	}
 	d.sharedInterfaces = slices.Clone(sharedInterfaces)
 	d.hostAddresses = slices.Clone(hostAddresses)
-	if interfaceChanged {
+	if interfaceChanged && previouslyIntercepting {
 		// Assignments written for the interface set this call replaced name an
 		// interface index and a delivery path that no longer apply. Moving the
 		// generation retires them on the next sweep instead of leaving the kernel
