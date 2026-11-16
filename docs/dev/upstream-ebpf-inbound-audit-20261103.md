@@ -906,3 +906,44 @@ local 与 shared 的同族前缀必须完全一致。这三处限制是同一个
 与对象布局检查，`common/ebpf` / `protocol/ebpf` 的单元测试是 `linux || android`
 构建标签，Windows 上无法运行（`go test -c` 只证明能编译）。因此这一版的多前缀写入
 路径没有在任何内核上真正执行过一次。
+## 17. self-bypass 的注册时机与注销（2026-11-16）
+
+上游在 `ed2bdc8f` 之后又推进了 12 个提交（HEAD `e74cfa22`，模块到 `v0.1.0-beta.2`），主体是把 eBPF self-bypass 的生命周期拆开。这里只跟两件与数据面正确性直接相关的事，其余（box 级资源回收 registry、诊断字段、文件拆分）单列在 17.4。
+
+### 17.1 包套接字改为 bind 成功后注册
+
+`net.ListenConfig.Control` 里的回调在 **bind 之前**执行，所以 bind 失败时会发生两件坏事：cookie 已经写进 `self_bypass` 表，而 socket 随即被关闭——表里留下一条指向死 fd 的条目，只能等内核 LRU 把它挤掉。
+
+修法（`common/dialer/default.go`、`protocol/tailscale/system_binding.go`）：
+
+- 监听侧的 self-bypass 从 control 链里移除，只保留拨号侧——流式套接字在拿到 `net.Conn` 时已经连上了，没有"bind 之前"这个窗口。
+- 包套接字改为 `ListenPacket` 返回后调 `RegisterEBPFSelfBypassPacketConn(networkManager, conn)`；失败则关闭 socket 并把错误往上返（`trackPacketConn` 与 tailscale 的 `listenPacket` 各一处）。
+- 注册是幂等的 map 写入，所以 control 链上残留的路径不会造成重复条目。
+- `udpPacketConn`（零读修正的包装层）补了 `SyscallConn()`：注册要从包装层下面摸到原始 fd，否则包装一盖就再也找不到 socket。
+
+### 17.2 监听套接字关闭时注销
+
+`protocol/ebpf/inbound_connection.go` 的 `socketControl` 一直是从用户态给自家监听套接字注册 self-bypass 的，但 `close()` 只关 socket、不注销 cookie。新增：
+
+- `internalListenerSet.closeWithCleanup(cleanup func(*listener.Listener) error)`——先对每个 listener 调 cleanup，再关 socket（关掉之后就拿不到 fd 了）；错误用 `E.Errors` 累加，不因第一个失败中断。
+- `(*Inbound).unregisterListenerSockets(current *listener.Listener)`——按 `socketControl` 同一门禁（`i.preMatch || i.selfBypass == nil` 就跳过），对 TCP/UDP 两个套接字各调一次 `UnregisterSocket`。类型断言用 `any` + `conn.(syscall.Conn)`，因为 `listener.Listener.TCPListener()` 返回的是 `net.Listener` 接口。
+- `closeListeners()` 改为 `closeWithCleanup(i.unregisterListenerSockets)`。
+
+### 17.3 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `go build -tags with_ebpf,with_tailscale`（linux/arm64、linux/arm、linux/386、android/arm64） | 全部 OK |
+| `go build`（windows/amd64、darwin/arm64，无 tag 走 stub） | OK |
+| `go vet -tags with_ebpf,with_tailscale`（linux/arm64） | 0 报错 |
+| `go test -tags with_ebpf,with_tailscale -c ./protocol/ebpf/` | 编译通过 |
+| `golangci-lint run`（common/dialer、protocol/ebpf、protocol/tailscale） | 0 issues |
+
+**没有真机验证**：`adb devices` 仍为空，手机未接入。这两项的行为差异（bind 失败不留脏 cookie、关闭时释放 cookie）在设备上不易直接观测，需要在有设备时用 `api ebpf --deep` 看 `selfBypass` 相关计数与 `/sys/fs/bpf` 条目收敛。
+
+### 17.4 还没跟的部分
+
+- **box 级资源回收**（上游 `4c60a452` #15、`02dd7171`、`e74cfa22`）：新增 `internal/ebpfcleanup` registry 与 `box_ebpf_cleanup.go`，处理"box 起了没成功"、"关闭失败"、"跨 box 重试遗留清理"。这是独立的一层，动 `box.go` 的创建/关闭路径，影响面比 self-bypass 大，未做。
+- **诊断字段**：上游 `30fa31a6`/`eff46141` 新增 self-bypass 生命周期与存储降级字段（proto +adapter +daemon 三处），schema 仍在 20；我们 19，未跟。
+- **socket-local TC self-bypass**（`e20a6e8f`）：上游让 TC 数据面也能用 socket-local 存储；我们的 `selfBypass` 只有 cgroup 挂钩与用户态注册两种模式，未跟。
+- **文件拆分**（diagnostics/lifecycle/inbound 拆细）：纯结构整理，不跟。

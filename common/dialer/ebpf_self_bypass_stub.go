@@ -19,6 +19,10 @@ func AppendEBPFSelfBypass(_ adapter.NetworkManager, controlFunc control.Func) co
 	return controlFunc
 }
 
+func RegisterEBPFSelfBypassPacketConn(_ adapter.NetworkManager, _ net.PacketConn) error {
+	return nil
+}
+
 func EBPFSelfBypassCleanup(_ adapter.NetworkManager, _ syscall.RawConn) func() {
 	return nil
 }
@@ -29,8 +33,4 @@ func bindEBPFSelfBypassConnLifecycle(_ adapter.NetworkManager, conn net.Conn) ne
 
 func bindEBPFSelfBypassPacketConnLifecycle(_ adapter.NetworkManager, conn net.PacketConn) net.PacketConn {
 	return conn
-}
-
-func appendEBPFSelfBypass(_ adapter.NetworkManager, dialerControl, listenerControl control.Func) (control.Func, control.Func) {
-	return dialerControl, listenerControl
 }

@@ -82,12 +82,20 @@ func newSystemBinding(ctx context.Context, logger logger.ContextLogger) (systemB
 	return systemBinding{
 		control: control.Append(bindFunc, selfBypassControl),
 		listenPacket: func(ctx context.Context, networkName string, address string) (nettype.PacketConn, error) {
+			// selfBypassControl is deliberately absent here: a listen control
+			// callback runs before bind, so a failed bind would leave a cookie
+			// behind that nothing can unregister. The packet socket is
+			// registered below, once ListenPacket has succeeded.
 			listenConfig := net.ListenConfig{
-				Control: control.Append(control.Append(bindFunc, selfBypassControl), control.DisableUDPNetReset()),
+				Control: control.Append(bindFunc, control.DisableUDPNetReset()),
 			}
 			packetConn, err := listenConfig.ListenPacket(ctx, networkName, address)
 			if err != nil {
 				return nil, err
+			}
+			if registerErr := dialer.RegisterEBPFSelfBypassPacketConn(network, packetConn); registerErr != nil {
+				_ = packetConn.Close()
+				return nil, registerErr
 			}
 			udpConn := packetConn.(*net.UDPConn)
 			rawConn, rawConnErr := udpConn.SyscallConn()

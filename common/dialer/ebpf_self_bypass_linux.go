@@ -84,6 +84,30 @@ func AppendEBPFSelfBypass(networkManager adapter.NetworkManager, controlFunc con
 	return control.Append(controlFunc, selfBypassFunc)
 }
 
+// RegisterEBPFSelfBypassPacketConn records a packet socket that has already
+// been bound. Callers must invoke this after ListenPacket succeeds: a
+// net.ListenConfig control callback runs before bind, so a failed bind leaves
+// a cookie behind that nothing can unregister. Registration is an idempotent
+// map write, so calling it for a socket the control chain already covered is
+// harmless.
+func RegisterEBPFSelfBypassPacketConn(networkManager adapter.NetworkManager, conn net.PacketConn) error {
+	provider, loaded := networkManager.(interface {
+		EBPFSelfBypass() *commonEBPF.SelfBypass
+	})
+	if !loaded || provider.EBPFSelfBypass() == nil {
+		return nil
+	}
+	syscallConn, loaded := conn.(syscall.Conn)
+	if !loaded {
+		return nil
+	}
+	rawConn, err := syscallConn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return provider.EBPFSelfBypass().RegisterSocket(rawConn)
+}
+
 func EBPFSelfBypassCleanup(networkManager adapter.NetworkManager, rawConn syscall.RawConn) func() {
 	provider, loaded := networkManager.(interface {
 		EBPFSelfBypass() *commonEBPF.SelfBypass
@@ -200,8 +224,4 @@ func bindEBPFSelfBypassPacketConnLifecycle(networkManager adapter.NetworkManager
 		return conn
 	}
 	return newSelfBypassPacketConn(conn, cleanup, rawConn)
-}
-
-func appendEBPFSelfBypass(networkManager adapter.NetworkManager, dialerControl, listenerControl control.Func) (control.Func, control.Func) {
-	return AppendEBPFSelfBypass(networkManager, dialerControl), AppendEBPFSelfBypass(networkManager, listenerControl)
 }

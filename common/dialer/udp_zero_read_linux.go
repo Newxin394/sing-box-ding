@@ -7,6 +7,8 @@ import (
 	"os"
 	"syscall"
 
+	E "github.com/sagernet/sing/common/exceptions"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -37,6 +39,16 @@ func (c *udpConn) Read(b []byte) (int, error) {
 // udpPacketConn applies the same rule to an unconnected packet connection.
 type udpPacketConn struct {
 	net.PacketConn
+}
+
+// SyscallConn keeps the raw socket reachable through this wrapper: eBPF
+// self-bypass registers packet sockets after ListenPacket succeeds, and the
+// registration can only find the socket through syscall.Conn.
+func (c *udpPacketConn) SyscallConn() (syscall.RawConn, error) {
+	if syscallConn, loaded := c.PacketConn.(syscall.Conn); loaded {
+		return syscallConn.SyscallConn()
+	}
+	return nil, E.New("packet connection does not expose its raw socket")
 }
 
 func (c *udpPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {

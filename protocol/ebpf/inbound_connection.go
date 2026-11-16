@@ -13,6 +13,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
+	"github.com/sagernet/sing-box/common/listener"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/control"
@@ -24,7 +25,37 @@ import (
 )
 
 func (i *Inbound) closeListeners() error {
-	return i.listeners.close()
+	return i.listeners.closeWithCleanup(i.unregisterListenerSockets)
+}
+
+// unregisterListenerSockets releases the self-bypass cookies this inbound
+// registered for its own listeners. socketControl registers them from
+// userspace, so closing the socket alone would leave the cookie pointing at a
+// dead fd until the kernel's LRU drops it.
+func (i *Inbound) unregisterListenerSockets(current *listener.Listener) error {
+	if i.preMatch || i.selfBypass == nil {
+		return nil
+	}
+	var unregisterErr error
+	unregister := func(conn any) {
+		syscallConn, loaded := conn.(syscall.Conn)
+		if !loaded {
+			return
+		}
+		rawConn, err := syscallConn.SyscallConn()
+		if err != nil {
+			unregisterErr = E.Errors(unregisterErr, err)
+			return
+		}
+		unregisterErr = E.Errors(unregisterErr, i.selfBypass.UnregisterSocket(rawConn))
+	}
+	if tcpListener := current.TCPListener(); tcpListener != nil {
+		unregister(tcpListener)
+	}
+	if udpConn := current.UDPConn(); udpConn != nil {
+		unregister(udpConn)
+	}
+	return unregisterErr
 }
 
 func (i *Inbound) NewConnection(

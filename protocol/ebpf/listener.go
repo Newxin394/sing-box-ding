@@ -153,6 +153,13 @@ func (s *internalListenerSet) start(
 }
 
 func (s *internalListenerSet) close() error {
+	return s.closeWithCleanup(nil)
+}
+
+// closeWithCleanup closes every listener, invoking cleanup before each socket
+// goes away so owners registered by userspace (eBPF self-bypass cookies) can be
+// released while the raw socket is still open.
+func (s *internalListenerSet) closeWithCleanup(cleanup func(*listener.Listener) error) error {
 	s.access.Lock()
 	listeners := []*listener.Listener{s.tcp4, s.tcp6, s.udp4, s.udp6}
 	s.tcp4 = nil
@@ -166,6 +173,9 @@ func (s *internalListenerSet) close() error {
 	var closeErr error
 	for _, current := range listeners {
 		if current != nil {
+			if cleanup != nil {
+				closeErr = E.Errors(closeErr, cleanup(current))
+			}
 			closeErr = E.Errors(closeErr, common.Close(current))
 		}
 	}

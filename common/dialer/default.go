@@ -141,7 +141,12 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		markFunc := networkManager.AutoRedirectOutputMarkFunc()
 		dialer.Control = control.Append(dialer.Control, markFunc)
 		listenConfig.Control = control.Append(listenConfig.Control, markFunc)
-		dialer.Control, listenConfig.Control = appendEBPFSelfBypass(networkManager, dialer.Control, listenConfig.Control)
+		// The dialer half stays on the control chain: a stream socket is already
+		// connected by the time anyone can look at it. The listener half does
+		// not, because a net.ListenConfig control callback runs before bind and
+		// cannot unregister a cookie when the bind fails; packet sockets are
+		// registered after ListenPacket returns instead.
+		dialer.Control = AppendEBPFSelfBypass(networkManager, dialer.Control)
 	}
 	if options.ReuseAddr {
 		listenConfig.Control = control.Append(listenConfig.Control, control.ReuseAddr())
@@ -464,6 +469,10 @@ func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, 
 func (d *DefaultDialer) trackPacketConn(ctx context.Context, destination M.Socksaddr, conn net.PacketConn, err error) (net.PacketConn, error) {
 	if err != nil {
 		return conn, err
+	}
+	if registerErr := RegisterEBPFSelfBypassPacketConn(d.networkManager, conn); registerErr != nil {
+		_ = conn.Close()
+		return nil, registerErr
 	}
 	conn = bindEBPFSelfBypassPacketConnLifecycle(d.networkManager, conn)
 	if d.connectionManager != nil {
