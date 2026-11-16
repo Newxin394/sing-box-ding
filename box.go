@@ -123,7 +123,7 @@ func Context(
 	return ctx
 }
 
-func New(options Options) (*Box, error) {
+func New(options Options) (instance *Box, err error) {
 	createdAt := time.Now()
 	reloadChan := make(chan struct{}, 1)
 	ctx := options.Context
@@ -166,7 +166,7 @@ func New(options Options) (*Box, error) {
 	experimentalOptions := common.PtrValueOrDefault(options.Experimental)
 	debugOptions := common.PtrValueOrDefault(experimentalOptions.Debug)
 	ctx = group.ContextWithHealthCheckConcurrency(ctx, experimentalOptions.HealthCheckConcurrency)
-	err := checkDebugOptions(debugOptions)
+	err = checkDebugOptions(debugOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +259,18 @@ func New(options Options) (*Box, error) {
 	if err = dialer.PrepareEBPFSelfBypass(networkManager, options.Inbounds); err != nil {
 		return nil, E.Cause(err, "prepare eBPF self-bypass")
 	}
+	// A box that fails to build must not leave the prepared self-bypass
+	// behind: dials made during construction may already have created its
+	// kernel map.
+	selfBypassOwnerTransferred := false
+	defer func() {
+		if selfBypassOwnerTransferred {
+			return
+		}
+		if closeErr := dialer.CloseUnclaimedEBPFSelfBypass(networkManager); closeErr != nil {
+			err = E.Errors(err, E.Cause(closeErr, "rollback eBPF self-bypass"))
+		}
+	}()
 	service.MustRegister[adapter.NetworkManager](ctx, networkManager)
 	// Must register after ConnectionManager: the Apple HTTP engine's proxy bridge reads it from the context when Manager.Start resolves the default client.
 	httpClientManager := httpclient.NewManager(ctx, logFactory.NewLogger("httpclient"), options.HTTPClients, routeOptions.DefaultHTTPClient)
@@ -538,7 +550,7 @@ func New(options Options) (*Box, error) {
 		timeService.TimeService = ntpService
 		internalServices = append(internalServices, adapter.NewLifecycleService(ntpService, "ntp service"))
 	}
-	return &Box{
+	instance = &Box{
 		ctx:                 ctx,
 		network:             networkManager,
 		endpoint:            endpointManager,
@@ -560,7 +572,11 @@ func New(options Options) (*Box, error) {
 		internalService:     internalServices,
 		reloadChan:          reloadChan,
 		done:                make(chan struct{}),
-	}, nil
+	}
+	// From here on the box owns the self-bypass: the defer above only covers a
+	// failed construction.
+	selfBypassOwnerTransferred = true
+	return instance, nil
 }
 
 func (s *Box) PreStart() error {
@@ -602,6 +618,12 @@ func (s *Box) Start() error {
 }
 
 func (s *Box) preStart() error {
+	// This applies to every box, including a replacement configuration without
+	// an eBPF inbound. Do not start new network resources while stale hooks or
+	// routes from a previous box remain.
+	if err := retryRetainedEBPFResources(); err != nil {
+		return err
+	}
 	monitor := taskmonitor.New(s.logger, C.StartTimeout)
 	monitor.Start("start logger")
 	err := s.logFactory.Start()
@@ -713,6 +735,15 @@ func (s *Box) Close() error {
 		})
 		done()
 	}
+	// Runs after the inbounds, which claim the tracker during startup: release
+	// a prepared self-bypass that no inbound claimed, then retry whatever a
+	// failed eBPF close kept back so the next box starts on a clean kernel.
+	err = E.Append(err, dialer.CloseUnclaimedEBPFSelfBypass(s.network), func(err error) error {
+		return E.Cause(err, "close unclaimed eBPF self-bypass")
+	})
+	err = E.Append(err, retryRetainedEBPFResourcesOnClose(), func(err error) error {
+		return E.Cause(err, "retry retained eBPF resources")
+	})
 	if s.httpClientService != nil {
 		s.logger.Trace("close ", s.httpClientService.Name())
 		startTime := time.Now()

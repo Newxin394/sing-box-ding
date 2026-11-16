@@ -947,3 +947,64 @@ local 与 shared 的同族前缀必须完全一致。这三处限制是同一个
 - **诊断字段**：上游 `30fa31a6`/`eff46141` 新增 self-bypass 生命周期与存储降级字段（proto +adapter +daemon 三处），schema 仍在 20；我们 19，未跟。
 - **socket-local TC self-bypass**（`e20a6e8f`）：上游让 TC 数据面也能用 socket-local 存储；我们的 `selfBypass` 只有 cgroup 挂钩与用户态注册两种模式，未跟。
 - **文件拆分**（diagnostics/lifecycle/inbound 拆细）：纯结构整理，不跟。
+
+## 18. box 级 eBPF 资源回收（2026-11-16）
+
+第 17.4 节把这一层列为"未做"。这一节把它做掉：上游 `4c60a452`（#15）、`02dd7171`、`e74cfa22` 三个提交处理的是同一类问题——**创建与关闭的缝隙里漏掉的 eBPF 资源**。
+
+### 18.1 漏在哪里
+
+三种情形，共同点是"没人负责收"：
+
+| 情形 | 漏掉的东西 |
+| --- | --- |
+| box 建好了但没启动（典型：配置检查），然后关闭 | `NewInbound` 里为 dial 准备好的 self-bypass；构造期就已经建立的 UDP NAT 清理 goroutine |
+| box 创建中途失败返回错误 | 同上，而且连 Box 对象都没有，`Box.Close` 根本不会被调用 |
+| `Box.Close` 时某次 detach 失败 | 后端、策略路由、self-bypass 都被"留着等下次关"，但 `Box.Close` 已经跑完了；下一次 reload 的新 box 撞上旧 hook / 旧路由 |
+
+第三种最隐蔽：`Close` 把资源留在原地是**故意的**（失败就别硬拆，留着下次重试），问题在于"下次"从来没有发生。
+
+### 18.2 改了什么
+
+| 位置 | 改动 |
+| --- | --- |
+| 新增 `internal/ebpfcleanup/registry.go` | 进程级可重试清理登记表：`New/Retain/Release/Contains/Retry`，`Retry` 先拍快照再在锁外逐个调用（回调里会反过来调 `Release`，持锁会自锁）；单个失败不影响其它，错误聚合返回 |
+| 新增 `internal/ebpfcleanup/registry_test.go` | 4 个用例：重复 `Retain` 只跑一次、`Release` 之后不再重试、失败条目**保留**在表里等下次、nil 安全 |
+| 新增 `box_ebpf_cleanup.go` + stub | `retryRetainedEBPFResources()`（一次）与 `retryRetainedEBPFResourcesOnClose()`（3 次 × 25ms 退避）；stub 供非 eBPF 构建 |
+| `route/network_ebpf.go` | `ebpfSelfBypassState` 加 `access sync.Mutex` 与 `claimed bool`；新增 `ClaimEBPFSelfBypass`（inbound 接管）与 `CloseUnclaimedEBPFSelfBypass`（没人接管就关掉，dials 可能已经建过 map）；`ClearEBPFSelfBypass` 走同一把锁 |
+| `common/dialer/ebpf_self_bypass_{linux,stub}.go` | 新增 `CloseUnclaimedEBPFSelfBypass(networkManager)`，鸭子类型取 `CloseUnclaimedEBPFSelfBypass() error` |
+| `protocol/ebpf/lifecycle_retry.go`（新） | `retainForRetry/releaseRetained`、`retainedCleanupEntry()`（`sync.Once` 建一条 `ebpfcleanup.New(i.Close)`）、`retryRetainedInbounds()`、`retainsResources()`、`claimSelfBypass()` |
+| `protocol/ebpf/inbound.go` | 加 `retainedCleanupOnce sync.Once` 与 `retainedCleanup *ebpfcleanup.Entry` |
+| `protocol/ebpf/inbound_lifecycle.go` | `Start` 的 `Initialize` 阶段先 `retryRetainedInbounds()`（旧 hook 拆干净再挂新的）、再 `claimSelfBypass()`**（放在 preMatch 短路之前**——preMatch 入站也在用 dials，不接管就会被 box 当"没人要"关掉）；`Close` 先 `retainForRetry(i)` 再关，关完如果 `!retainsResources()` 才 `releaseRetained(i)` |
+| `box.go` | `New` 改具名返回值；`PrepareEBPFSelfBypass` 成功后注册 defer：构造失败就 `CloseUnclaimedEBPFSelfBypass` 回滚（并把回滚错误并进返回值）；`preStart` 开头 `retryRetainedEBPFResources()`；`Close` 在 inbounds 之后（网络管理器之后）调 `CloseUnclaimedEBPFSelfBypass` 与 `retryRetainedEBPFResourcesOnClose` |
+
+顺序上的两个要点：**claim 必须在 inbound 自己要用的那一刻发生**，早了会把 box 还要用的 tracker 抢过来，晚了会被 box 当无主关掉；**retry 必须在挂新 hook 之前**，否则新旧的策略路由会在同一张表上打架。
+
+### 18.3 与上游的差别
+
+- 上游的接管点是 `adapter.Scope.Add(i.Close)`（`Start(stage, scope)` 两参），我们的 `Start` 是单参、没有 scope，所以接管点只能放在 `Initialize` 阶段里；效果相同，代价是"inbound 注册了清理但还没 Initialize"这个窗口在我们这里不存在（本来也没有 scope 兜底）。
+- 上游 `retainsResources()` 还检查 `tcNamespace`、`processTrackerRollback`——我们没有 netns 隔离投递，也没有 rollback tracker 字段，这两项去掉了。
+- **UDP NAT 清理 goroutine 的惰性启动没做**。上游把 `newUDPNATService` 拆成"构造"和 `start()`，让没启动的 inbound 不留下 goroutine。我们这边 `udpNATService` 在 `NewInbound` 里起 goroutine，要改就得同时动构造点与 `startInbound` 的调用序，而这一项只影响"建了不启动"的短命对象（进程很快退出，goroutine 随之消失），收益比风险小，留作已知差异。
+- 上游的 `ebpfcleanup` 是 `internal/` 包但被 `route`、`protocol/ebpf`、`box` 三处引用；我们的引用面相同，`internal` 在同一个 module 内可见，不需要额外导出。
+
+### 18.4 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| `go test ./internal/ebpfcleanup/`（Windows 原生） | ok，4 个用例 |
+| `go test ./route/ ./daemon/`（Windows 原生，无 tag 走 stub） | ok |
+| `go build -tags with_ebpf ./...`（linux/arm64） | OK（只剩既有 `oomprofile` linkname 报错，与本改动无关） |
+| `go build ./...`（windows/amd64，无 tag） | OK |
+| `go vet -tags with_ebpf`（protocol/ebpf、route、common/dialer、internal/ebpfcleanup） | 0 报错 |
+| `go test -tags with_ebpf -c ./protocol/ebpf/`（linux/arm64） | 编译通过，17.36 MB |
+| `golangci-lint run`（4 个改动包 + 根包，linux/arm64 与 windows） | 0 issues |
+| android/arm64 全 tag 集二进制 | 85,592,880 B |
+
+**没有真机验证**：`adb devices` 仍为空。这一层的正确性主要靠"创建失败/关闭失败"的路径，属于异常路径，设备上要刻意制造 detach 失败才看得到，留待有设备时用 `api ebpf --deep` 与 `/sys/fs/bpf` 条目收敛观察。
+
+### 18.5 仍然没跟
+
+- **self-bypass 生命周期诊断字段**（上游 `30fa31a6`、`eff46141`）：proto + adapter + daemon 三处，schema 上游 20 / 我们 19。
+- **socket-local TC self-bypass**（`e20a6e8f`）。
+- **UDP NAT 惰性启动**（见 18.3）。
+- 文件拆分（diagnostics / lifecycle / inbound 拆细）仍是纯结构整理，不跟。

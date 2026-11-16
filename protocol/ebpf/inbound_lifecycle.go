@@ -15,6 +15,17 @@ import (
 func (i *Inbound) Start(stage adapter.StartStage) error {
 	switch stage {
 	case adapter.StartStateInitialize:
+		// Release what a previous inbound kept back before taking new hooks or
+		// routes: a stale detach and the new attachment would collide.
+		if err := retryRetainedInbounds(); err != nil {
+			return err
+		}
+		// Take the prepared self-bypass over from the box: from here on this
+		// inbound owns it, so the box no longer closes it as unclaimed. This
+		// stays outside the pre-match shortcut below, which still uses dials.
+		if err := i.claimSelfBypass(); err != nil {
+			return err
+		}
 		if i.preMatch {
 			return nil
 		}
@@ -545,9 +556,16 @@ func combineStartError(startErr error, cleanupErr error) error {
 }
 
 func (i *Inbound) Close() error {
+	// Record the inbound before releasing anything: a concurrent initialization
+	// then waits for this Close instead of missing resources it retains.
+	retainForRetry(i)
 	i.lifecycleAccess.Lock()
 	defer i.lifecycleAccess.Unlock()
-	return i.closeResources()
+	err := i.closeResources()
+	if !i.retainsResources() {
+		releaseRetained(i)
+	}
+	return err
 }
 
 func (i *Inbound) cleanupStartFailure() error {

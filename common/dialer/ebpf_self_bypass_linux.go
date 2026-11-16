@@ -17,6 +17,19 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
+// CloseUnclaimedEBPFSelfBypass releases a prepared self-bypass that no eBPF
+// inbound claimed during initialization. The box calls it when a construction
+// fails and last on Close, after the inbounds had their chance to claim.
+func CloseUnclaimedEBPFSelfBypass(networkManager adapter.NetworkManager) error {
+	closer, loaded := networkManager.(interface {
+		CloseUnclaimedEBPFSelfBypass() error
+	})
+	if !loaded {
+		return nil
+	}
+	return closer.CloseUnclaimedEBPFSelfBypass()
+}
+
 func PrepareEBPFSelfBypass(networkManager adapter.NetworkManager, inbounds []option.Inbound) error {
 	localInstances := 0
 	// The self-bypass table is an LRU hash, so its capacity is preallocated in

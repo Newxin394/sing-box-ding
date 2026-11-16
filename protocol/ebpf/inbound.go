@@ -14,6 +14,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/inbound"
 	commonEBPF "github.com/sagernet/sing-box/common/ebpf"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/internal/ebpfcleanup"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
@@ -54,20 +55,24 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	ctx                      context.Context
-	router                   adapter.Router
-	logger                   log.ContextLogger
-	networkManager           adapter.NetworkManager
-	localEnabled             bool
-	localDataPlane           string
-	cgroupPath               string
-	cgroupBackend            *commonEBPF.CgroupBackend
-	localRoutes              []*localRoute
-	redirectInterfaceRoutes  *localRouteSet
-	redirectIPv4Prefix       netip.Prefix
-	redirectIPv6Prefix       netip.Prefix
-	selfBypass               *commonEBPF.SelfBypass
-	selfBypassCgroup         bool
+	ctx                     context.Context
+	router                  adapter.Router
+	logger                  log.ContextLogger
+	networkManager          adapter.NetworkManager
+	localEnabled            bool
+	localDataPlane          string
+	cgroupPath              string
+	cgroupBackend           *commonEBPF.CgroupBackend
+	localRoutes             []*localRoute
+	redirectInterfaceRoutes *localRouteSet
+	redirectIPv4Prefix      netip.Prefix
+	redirectIPv6Prefix      netip.Prefix
+	selfBypass              *commonEBPF.SelfBypass
+	selfBypassCgroup        bool
+	// retainedCleanup lets a failed Close be retried by the next inbound or by
+	// the box: the cleanup leaves hooks, routes and maps in place on failure.
+	retainedCleanupOnce      sync.Once
+	retainedCleanup          *ebpfcleanup.Entry
 	processTracker           *commonEBPF.ProcessTracker
 	processInfoCache         *processInfoCache
 	usePlatformProcessFinder bool
