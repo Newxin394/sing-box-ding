@@ -91,7 +91,7 @@ func (i *Service) Start(stage adapter.StartStage) error {
 				return E.New("multiple resolved service are not supported")
 			}
 		}
-		systemBus, err := dbus.SystemBus()
+		systemBus, err := dbus.ConnectSystemBus()
 		if err != nil {
 			return err
 		}
@@ -126,7 +126,6 @@ func (i *Service) Close() error {
 		i.network.NetworkMonitor().UnregisterCallback(i.networkUpdateCallback)
 	}
 	if i.systemBus != nil {
-		i.systemBus.ReleaseName("org.freedesktop.resolve1")
 		i.systemBus.Close()
 	}
 	return i.listener.Close()

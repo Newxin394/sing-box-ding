@@ -89,7 +89,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if defaultDialer, isDefaultDialer := common.Cast[*dialer.DefaultDialer](outbound.dialer); isDefaultDialer {
 		outbound.icmpPort = ping.NewPort(ctx, logger, func(destination netip.Addr) control.Func {
 			return defaultDialer.DialerForICMPDestination(destination).Control
-		}, 0)
+		}, C.ICMPTimeout, C.ICMPFlowMax)
 	}
 	return outbound, nil
 }

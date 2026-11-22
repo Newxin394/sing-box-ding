@@ -7,7 +7,10 @@ import (
 
 var URLTestUnifiedDelay = false
 
-const UDPSocketBufferSize = 4 << 20
+const (
+	UDPSocketBufferSize = 4 << 20
+	ICMPFlowMax         = 1024
+)
 
 type InterfaceType uint8
 

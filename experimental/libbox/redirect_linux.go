@@ -114,6 +114,10 @@ func (h *autoRedirectServiceHandler) NewConnectionEx(ctx context.Context, conn n
 	_ = conn.Close()
 }
 
+func (h *autoRedirectServiceHandler) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {
+	// The app-owned redirect listener handles DNS; this service has no DNS router.
+}
+
 type autoRedirectServiceLogger struct {
 	handler AutoRedirectHandler
 }

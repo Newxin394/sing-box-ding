@@ -23,7 +23,25 @@ import (
 )
 
 type ruleSetSnapshot struct {
-	rules []adapter.HeadlessRule
+	rules     []adapter.HeadlessRule
+	ruleCount uint64
+	metadata  adapter.RuleSetMetadata
+}
+
+func (s *ruleSetSnapshot) Match(metadata *adapter.InboundContext) bool {
+	return matchAnyHeadlessRule(s.rules, metadata)
+}
+
+func (s *ruleSetSnapshot) RuleCount() uint64 {
+	return s.ruleCount
+}
+
+func (s *ruleSetSnapshot) String() string {
+	return strings.Join(F.MapToString(s.rules), " ")
+}
+
+func (s *ruleSetSnapshot) mergeableRule() *DefaultHeadlessRule {
+	return mergeableRuleIn(s.rules)
 }
 
 type abstractRuleSet struct {
@@ -56,9 +74,7 @@ func (s *abstractRuleSet) Format() string {
 }
 
 func (s *abstractRuleSet) RuleCount() uint64 {
-	s.access.RLock()
-	defer s.access.RUnlock()
-	return s.ruleCount
+	return s.loadContent().ruleCount
 }
 
 func (s *abstractRuleSet) UpdatedTime() time.Time {
@@ -73,27 +89,28 @@ func (s *abstractRuleSet) setUpdatedTime(updatedAt time.Time) {
 	s.lastUpdated = updatedAt
 }
 
-func (s *abstractRuleSet) loadRules() []adapter.HeadlessRule {
+func (s *abstractRuleSet) loadContent() *ruleSetSnapshot {
 	if snapshot := s.snapshot.Load(); snapshot != nil {
-		return snapshot.rules
+		return snapshot
 	}
 	// Keep zero-value and test-constructed rule sets functional. Production
-	// rule sets publish a snapshot during reloadRules and stay on the lock-free
-	// path above.
+	// rule sets publish immutable content and keep the lock-free read path.
 	s.access.RLock()
-	rules := s.rules
+	content := &ruleSetSnapshot{rules: s.rules, ruleCount: s.ruleCount, metadata: s.metadata}
 	s.access.RUnlock()
-	return rules
+	return content
+}
+
+func (s *abstractRuleSet) loadRules() []adapter.HeadlessRule {
+	return s.loadContent().rules
 }
 
 func (s *abstractRuleSet) String() string {
-	return strings.Join(F.MapToString(s.loadRules()), " ")
+	return s.loadContent().String()
 }
 
 func (s *abstractRuleSet) Metadata() adapter.RuleSetMetadata {
-	s.access.RLock()
-	defer s.access.RUnlock()
-	return s.metadata
+	return s.loadContent().metadata
 }
 
 func (s *abstractRuleSet) ExtractIPSet() []*netipx.IPSet {
@@ -113,7 +130,9 @@ func (s *abstractRuleSet) DecRef() {
 func (s *abstractRuleSet) clearRules() {
 	s.access.Lock()
 	s.rules = nil
-	s.snapshot.Store(nil)
+	s.ruleCount = 0
+	s.metadata = adapter.RuleSetMetadata{}
+	s.snapshot.Store(&ruleSetSnapshot{})
 	s.access.Unlock()
 }
 
@@ -182,7 +201,7 @@ func (s *abstractRuleSet) reloadRules(headlessRules []option.HeadlessRule, ruleS
 	s.rules = rules
 	s.ruleCount = ruleCount
 	s.metadata = metadata
-	s.snapshot.Store(&ruleSetSnapshot{rules: rules})
+	s.snapshot.Store(&ruleSetSnapshot{rules: rules, ruleCount: ruleCount, metadata: metadata})
 	callbacks := s.callbacks.Array()
 	s.access.Unlock()
 	for _, callback := range callbacks {
@@ -192,9 +211,5 @@ func (s *abstractRuleSet) reloadRules(headlessRules []option.HeadlessRule, ruleS
 }
 
 func (s *abstractRuleSet) Match(metadata *adapter.InboundContext) bool {
-	return matchAnyHeadlessRule(s.loadRules(), metadata)
-}
-
-func (s *abstractRuleSet) mergeableRule() *DefaultHeadlessRule {
-	return mergeableRuleIn(s.loadRules())
+	return s.loadContent().Match(metadata)
 }

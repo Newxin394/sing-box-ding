@@ -26,7 +26,7 @@ func TestAbstractRuleSetClearRulesClearsSnapshot(t *testing.T) {
 	ruleSet := &abstractRuleSet{}
 	ruleSet.snapshot.Store(&ruleSetSnapshot{rules: []adapter.HeadlessRule{}})
 	ruleSet.clearRules()
-	if got := ruleSet.snapshot.Load(); got != nil {
-		t.Fatal("clearRules left an active snapshot")
+	if got := ruleSet.snapshot.Load(); got == nil || len(got.rules) != 0 || got.ruleCount != 0 || got.metadata != (adapter.RuleSetMetadata{}) {
+		t.Fatal("clearRules did not publish empty rule-set content")
 	}
 }
