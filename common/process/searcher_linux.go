@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
@@ -202,7 +203,11 @@ func FindProcessInfoByPID(processID uint32, userID uint32, packageManager tun.Pa
 	}
 	processPath, err := os.Readlink(filepath.Join(pathProc, strconv.FormatUint(uint64(processID), 10), "exe"))
 	if err == nil {
-		processInfo.ProcessPaths = []string{processPath}
+		processPath = strings.TrimSuffix(processPath, " (deleted)")
+		// Zygote children share this executable; the UID supplies app identity.
+		if !C.IsAndroid || !strings.HasPrefix(processPath, "/system/bin/app_process") {
+			processInfo.ProcessPaths = []string{processPath}
+		}
 	}
 	completeProcessInfo(processInfo, packageManager)
 	return processInfo, err

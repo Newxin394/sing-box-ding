@@ -3,7 +3,6 @@
 package udpio
 
 import (
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -86,9 +85,10 @@ func (w *oobPacketBatchReadWaiter) InitializeReadWaiter(options N.ReadWaitOption
 			w.messages[index].msgHdr.Control = &w.control[index][0]
 			w.messages[index].msgHdr.SetControllen(len(w.control[index]))
 		}
+		var rawN int
 		for {
 			var errno syscall.Errno
-			w.readN, errno = recvmmsg(int(fd), w.messages, 0)
+			rawN, errno = recvmmsg(int(fd), w.messages, 0)
 			switch errno {
 			case 0:
 				w.readErr = nil
@@ -102,26 +102,38 @@ func (w *oobPacketBatchReadWaiter) InitializeReadWaiter(options N.ReadWaitOption
 					w.releaseBuffers()
 					return false
 				}
+				w.readN = 0
 				w.readErr = os.NewSyscallError("recvmmsg", errno)
+				return true
 			}
 			break
 		}
-		if w.readN == 0 && w.readErr == nil {
+		if rawN == 0 {
+			w.readN = 0
 			w.readErr = io.EOF
+			return true
 		}
-		for index := 0; index < w.readN; index++ {
+		validN := 0
+		for index := 0; index < rawN; index++ {
 			message := &w.messages[index]
 			if message.msgHdr.Flags&(unix.MSG_CTRUNC|unix.MSG_TRUNC) != 0 {
-				w.readErr = errors.New("packet payload or ancillary data was truncated")
-				break
+				w.buffers[index].Release()
+				w.buffers[index] = nil
+				continue
 			}
 			buffer := w.buffers[index]
 			buffer.Truncate(int(message.msgLen))
 			w.options.PostReturn(buffer)
+			if validN != index {
+				w.buffers[validN] = buffer
+				w.buffers[index] = nil
+			}
 			oobLen := min(int(message.msgHdr.Controllen), len(w.control[index]))
-			w.oobs[index] = w.control[index][:oobLen]
-			w.sources[index] = M.SocksaddrFromRawSockaddrAny(&w.names[index])
+			w.oobs[validN] = w.control[index][:oobLen]
+			w.sources[validN] = M.SocksaddrFromRawSockaddrAny(&w.names[index])
+			validN++
 		}
+		w.readN = validN
 		return true
 	}
 	return false
@@ -132,15 +144,22 @@ func (w *oobPacketBatchReadWaiter) WaitReadOOBPackets() (buffers []*buf.Buffer, 
 		return nil, nil, nil, os.ErrInvalid
 	}
 	defer w.releaseBuffers()
-	err = w.rawConn.Read(w.readFunc)
-	if err != nil {
-		return
-	}
-	if w.readErr != nil {
-		if w.readErr == io.EOF {
-			return nil, nil, nil, io.EOF
+	for {
+		err = w.rawConn.Read(w.readFunc)
+		if err != nil {
+			return
 		}
-		return nil, nil, nil, E.Cause(w.readErr, "raw read")
+		if w.readErr != nil {
+			if w.readErr == io.EOF {
+				return nil, nil, nil, io.EOF
+			}
+			return nil, nil, nil, E.Cause(w.readErr, "raw read")
+		}
+		if w.readN > 0 {
+			break
+		}
+		// Re-enter RawConn.Read after a wholly truncated batch so the poller
+		// can observe the socket's deadline even when packets keep arriving.
 	}
 	buffers = make([]*buf.Buffer, w.readN)
 	sources = make([]M.Socksaddr, w.readN)
